@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "ubruckhaus.theme-manager",
+  "name": "Theme Manager",
+  "version": "1.0.0",
+  "author": "Uwe Bruckhaus",
+  "license": "MIT",
+  "description": "One list of every Omarchy theme, user and system: apply a theme, hide it from the list (eye toggle unhides), delete user themes, and manage each theme's wallpapers — add images by drag & drop or by pasting one copied from the web, and delete the ones you no longer want.",
+  "kinds": ["bar-widget"],
+  "keepLoaded": false,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Theme Manager",
+    "description": "Toggle Theme Manager",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
