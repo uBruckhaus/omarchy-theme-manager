@@ -22,7 +22,7 @@ class ParseTests(unittest.TestCase):
     def test_accepts_github_cards(self):
         themes = theme_catalog.parse_catalog(page(
             ("https://github.com/bjarneo/omarchy-ash-theme", "/assets/themes/ash.webp", "Ash"),
-            ("https://github.com/ankur311sudo/black_arch", "/assets/themes/black-arch.webp", "Black Arch")))
+            ("https://github.com/someone/black_arch", "/assets/themes/black-arch.webp", "Black Arch")))
         self.assertEqual([(t.name, t.slug, t.preview) for t in themes],
                          [("Ash", "ash", "ash.webp"), ("Black Arch", "black_arch", "black-arch.webp")])
 
