@@ -9,6 +9,7 @@ system (apply_theme, clipboard) are stubbed.
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -57,6 +58,76 @@ class ViewLayerTest(unittest.TestCase):
             self.applied.append(slug) or True
         self.notices: list[tuple[str, str]] = []
         theme_core.notify = lambda title, body="": self.notices.append((title, body))
+        # Omarchy picker sync: never touch the real cache or menu file.
+        self._orig_switcher = (theme_core.switcher_cache_dir,
+                               theme_core.menu_extension_file,
+                               theme_core.preload_switcher)
+        self.switcher_dir = root / "theme-selector"
+        (self.switcher_dir / "previews").mkdir(parents=True)
+        theme_core.switcher_cache_dir = lambda: self.switcher_dir
+        theme_core.menu_extension_file = lambda: root / "omarchy-menu.jsonc"
+        self.preloads: list[str] = []
+        theme_core.preload_switcher = lambda wrapper: self.preloads.append(str(wrapper))
+        self._orig_settings = theme_core.settings_file
+        theme_core.settings_file = lambda: root / "settings.json"
+        theme_core.save_settings(True)   # most tests cover the Omarchy sync; one turns it off
+        self._orig_refresh = theme_core.refresh_switcher_cache
+        self.refreshes: list[str] = []
+        theme_core.refresh_switcher_cache = lambda wrapper, timeout=60.0: self.refreshes.append(str(wrapper)) or True
+        # Hidden wallpapers, the theme-set hook and the desktop background.
+        self._orig_wallpaper = (theme_core.hidden_wallpapers_file,
+                                theme_core.theme_set_hook_file,
+                                theme_core.set_desktop_background)
+        theme_core.hidden_wallpapers_file = lambda: root / "hidden-wallpapers.json"
+        theme_core.theme_set_hook_file = lambda: root / "hooks" / "90-theme-manager"
+        self.backgrounds_set: list[str] = []
+        theme_core.set_desktop_background = lambda path: self.backgrounds_set.append(str(path)) or True
+        # The omarchy.org gallery: no network, no browser.
+        import theme_catalog
+        self.catalog_mod = theme_catalog
+        self._orig_catalog = (theme_catalog.load_catalog, theme_catalog.fetch_preview,
+                              theme_catalog.default_browser, theme_catalog.install,
+                              theme_catalog.open_in_browser, theme_catalog.cache_dir)
+        self.catalog_entries = [
+            theme_catalog.CatalogTheme("Ash", "https://github.com/a/omarchy-ash-theme", "ash", "ash.webp"),
+            theme_catalog.CatalogTheme("Alpha", "https://github.com/a/omarchy-alpha-theme", "alpha", "alpha.webp"),
+            theme_catalog.CatalogTheme("Frost", "https://github.com/a/omarchy-frost-theme", "frost", "frost.webp")]
+        theme_catalog.load_catalog = lambda force=False: (self.catalog_entries, 0.0)
+        theme_catalog.fetch_preview = lambda entry: None
+        self.browser = "google-chrome.desktop"
+        theme_catalog.default_browser = lambda: self.browser
+        self.installed: list[str] = []
+        def fake_install(entry, roots=None):
+            (self.roots.user_themes / entry.slug).mkdir()
+            self.installed.append(entry.slug)
+            return self.roots.user_themes / entry.slug
+        theme_catalog.install = fake_install
+        self.opened: list[str] = []
+        theme_catalog.open_in_browser = lambda url: self.opened.append(url) or True
+        theme_catalog.cache_dir = lambda: root / "cache"
+        import wallpaper_search
+        self.ws = wallpaper_search
+        self._orig_ws = (wallpaper_search.search, wallpaper_search.fetch_thumb,
+                         wallpaper_search.download, wallpaper_search.open_page)
+        self.web_results = wallpaper_search.parse_results(json.dumps({"data": [
+            {"id": wid, "url": f"https://wallhaven.cc/w/{wid}",
+             "path": f"https://w.wallhaven.cc/full/{wid[:2]}/wallhaven-{wid}.jpg",
+             "thumbs": {"large": f"https://th.wallhaven.cc/lg/{wid[:2]}/{wid}.jpg"},
+             "resolution": "2560x1440", "file_size": 10, "purity": "sfw"}
+            for wid in ("aa1111", "bb2222", "cc3333")], "meta": {"last_page": 2}}).encode())[0]
+        self.searches: list[tuple[str, int]] = []
+        def fake_search(query, page=1):
+            self.searches.append((query, page))
+            return (self.web_results if page == 1 else []), 2
+        wallpaper_search.search = fake_search
+        wallpaper_search.fetch_thumb = lambda item: None
+        def fake_download(roots, slug, item):
+            folder = self.roots.user_backgrounds / slug
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / item.file_name).write_bytes(PNG)
+            return folder / item.file_name
+        wallpaper_search.download = fake_download
+        wallpaper_search.open_page = lambda item: self.opened.append(item.page) or True
 
         # --- build the real window ----------------------------------------
         self.app = theme_popup.ThemeManager()
@@ -81,6 +152,16 @@ class ViewLayerTest(unittest.TestCase):
         theme_core.apply_theme = self._orig_apply
         theme_core.notify = self._orig_notify
         theme_core.clipboard_image = self._orig_clipboard
+        (theme_core.switcher_cache_dir, theme_core.menu_extension_file,
+         theme_core.preload_switcher) = self._orig_switcher
+        theme_core.refresh_switcher_cache = self._orig_refresh
+        theme_core.settings_file = self._orig_settings
+        (theme_core.hidden_wallpapers_file, theme_core.theme_set_hook_file,
+         theme_core.set_desktop_background) = self._orig_wallpaper
+        (self.catalog_mod.load_catalog, self.catalog_mod.fetch_preview,
+         self.catalog_mod.default_browser, self.catalog_mod.install,
+         self.catalog_mod.open_in_browser, self.catalog_mod.cache_dir) = self._orig_catalog
+        (self.ws.search, self.ws.fetch_thumb, self.ws.download, self.ws.open_page) = self._orig_ws
         theme_popup.ThemeManager._async = self._orig_async
         self.tmp.cleanup()
 
@@ -107,7 +188,8 @@ class ViewLayerTest(unittest.TestCase):
         return out
 
     def rows_list(self) -> list:
-        return self.children(self.app.rows)
+        """Theme rows only (not the "N hidden themes" hint)."""
+        return [r for r in self.children(self.app.rows) if hasattr(r, "tm_theme")]
 
     def row_count(self) -> int:
         return len(self.rows_list())
@@ -153,12 +235,12 @@ class ViewLayerTest(unittest.TestCase):
         self.assertEqual(theme_core.load_hidden(), {"beta"})
 
     def test_menu_hide_unhide_persists(self):
-        self.make_theme("user", "alpha")
+        beta = self.make_theme("user", "beta")     # not the active theme
         theme_core.save_hidden(set())
         self.app.refresh_themes()
-        self.app.set_theme_hidden(self.app.theme_list[0], True)
-        self.assertEqual(theme_core.load_hidden(), {"alpha"})
-        self.app.set_theme_hidden(self.app.theme_list[0], False)
+        self.app.set_theme_hidden(beta, True)
+        self.assertEqual(theme_core.load_hidden(), {"beta"})
+        self.app.set_theme_hidden(beta, False)
         self.assertEqual(theme_core.load_hidden(), set())
 
     def test_wallpapers_page_lists_theme_and_user_wallpapers(self):
@@ -284,24 +366,486 @@ class ViewLayerTest(unittest.TestCase):
             theme_core.remove_theme(None, "gamma")
         self.assertTrue((self.roots.system_themes / "gamma").exists())
 
+    def menu_entries(self, theme) -> dict:
+        """label -> menu button, for the row's action menu."""
+        Gtk = gi.repository.Gtk
+        box = self.app.build_theme_menu(Gtk.Popover(), theme)
+        entries = {}
+        for button in self.children(box):
+            if not isinstance(button, Gtk.Button):
+                continue
+            line = button.get_child()
+            label = next(c for c in self.children(line) if isinstance(c, Gtk.Label))
+            entries[label.get_label()] = button
+        return entries
+
     def test_system_menu_item_disabled(self):
-        self.make_theme("system", "gamma")
+        theme = self.make_theme("system", "gamma")
+        entries = self.menu_entries(theme)
+        self.assertIn("System theme (read-only)", entries)
+        self.assertFalse(entries["System theme (read-only)"].get_sensitive())
+        self.assertNotIn("Delete theme…", entries)
+
+    def test_user_menu_has_destructive_delete(self):
+        theme = self.make_theme("user", "beta")
+        entries = self.menu_entries(theme)
+        self.assertTrue(entries["Delete theme…"].has_css_class("destructive"))
+        self.assertIn("Apply theme", entries)
+        self.assertIn("Hide from list", entries)
+
+    def test_right_opens_menu_left_and_backspace_close_it(self):
+        Gdk = gi.repository.Gdk
+        self.make_theme("user", "alpha")
         self.app.refresh_themes()
-        gamma_row = next(r for r in self.rows_list()
-                         if r.tm_theme.slug == "gamma")
-        popover = None
-        for child in self.children(gamma_row.get_child()):
-            if isinstance(child, gi.repository.Gtk.MenuButton):
-                popover = child.get_popover()
+        self.assertTrue(self.app.on_key(None, Gdk.KEY_Right, 0, 0))
+        popover = self.app.actions_popover
         self.assertIsNotNone(popover)
-        buttons = self.children(popover.get_child())
-        labels = [b.get_property("label") for b in buttons
-                  if isinstance(b, gi.repository.Gtk.Button)]
-        self.assertIn("System theme — read-only", labels)
-        read_only = next(b for b in buttons
-                         if isinstance(b, gi.repository.Gtk.Button)
-                         and b.get_property("label") == "System theme — read-only")
-        self.assertFalse(read_only.get_property("sensitive"))
+        self.assertIs(popover.get_parent(), self.rows_list()[0].actions_button)
+        for key in (Gdk.KEY_Left, Gdk.KEY_BackSpace):
+            self.app.show_actions(self.rows_list()[0].actions_button, self.rows_list()[0].tm_theme)
+            popover = self.app.actions_popover
+            self.assertTrue(self.app.close_actions_on_key(popover, key))
+        self.assertFalse(self.app.close_actions_on_key(popover, Gdk.KEY_Down))
+
+    def test_left_and_backspace_leave_wallpaper_page(self):
+        Gdk = gi.repository.Gdk
+        theme = self.make_theme("user", "alpha")
+        for key in (Gdk.KEY_Left, Gdk.KEY_BackSpace):
+            self.app.open_wallpapers_for(theme)
+            self.assertTrue(self.app.on_key(None, key, 0, 0))
+            self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+            self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "alpha")
+
+    def test_down_and_up_move_the_selection(self):
+        Gdk = gi.repository.Gdk
+        for slug in ("alpha", "beta", "delta"):
+            self.make_theme("user", slug)
+        self.app.refresh_themes()
+        self.app.on_key(None, Gdk.KEY_Down, 0, 0)
+        self.app.on_key(None, Gdk.KEY_Down, 0, 0)
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "delta")
+        self.app.on_key(None, Gdk.KEY_Up, 0, 0)
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "beta")
+
+    def test_wallpaper_page_is_no_wider_than_theme_list(self):
+        Gtk = gi.repository.Gtk
+        theme = self.make_theme("system", "a-very-long-theme-name-that-goes-on-and-on")
+        self.app.open_wallpapers_for(theme)
+        pages = {name: self.app.stack.get_child_by_name(name) for name in ("themes", "wallpapers")}
+        widths = {name: page.measure(Gtk.Orientation.HORIZONTAL, -1)[1] for name, page in pages.items()}
+        self.assertLessEqual(widths["wallpapers"], theme_popup.CARD_WIDTH)
+        self.assertLessEqual(widths["themes"], theme_popup.CARD_WIDTH)
+
+    def test_row_activation_opens_wallpapers(self):
+        self.make_theme("user", "alpha")
+        self.app.refresh_themes()
+        row = self.rows_list()[0]
+        self.app.rows.emit("row-activated", row)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
+        self.assertEqual(self.app.active_theme.slug, "alpha")
+
+    def test_delete_theme_asks_inside_card(self):
+        theme = self.make_theme("user", "beta")
+        self.app.confirm_delete_theme(theme)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "confirm")
+        self.app.cancel_confirm()
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.assertTrue((self.roots.user_themes / "beta").exists())
+        self.app.confirm_delete_theme(theme)
+        self.app.accept_confirm()
+        self.assertFalse((self.roots.user_themes / "beta").exists())
+
+    def test_delete_wallpaper_confirm_returns_to_wallpapers(self):
+        theme = self.make_theme("user", "alpha")
+        target = self.make_wallpaper("alpha", "w.png")
+        self.app.open_wallpapers_for(theme)
+        info = next(w for w in theme_core.list_backgrounds(None, theme) if w.name == "w.png")
+        self.app.confirm_delete_wallpaper(info)
+        self.app.accept_confirm()
+        self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
+        self.assertFalse(target.exists())
+
+    def test_paste_jpeg_keeps_jpeg_extension(self):
+        theme = self.make_theme("user", "alpha")
+        theme_core.clipboard_image = lambda **kw: ("image/jpeg", b"\xff\xd8\xff" + b"\x00" * 16)
+        self.app.open_wallpapers_for(theme)
+        self.app.paste_clipboard()
+        dest = list((self.roots.user_backgrounds / "alpha").iterdir())
+        self.assertEqual([d.suffix for d in dest], [".jpg"])
+
+    def test_drop_hint_is_shown(self):
+        theme = self.make_theme("system", "gamma")
+        self.app.open_wallpapers_for(theme)
+        self.assertIsNotNone(self.app.drop_hint.get_parent())
+        self.assertTrue(self.app.drop_hint.get_label())
+
+    def test_hide_and_unhide_sync_omarchy_picker(self):
+        theme = self.make_theme("system", "gamma")
+        previews = self.switcher_dir / "previews"
+        (previews / "gamma.png").symlink_to(self.roots.system_themes / "gamma")
+        (self.switcher_dir / "fast-signature").write_text("v1")
+        self.app.set_theme_hidden(theme, True)
+        self.assertFalse((previews / "gamma.png").is_symlink())
+        self.assertEqual(self.preloads, [])
+        self.app.set_theme_hidden(theme, False)
+        self.assertFalse((self.switcher_dir / "fast-signature").exists())
+        self.assertEqual(len(self.preloads), 1)
+        self.assertTrue(self.preloads[0].endswith("theme-switcher"))
+
+
+    def test_resting_pointer_does_not_steal_selection(self):
+        for slug in ("alpha", "beta"):
+            self.make_theme("user", slug)
+        self.app.refresh_themes()
+        first, second = self.rows_list()
+        self.app.select_row(first)
+        y = 200  # somewhere over the second row once laid out; get_row_at_y may be None unlaid
+        self.app.on_list_pointer(10, y, moved=False)   # enter after a menu closes
+        self.app.on_list_pointer(10, y, moved=True)    # same spot: not a real move
+        self.assertIs(self.app.rows.get_selected_row(), first)
+
+
+    def wallpaper_menu(self, wallpaper) -> dict:
+        Gtk = gi.repository.Gtk
+        box = self.app.build_wallpaper_menu(Gtk.Popover(), wallpaper)
+        entries = {}
+        for button in self.children(box):
+            if isinstance(button, Gtk.Button):
+                label = next(c for c in self.children(button.get_child()) if isinstance(c, Gtk.Label))
+                entries[label.get_label()] = button
+        return entries
+
+    def test_system_wallpaper_menu_offers_hide_not_delete(self):
+        theme = self.make_theme("system", "gamma", ("g1.png", "g2.png"))
+        self.app.open_wallpapers_for(theme)
+        info = next(w for w in theme_core.list_backgrounds(None, theme) if w.name == "g1.png")
+        entries = self.wallpaper_menu(info)
+        self.assertIn("Hide", entries)
+        self.assertNotIn("Delete…", entries)
+        self.assertFalse(entries["Can't delete: hide instead"].get_sensitive())
+
+    def test_hiding_wallpaper_removes_tile_until_eye_is_on(self):
+        theme = self.make_theme("system", "gamma", ("g1.png", "g2.png"))
+        self.app.open_wallpapers_for(theme)
+        self.assertEqual(len(self.children(self.app.wp_grid)), 2)
+        info = next(w for w in theme_core.list_backgrounds(None, theme) if w.name == "g1.png")
+        self.app.set_wallpaper_hidden(info, True)
+        self.assertEqual(len(self.children(self.app.wp_grid)), 1)
+        self.app.toggle_show_hidden()
+        tiles = self.children(self.app.wp_grid)
+        self.assertEqual(len(tiles), 2)
+        hidden = next(t for t in tiles if t.tm_wallpaper.name == "g1.png")
+        self.assertTrue(hidden.tm_wallpaper.hidden)
+        self.assertIn("Unhide", self.wallpaper_menu(hidden.tm_wallpaper))
+
+    def test_last_visible_wallpaper_cannot_be_hidden(self):
+        theme = self.make_theme("system", "gamma", ("only.png",))
+        self.app.open_wallpapers_for(theme)
+        info = theme_core.list_backgrounds(None, theme)[0]
+        self.app.set_wallpaper_hidden(info, True)
+        self.assertFalse(theme_core.list_backgrounds(None, theme)[0].hidden)
+        self.assertTrue(any("could not hide" in t.lower() for t, _ in self.notices))
+
+
+    def catalog_menu(self, entry) -> dict:
+        Gtk = gi.repository.Gtk
+        box = self.app.build_catalog_menu(Gtk.Popover(), entry)
+        entries = {}
+        for button in self.children(box):
+            if isinstance(button, Gtk.Button):
+                label = next(c for c in self.children(button.get_child()) if isinstance(c, Gtk.Label))
+                entries[label.get_label()] = button
+        return entries
+
+    def test_import_page_lists_catalog_and_marks_installed(self):
+        self.make_theme("user", "alpha")
+        self.app.open_import()
+        self.assertEqual(self.app.stack.get_visible_child_name(), "import")
+        tiles = self.children(self.app.import_grid)
+        self.assertEqual([t.tm_catalog.slug for t in tiles], ["ash", "alpha", "frost"])
+        self.assertEqual({t.tm_catalog.slug: t.tm_installed for t in tiles},
+                         {"ash": False, "alpha": True, "frost": False})
+        self.assertIn("3 themes", self.app.import_hint.get_label())
+
+    def test_import_menu_install_and_installed(self):
+        self.make_theme("user", "alpha")
+        self.app.open_import()
+        ash, alpha = self.catalog_entries[0], self.catalog_entries[1]
+        self.assertIn("Install", self.catalog_menu(ash))
+        self.assertIn("Install and apply", self.catalog_menu(ash))
+        self.assertIn("Apply theme", self.catalog_menu(alpha))
+        self.assertNotIn("Install", self.catalog_menu(alpha))
+        self.app.install_catalog(ash, apply=False)
+        self.assertEqual(self.installed, ["ash"])
+        self.assertTrue(any(t.tm_installed for t in self.children(self.app.import_grid)
+                            if t.tm_catalog.slug == "ash"))
+
+    def test_install_and_apply_applies(self):
+        self.app.open_import()
+        self.app.install_catalog(self.catalog_entries[2], apply=True)
+        self.assertEqual(self.applied, ["frost"])
+
+    def test_open_theme_page_and_no_browser_hint(self):
+        self.app.open_import()
+        self.catalog_menu(self.catalog_entries[0])["Open theme page"].emit("clicked")
+        self.assertEqual(self.opened, ["https://github.com/a/omarchy-ash-theme"])
+        self.browser = None
+        self.app.open_import()
+        self.assertIn("No default web browser", self.app.import_hint.get_label())
+        entry = self.catalog_menu(self.catalog_entries[0])["Open theme page (no browser)"]
+        self.assertFalse(entry.get_sensitive())
+
+    def test_import_search_filters(self):
+        Gtk = gi.repository.Gtk
+        self.app.open_import()
+        self.app.import_search.set_text("fro")
+        shown = [t.tm_catalog.slug for t in self.children(self.app.import_grid)
+                 if self.app.catalog_filter(t)]
+        self.assertEqual(shown, ["frost"])
+
+    def test_backspace_with_empty_search_goes_back(self):
+        Gdk = gi.repository.Gdk
+        self.app.open_import()
+        self.assertTrue(self.app.on_key(None, Gdk.KEY_BackSpace, 0, 0))
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+
+    def test_import_page_is_no_wider_than_theme_list(self):
+        Gtk = gi.repository.Gtk
+        self.app.open_import()
+        page = self.app.stack.get_child_by_name("import")
+        self.assertLessEqual(page.measure(Gtk.Orientation.HORIZONTAL, -1)[1], theme_popup.CARD_WIDTH)
+
+
+    def web_menu(self, item) -> dict:
+        Gtk = gi.repository.Gtk
+        box = self.app.build_web_menu(Gtk.Popover(), item)
+        entries = {}
+        for button in self.children(box):
+            if isinstance(button, Gtk.Button):
+                label = next(c for c in self.children(button.get_child()) if isinstance(c, Gtk.Label))
+                entries[label.get_label()] = button
+        return entries
+
+    def test_web_search_lists_results_and_pages(self):
+        theme = self.make_theme("user", "alpha")
+        self.app.open_wallpapers_for(theme)
+        self.app.open_web_search()
+        self.assertEqual(self.app.stack.get_visible_child_name(), "websearch")
+        self.app.web_search.set_text("misty  forest")
+        self.app.run_web_search()
+        self.assertEqual(self.searches, [("misty forest", 1)])
+        self.assertEqual(len(self.children(self.app.web_grid)), 3)
+        self.assertIn("Scroll down for more", self.app.web_hint.get_label())
+        self.app.load_more_web_results()
+        self.assertEqual(self.searches[-1], ("misty forest", 2))
+        self.app.load_more_web_results()          # last page reached: no request
+        self.assertEqual(len(self.searches), 2)
+
+    def test_web_add_saves_and_marks_tile(self):
+        theme = self.make_theme("user", "alpha")
+        self.app.open_wallpapers_for(theme)
+        self.app.open_web_search()
+        self.app.web_search.set_text("city")
+        self.app.run_web_search()
+        item = self.web_results[0]
+        self.assertIn("Add to Alpha", self.web_menu(item))
+        self.app.add_web_wallpaper(item, set_background=False)
+        self.assertTrue((self.roots.user_backgrounds / "alpha" / item.file_name).exists())
+        tile = next(t for t in self.children(self.app.web_grid) if t.tm_web == item)
+        self.assertTrue(tile.tm_added)
+        self.assertIn("Already added", self.web_menu(item))
+
+    def test_web_open_page_needs_browser(self):
+        theme = self.make_theme("user", "alpha")
+        self.app.open_wallpapers_for(theme)
+        self.app.open_web_search()
+        item = self.web_results[0]
+        self.web_menu(item)["Open on wallhaven.cc"].emit("clicked")
+        self.assertEqual(self.opened, [item.page])
+        self.browser = None
+        self.app.open_web_search()
+        self.assertIn("No default web browser", self.app.web_hint.get_label())
+        self.assertFalse(self.web_menu(item)["Open page (no browser)"].get_sensitive())
+
+    def test_web_page_backspace_returns_to_wallpapers(self):
+        Gdk = gi.repository.Gdk
+        theme = self.make_theme("user", "alpha")
+        self.app.open_wallpapers_for(theme)
+        self.app.open_web_search()
+        self.app.on_key(None, Gdk.KEY_BackSpace, 0, 0)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
+
+    def test_web_page_is_no_wider_than_theme_list(self):
+        Gtk = gi.repository.Gtk
+        theme = self.make_theme("user", "a-very-long-theme-name-for-the-title")
+        self.app.open_wallpapers_for(theme)
+        self.app.open_web_search()
+        for name in ("websearch", "wallpapers"):
+            page = self.app.stack.get_child_by_name(name)
+            self.assertLessEqual(page.measure(Gtk.Orientation.HORIZONTAL, -1)[1], theme_popup.CARD_WIDTH, name)
+
+
+    def type_keys(self, text):
+        Gdk = gi.repository.Gdk
+        for ch in text:
+            self.app.on_key(None, Gdk.unicode_to_keyval(ord(ch)), 0, 0)
+
+    def test_typing_filters_theme_list_like_simple_launcher(self):
+        Gdk = gi.repository.Gdk
+        for slug in ("tokyo-night", "nord", "rose-pine"):
+            self.make_theme("system", slug)
+        self.app.refresh_themes()
+        self.type_keys("no")
+        self.assertEqual([r.tm_theme.slug for r in self.rows_list()], ["nord"])
+        self.assertEqual(self.app.title_label.get_label(), "Theme Manager — no")
+        self.app.on_key(None, Gdk.KEY_BackSpace, 0, 0)
+        self.assertEqual(self.app.filter_query, "n")
+        self.assertEqual(len(self.rows_list()), 3)  # tokyo-night, nord and rose-pine all contain n
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)   # first Esc clears the filter
+        self.assertEqual(self.app.filter_query, "")
+        self.assertEqual(self.app.title_label.get_label(), "Theme Manager")
+
+    def test_filter_without_match_shows_hint_and_resets_on_open(self):
+        self.make_theme("system", "nord")
+        self.app.refresh_themes()
+        self.type_keys("zzz")
+        self.assertEqual(self.rows_list(), [])
+        self.assertIn("No theme matches", self.app.no_match.get_label())
+        self.app.open()
+        self.assertEqual(self.app.filter_query, "")
+        self.assertEqual(len(self.rows_list()), 1)
+
+    def test_filter_selects_first_match_for_enter(self):
+        Gdk = gi.repository.Gdk
+        for slug in ("alpha", "beta"):
+            self.make_theme("user", slug)
+        self.app.refresh_themes()
+        self.type_keys("bet")
+        self.app.on_key(None, Gdk.KEY_Return, 0, 0)
+        self.assertEqual(self.app.active_theme.slug, "beta")
+
+    def test_typing_filters_wallpapers(self):
+        Gdk = gi.repository.Gdk
+        theme = self.make_theme("system", "gamma", ("forest.png", "city.png", "forest-2.png"))
+        self.app.open_wallpapers_for(theme)
+        self.type_keys("for")
+        names = [t.tm_wallpaper.name for t in self.children(self.app.wp_grid)]
+        self.assertEqual(names, ["forest-2.png", "forest.png"])
+        self.assertTrue(self.app.wp_title.get_label().endswith("— for"))
+        self.app.on_key(None, Gdk.KEY_BackSpace, 0, 0)       # edits the filter, stays
+        self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)          # clears the filter, stays
+        self.assertEqual(self.app.wp_filter, "")
+        self.assertEqual(len(self.children(self.app.wp_grid)), 3)
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)          # now goes back
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+
+
+    def test_active_theme_cannot_be_deleted(self):
+        theme = self.make_theme("user", "alpha")   # setUp makes alpha the current theme
+        self.assertTrue(theme.current)
+        entries = self.menu_entries(theme)
+        self.assertFalse(entries["Delete theme…"].get_sensitive())
+        self.app.perform_delete_theme(theme)
+        self.assertTrue((self.roots.user_themes / "alpha").exists())
+        self.assertTrue(any("could not delete" in t.lower() for t, _ in self.notices))
+
+    def test_delete_and_install_rebuild_picker_cache_filtered(self):
+        theme = self.make_theme("user", "beta")
+        self.app.perform_delete_theme(theme)
+        self.assertFalse((self.roots.user_themes / "beta").exists())
+        self.assertEqual(len(self.refreshes), 1)
+        self.assertTrue(self.refreshes[0].endswith("theme-switcher"))
+        self.app.open_import()
+        self.app.install_catalog(self.catalog_entries[0], apply=False)
+        self.assertEqual(len(self.refreshes), 2)
+
+
+    def test_applying_hidden_theme_unhides_it(self):
+        theme = self.make_theme("system", "gamma")
+        (self.switcher_dir / "fast-signature").write_text("v1")
+        self.app.set_theme_hidden(theme, True)
+        self.assertIn("gamma", theme_core.load_hidden())
+        (self.switcher_dir / "fast-signature").write_text("v1")
+        self.app.apply_theme_action(theme)
+        self.assertEqual(self.applied, ["gamma"])
+        self.assertNotIn("gamma", theme_core.load_hidden())
+        self.assertNotIn("gamma", self.app.hidden)
+        self.assertFalse((self.switcher_dir / "fast-signature").exists())   # picker rebuilds with it
+
+
+    def test_hidden_themes_stay_out_and_hint_says_how_many(self):
+        for slug in ("nord", "white", "gamma"):
+            self.make_theme("system", slug)
+        self.app.hidden = {"nord", "white"}
+        self.app.refresh_themes()
+        self.assertEqual([r.tm_theme.slug for r in self.rows_list()], ["gamma"])
+        hint = [r for r in self.children(self.app.rows) if not hasattr(r, "tm_theme")]
+        self.assertEqual(len(hint), 1)
+        self.assertIn("2 hidden themes", hint[0].get_child().get_label())
+
+    def test_active_theme_is_never_hidden(self):
+        theme = self.make_theme("user", "alpha")      # current
+        self.make_theme("system", "nord")
+        theme_core.save_hidden({"alpha", "nord"})     # e.g. a list from before the rule
+        self.app.open()
+        self.assertNotIn("alpha", theme_core.load_hidden())          # repaired on open
+        rows = self.rows_list()
+        self.assertEqual([r.tm_theme.slug for r in rows], ["alpha"])
+        self.assertFalse(rows[0].has_css_class("tm-row-hidden"))     # normal layout
+        entries = self.menu_entries(theme)
+        self.assertFalse(entries["Hide from list"].get_sensitive())
+        self.app.set_theme_hidden(theme, True)
+        self.assertNotIn("alpha", theme_core.load_hidden())
+
+    def test_eye_resets_on_every_open(self):
+        self.make_theme("system", "nord")
+        theme_core.save_hidden({"nord"})
+        self.app.toggle_show_hidden()
+        self.assertTrue(self.app.show_hidden)
+        self.app.open()
+        self.assertFalse(self.app.show_hidden)
+        self.assertNotIn("nord", [r.tm_theme.slug for r in self.rows_list()])
+
+
+    def test_theme_previews_have_one_size_whatever_the_badges(self):
+        Gtk = gi.repository.Gtk
+        import shutil
+        src = "/usr/share/omarchy/themes/tokyo-night/preview.png"
+        for scope, slug in (("user", "alpha"), ("system", "nord")):   # alpha: current + no system badge
+            tdir = self.make_theme(scope, slug).path
+            shutil.copy(src, tdir / "preview.png")
+        self.app.refresh_themes()
+        window = Gtk.Window()
+        window.set_child(self.app.card.get_parent())  # lay the rows out at the real width
+        sizes = []
+        for row in self.rows_list():
+            row.measure(Gtk.Orientation.HORIZONTAL, -1)
+            frame = row.get_child().get_first_child()
+            picture = frame.get_first_child()
+            self.assertIsInstance(picture, theme_popup.FixedPicture)
+            sizes.append((picture.measure(Gtk.Orientation.HORIZONTAL, -1)[:2],
+                          picture.measure(Gtk.Orientation.VERTICAL, -1)[:2]))
+        self.assertEqual(sizes[0], sizes[1])
+        self.assertEqual(sizes[0], ((theme_popup.PREVIEW_W, theme_popup.PREVIEW_W),
+                                    (theme_popup.PREVIEW_H, theme_popup.PREVIEW_H)))
+
+
+    def test_sync_off_leaves_omarchy_alone(self):
+        theme_core.save_settings(False)
+        theme = self.make_theme("system", "gamma")
+        previews = self.switcher_dir / "previews"
+        (previews / "gamma.png").symlink_to(self.roots.system_themes / "gamma")
+        self.app.set_theme_hidden(theme, True)
+        self.assertIn("gamma", theme_core.load_hidden())        # hidden in Theme Manager
+        self.assertTrue((previews / "gamma.png").is_symlink())   # Omarchy's picker untouched
+        beta = self.make_theme("user", "beta")
+        self.app.perform_delete_theme(beta)
+        self.assertEqual(self.refreshes, [])
+        self.app.hidden = {"gamma"}
+        self.app.refresh_themes()
+        hint = [r for r in self.children(self.app.rows) if not hasattr(r, "tm_theme")]
+        self.assertIn("Settings", hint[0].get_child().get_label())
 
 
 if __name__ == "__main__":

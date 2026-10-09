@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Theme Manager - Omarchy's theme switcher without the themes hidden in
+# Theme Manager.
+#
+# Runs Omarchy's own `omarchy-theme-switcher` unchanged, with this plugin's
+# shim directory first on PATH so its final `omarchy-menu-images` call goes
+# through shim/omarchy-menu-images, which drops hidden themes from the
+# preview cache before the picker opens.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+OMARCHY_BIN="${OMARCHY_PATH:-/usr/share/omarchy}/bin"
+
+PATH="${DIR}/shim:${PATH}" exec "${OMARCHY_BIN}/omarchy-theme-switcher" "$@"

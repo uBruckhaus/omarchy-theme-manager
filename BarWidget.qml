@@ -17,9 +17,10 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // U+F1FC (paint brush) — a FontAwesome-4-era glyph present in the bar's
-    // Nerd Font. FA5-era icons (e.g. palette U+F53F) are missing and render as tofu.
-    text: "\uf1fc"
+    // U+F0E0C (Material Design palette outline): the icon Omarchy's own menu
+    // uses for Style → Theme. Nerd Fonts carry it; FontAwesome-5 code points
+    // such as U+F53F are missing from the bar font and render as tofu.
+    text: "\u{F0E0C}"
     tooltipText: "Theme Manager"
 
     onPressed: function(mouseButton) {

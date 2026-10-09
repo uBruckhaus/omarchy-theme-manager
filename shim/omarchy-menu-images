@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Theme Manager - shim for `omarchy-menu-images`, used only by ../theme-switcher.
+#
+# The last argument is the theme switcher's preview directory. Remove hidden
+# themes from it, then hand over to Omarchy's real omarchy-menu-images with
+# the arguments untouched.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+OMARCHY_BIN="${OMARCHY_PATH:-/usr/share/omarchy}/bin"
+
+if (( $# > 0 )); then
+    /usr/bin/python3 -I "${DIR}/switcher_sync.py" prune "${!#}" >/dev/null 2>&1 || true
+fi
+
+exec "${OMARCHY_BIN}/omarchy-menu-images" "$@"
