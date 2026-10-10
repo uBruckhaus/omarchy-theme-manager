@@ -1,5 +1,7 @@
 """Tests for theme_core: discovery, hidden list, wallpaper and theme safety."""
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -165,6 +167,58 @@ class WallpaperTests(unittest.TestCase):
         # Original untouched
         self.assertEqual(src.read_bytes(), b"imagedata")
 
+    @unittest.skipUnless(shutil.which("heif-enc") and shutil.which("heif-dec")
+                         and shutil.which("magick"), "needs libheif and ImageMagick")
+    def test_add_heic_converts_to_jpeg(self):
+        png = Path(self.tmp.name) / "src.png"
+        subprocess.run(["magick", "-size", "64x64", "xc:red", str(png)], check=True)
+        src = Path(self.tmp.name) / "IMG_0001.HEIC"
+        subprocess.run(["heif-enc", "-o", str(src), str(png)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        dest = theme_core.add_background_file(self.roots, "nord", src)
+        self.assertEqual(dest.name, "IMG_0001.jpg")
+        self.assertEqual(dest.read_bytes()[:3], b"\xff\xd8\xff")
+
+    def test_add_data_takes_type_from_bytes(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        dest = theme_core.add_background_data(self.roots, "nord", png, name="photo.jpg")
+        self.assertEqual(dest.name, "photo.png")
+        dest = theme_core.add_background_data(self.roots, "nord", b"GIF89a" + b"\x00" * 8,
+                                              name="../../evil")
+        self.assertEqual(dest.parent, self.roots.user_backgrounds / "nord")
+        self.assertEqual(dest.suffix, ".gif")
+        with self.assertRaises(ValueError):
+            theme_core.add_background_data(self.roots, "nord", b"<svg></svg>", name="x.png")
+
+    def test_offered_file_name(self):
+        self.assertEqual(theme_core.offered_file_name('application/octet-stream;name="43lk53.jpg"'),
+                         "43lk53.jpg")
+        self.assertEqual(theme_core.offered_file_name('application/octet-stream; name=a/b/c.png'), "c.png")
+        self.assertEqual(theme_core.offered_file_name("application/octet-stream"), "")
+
+    def test_heic_decoder_output_is_size_capped(self):
+        src = Path(self.tmp.name) / "big.heic"
+        src.write_bytes(b"x")
+        seen = []
+        orig = theme_core.read_bounded_output
+        theme_core.read_bounded_output = lambda argv, **kw: seen.append(argv) or (b"", False)
+        try:
+            with self.assertRaises(ValueError):
+                theme_core.add_background_file(self.roots, "nord", src)
+        finally:
+            theme_core.read_bounded_output = orig
+        self.assertTrue(seen[0][0].endswith("prlimit"))
+        self.assertEqual(seen[0][1], f"--fsize={theme_core.MAX_BACKGROUND_BYTES}")
+        self.assertTrue(seen[0][3].endswith("heif-dec"))
+
+    def test_add_broken_heic_is_rejected(self):
+        src = Path(self.tmp.name) / "broken.heic"
+        src.write_bytes(b"not a heic")
+        with self.assertRaises(ValueError):
+            theme_core.add_background_file(self.roots, "nord", src)
+        nord = self.roots.user_backgrounds / "nord"
+        self.assertFalse(nord.exists() and any(nord.iterdir()))
+
     def test_add_file_unique_names(self):
         src = Path(self.tmp.name) / "a.png"
         src.write_bytes(b"img")
@@ -304,6 +358,68 @@ class MimeTests(unittest.TestCase):
         self.assertEqual(theme_core.extension_for_mime("image/PNG; charset=x"), ".png")
         self.assertIsNone(theme_core.extension_for_mime("image/svg+xml"))
         self.assertIsNone(theme_core.extension_for_mime("text/html"))
+
+
+class HyprlandSocketTests(unittest.TestCase):
+    def serve(self, reply_chunks, delay):
+        import socket as socketlib
+        import threading
+        import time as timelib
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / ".socket.sock"
+        server = socketlib.socket(socketlib.AF_UNIX)
+        server.bind(str(path))
+        server.listen(1)
+        self.addCleanup(server.close)
+
+        def run():
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(64)
+                try:
+                    for chunk in reply_chunks:
+                        conn.sendall(chunk)
+                        timelib.sleep(delay)
+                except OSError:
+                    pass
+        threading.Thread(target=run, daemon=True).start()
+        orig = theme_core._hyprland_socket
+        theme_core._hyprland_socket = lambda: path
+        self.addCleanup(setattr, theme_core, "_hyprland_socket", orig)
+
+    def test_cursor_position(self):
+        self.serve([b'{"x": 12, "y": 34}'], 0)
+        self.assertEqual(theme_core.cursor_position(), (12, 34))
+
+    def test_drip_feed_hits_one_overall_deadline(self):
+        import time as timelib
+        self.serve([b" "] * 1000, 0.05)
+        start = timelib.monotonic()
+        self.assertIsNone(theme_core._hyprland_query(b"j/cursorpos", timeout=0.4))
+        self.assertLess(timelib.monotonic() - start, 1.0)
+
+    def test_oversized_reply_is_dropped(self):
+        self.serve([b"x" * 4096] * 4, 0)
+        self.assertIsNone(theme_core._hyprland_query(b"j/cursorpos", max_bytes=4096))
+
+
+class FileListTests(unittest.TestCase):
+    def test_parses_uri_list_gnome_copied_files_and_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "my photo.png"
+            b = Path(tmp) / "b.jpg"
+            a.write_bytes(b"x")
+            b.write_bytes(b"x")
+            uri_a = "file://" + str(a).replace(" ", "%20")
+            self.assertEqual(theme_core.parse_file_list(f"# comment\r\n{uri_a}\r\n"), [a])
+            self.assertEqual(theme_core.parse_file_list(f"copy\n{uri_a}\nfile://{b}"), [a, b])
+            self.assertEqual(theme_core.parse_file_list(f"{a}\n{b}\n"), [a, b])
+
+    def test_ignores_remote_relative_and_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(theme_core.parse_file_list(
+                f"https://example.com/x.png\nrelative.png\n{tmp}/missing.png\n{tmp}"), [])
 
 
 class SwitcherSyncTests(unittest.TestCase):
@@ -570,6 +686,24 @@ class OptInSyncTests(unittest.TestCase):
         self.assertTrue(theme_core.sync_enabled())
         theme_core.save_settings(False)
         self.assertFalse(theme_core.sync_enabled())
+
+    def test_window_position_kept_next_to_sync_setting(self):
+        self.assertIsNone(theme_core.window_position())
+        theme_core.save_settings(True)
+        theme_core.save_window_position((120, 340))
+        self.assertEqual(theme_core.window_position(), (120, 340))
+        self.assertTrue(theme_core.sync_enabled())
+        theme_core.save_settings(False)
+        self.assertEqual(theme_core.window_position(), (120, 340))
+        theme_core.save_window_position(None)
+        self.assertIsNone(theme_core.window_position())
+        self.assertFalse(theme_core.sync_enabled())
+
+    def test_window_position_rejects_junk(self):
+        for junk in ('{"position": [1, "2"]}', '{"position": [-5, 3]}', '{"position": [true, 3]}',
+                     '{"position": {"x": 1}}', '[1, 2]', 'not json'):
+            theme_core.settings_file().write_text(junk)
+            self.assertIsNone(theme_core.window_position(), junk)
 
     def test_removal_takes_only_our_lines_and_hook(self):
         menu = self.root / "omarchy-menu.jsonc"

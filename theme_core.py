@@ -24,13 +24,19 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+# Phone photos (HEIC/HEIF) are converted to JPEG on import with libheif's
+# `heif-dec`; wallpaper tools cannot show them directly.
+HEIF_EXTS = {".heic", ".heif"}
 MAX_BACKGROUND_BYTES = 50 * 1024 * 1024   # one wallpaper, whatever its source
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024    # anything read from a subprocess
 PREVIEW_NAMES = ("preview.png", "preview.jpg", "preview.jpeg",
@@ -342,14 +348,25 @@ def settings_file() -> Path:
     return Path.home() / ".config/omarchy/theme-manager/settings.json"
 
 
-def sync_enabled(path: Path | None = None) -> bool:
-    path = path or settings_file()
+def _load_settings(path: Path) -> dict:
     try:
         data = json.loads(path.read_text())
-        if isinstance(data, dict) and isinstance(data.get("sync_omarchy"), bool):
-            return data["sync_omarchy"]
     except (OSError, ValueError):
-        pass
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _update_settings(path: Path, **values) -> None:
+    data = _load_settings(path)
+    data.update(values)
+    _atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o600)
+
+
+def sync_enabled(path: Path | None = None) -> bool:
+    path = path or settings_file()
+    value = _load_settings(path).get("sync_omarchy")
+    if isinstance(value, bool):
+        return value
     # Installs from before the setting existed already carry our hook: keep them on.
     try:
         return HOOK_MARKER in theme_set_hook_file().read_text()
@@ -358,8 +375,22 @@ def sync_enabled(path: Path | None = None) -> bool:
 
 
 def save_settings(sync_omarchy: bool, path: Path | None = None) -> None:
-    path = path or settings_file()
-    _atomic_write(path, json.dumps({"sync_omarchy": bool(sync_omarchy)}, indent=2) + "\n", mode=0o600)
+    _update_settings(path or settings_file(), sync_omarchy=bool(sync_omarchy))
+
+
+def window_position(path: Path | None = None) -> tuple[int, int] | None:
+    """Where the user last moved the popup (top-left, logical px), or None
+    for centered."""
+    value = _load_settings(path or settings_file()).get("position")
+    if isinstance(value, list) and len(value) == 2 and \
+            all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 100000 for v in value):
+        return value[0], value[1]
+    return None
+
+
+def save_window_position(position: tuple[int, int] | None, path: Path | None = None) -> None:
+    _update_settings(path or settings_file(),
+                     position=None if position is None else [int(position[0]), int(position[1])])
 
 
 def remove_menu_override(path: Path | None = None) -> bool:
@@ -553,12 +584,38 @@ def add_background_file(roots: Roots | None, slug: str, source: str | Path) -> P
     source = Path(source)
     if not source.is_file():
         raise FileNotFoundError(f"not a file: {source}")
+    if source.suffix.lower() in HEIF_EXTS:
+        return _add_heif_file(roots, slug, source)
     if not _is_image_name(source.name):
         raise ValueError(f"not an image: {source.name}")
     if source.stat().st_size > MAX_BACKGROUND_BYTES:
         raise ValueError("image too large (max 50 MiB)")
     dest = _unique_dest(roots, slug, _sanitize_name(source.name))
     _copy_bounded(source, dest)
+    return dest
+
+
+def _add_heif_file(roots: Roots, slug: str, source: Path) -> Path:
+    """Convert a HEIC/HEIF photo to JPEG in a private temporary directory,
+    then copy it in like any other image."""
+    if source.stat().st_size > MAX_BACKGROUND_BYTES:
+        raise ValueError("image too large (max 50 MiB)")
+    decoder = shutil.which("heif-dec")
+    limiter = shutil.which("prlimit")
+    if decoder is None or limiter is None:
+        raise ValueError("HEIC photos need libheif (heif-dec) installed")
+    with tempfile.TemporaryDirectory(prefix="theme-manager-heif-") as tmp:
+        converted = Path(tmp) / "image.jpg"
+        # prlimit caps every file the decoder writes, so a crafted photo with
+        # huge dimensions cannot fill the temp directory before our size check.
+        _, ok = read_bounded_output([limiter, f"--fsize={MAX_BACKGROUND_BYTES}", "--",
+                                     decoder, "--quality", "92", str(source), str(converted)],
+                                    max_bytes=65536, timeout=60.0)
+        if not ok or not converted.is_file():
+            raise ValueError(f"could not convert {source.name}")
+        stem = _sanitize_name(source.stem) or "image"
+        dest = _unique_dest(roots, slug, f"{stem}.jpg")
+        _copy_bounded(converted, dest)
     return dest
 
 
@@ -922,6 +979,39 @@ def is_image_data(data: bytes) -> bool:
         or data[:3] == b"\xff\xd8\xff"
 
 
+def image_extension(data: bytes) -> str | None:
+    """Wallpaper file extension for image bytes by magic, else None."""
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[:2] == b"BM":
+        return ".bmp"
+    return None
+
+
+def add_background_data(roots: Roots | None, slug: str, data: bytes,
+                        name: str = "image") -> Path:
+    """Store image bytes of unknown origin (e.g. dragged out of a browser).
+    The type comes from the bytes, never from the offered name."""
+    ext = image_extension(bytes(data[:16]))
+    if ext is None:
+        raise ValueError("not a supported image (JPG, PNG, WebP, GIF, BMP)")
+    stem = Path(_sanitize_name(name)).stem or "image"
+    return add_background_bytes(roots, slug, data, name=stem + ext)
+
+
+def offered_file_name(mime: str) -> str:
+    """The name parameter of e.g. `application/octet-stream;name="x.jpg"`
+    (how Chromium offers a dragged image's bytes), or ''."""
+    match = re.search(r';\s*name="?([^";]{1,200})"?', str(mime))
+    return Path(match.group(1)).name if match else ""
+
+
 def launch_browser(url: str) -> bool:
     """Open a URL in the default browser (Omarchy's launcher, else xdg-open).
     Callers validate the URL first."""
@@ -951,6 +1041,100 @@ def clipboard_image(max_bytes: int = MAX_BACKGROUND_BYTES,
         if ok and data:
             return mime, data
     return None
+
+
+# Clipboard types a file manager offers for copied files (Nautilus: Ctrl+C on
+# a file). They carry references, not image bytes.
+_FILE_LIST_MIMES = ("text/uri-list", "x-special/gnome-copied-files",
+                    "text/plain;charset=utf-8", "text/plain")
+
+
+def parse_file_list(text: str) -> list[Path]:
+    """Existing local files named in a uri-list, gnome-copied-files or plain
+    text list: one ``file://`` URI or absolute path per line. Other URIs are
+    ignored; nothing here is ever executed."""
+    paths: list[Path] = []
+    for line in (text or "").splitlines():
+        token = line.strip()
+        if not token or token.startswith("#") or token in ("copy", "cut"):
+            continue
+        if token.startswith("file://"):
+            token = urllib.parse.unquote(urllib.parse.urlparse(token).path)
+        elif not token.startswith("/"):
+            continue  # http(s) and anything else: not a local file
+        candidate = Path(token)
+        if candidate.is_file():
+            paths.append(candidate)
+    return paths
+
+
+def clipboard_files(timeout: float = 3.0) -> list[Path]:
+    """Local files copied to the Wayland clipboard (e.g. Ctrl+C on an image
+    in the file manager), in clipboard order; empty if there are none."""
+    types_raw, _ = read_bounded_output(["wl-paste", "--list-types"],
+                                       max_bytes=65536, timeout=timeout)
+    offered = {line.strip() for line in types_raw.decode("utf-8", "replace").splitlines()}
+    for mime in _FILE_LIST_MIMES:
+        if mime not in offered:
+            continue
+        data, ok = read_bounded_output(["wl-paste", "--no-newline", "--type", mime],
+                                       max_bytes=1048576, timeout=timeout)
+        paths = parse_file_list(data.decode("utf-8", "replace")) if ok else []
+        if paths:
+            return paths
+    return []
+
+
+def _hyprland_socket() -> Path | None:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if not runtime or not re.fullmatch(r"[A-Za-z0-9_]{1,200}", signature):
+        return None
+    return Path(runtime) / "hypr" / signature / ".socket.sock"
+
+
+def _hyprland_query(command: bytes, max_bytes: int = 4096, timeout: float = 0.5) -> bytes | None:
+    """One request on Hyprland's IPC socket (what hyprctl uses), bounded in
+    size and by one overall deadline; fast enough for every pointer motion."""
+    path = _hyprland_socket()
+    if path is None:
+        return None
+    deadline = time.monotonic() + timeout
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(path))
+            sock.sendall(command)
+            chunks, total = [], 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                sock.settimeout(remaining)
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    return None
+                chunks.append(chunk)
+    except OSError:
+        return None
+    return b"".join(chunks)
+
+
+def cursor_position() -> tuple[int, int] | None:
+    """Global pointer position from Hyprland, or None if unavailable."""
+    raw = _hyprland_query(b"j/cursorpos")
+    if raw is None:
+        raw, ok = read_bounded_output(["hyprctl", "cursorpos", "-j"], max_bytes=4096, timeout=1.0)
+        if not ok:
+            return None
+    try:
+        data = json.loads(raw)
+        return int(data["x"]), int(data["y"])
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def notify(title: str, body: str = "") -> None:

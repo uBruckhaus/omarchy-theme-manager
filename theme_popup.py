@@ -31,7 +31,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, GLib, GObject, Gtk, Gtk4LayerShell, Pango
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Gtk4LayerShell, Pango
 
 # Once Gtk4LayerShell is loaded into this process by ld.so, remove it from
 # LD_PRELOAD so child processes do not inherit it.
@@ -60,6 +60,7 @@ TILE = 176
 SWITCHER_WRAPPER = Path(__file__).resolve().parent / "theme-switcher"
 SYNC_SCRIPT = Path(__file__).resolve().parent / "switcher_sync.py"
 PREVIEW_WORKERS = 4    # parallel preview downloads on the import page
+CURSOR_SLACK = 24  # px the pointer may move after opening before the keyboard is released
 MAX_DROPS = 10  # one drop gesture adds at most this many wallpapers
 
 
@@ -131,20 +132,37 @@ def scaled_texture(path: str, width: int, height: int):
 
 
 def parse_uris(text: str) -> list[Path]:
-    """File paths from a `text/uri-list` drop. Non-file URIs are dropped;
-    nothing here is ever executed."""
-    paths: list[Path] = []
-    for token in re.split(r"[\s\n]+", text or ""):
-        if not token:
-            continue
-        if token.startswith("file://"):
-            token = urllib.parse.unquote(urllib.parse.urlparse(token).path)
-        else:
-            continue  # http(s) and anything else: not a local file
-        candidate = Path(token)
-        if candidate.is_file():
-            paths.append(candidate)
-    return paths
+    """File paths from a `text/uri-list` (or plain path list) drop. Non-file
+    URIs are dropped; nothing here is ever executed."""
+    return theme_core.parse_file_list(text)
+
+
+IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp")
+
+
+def drop_source_kind(drop) -> tuple[str, str] | None:
+    """What to read from a drop: ("files", "text/uri-list"), ("bytes", mime)
+    or ("text", "text/plain…"); None if nothing usable is offered."""
+    mimes = list(drop.get_formats().get_mime_types() or [])
+    if "text/uri-list" in mimes:
+        return "files", "text/uri-list"
+    for mime in mimes:
+        base = mime.split(";", 1)[0].strip().lower()
+        if base in IMAGE_MIMES or (base == "application/octet-stream"
+                                   and theme_core.offered_file_name(mime)):
+            return "bytes", mime
+    for mime in ("text/plain;charset=utf-8", "text/plain"):
+        if mime in mimes:
+            return "text", mime
+    return None
+
+
+def dropped_paths(value) -> list[Path]:
+    """Local files from a drop payload: a Gdk.FileList or a string."""
+    if isinstance(value, Gdk.FileList):
+        return [Path(path) for path in (f.get_path() for f in value.get_files())
+                if path and Path(path).is_file()]
+    return parse_uris(value if isinstance(value, str) else "")
 
 
 class ThemeManager(Gtk.Application):
@@ -158,6 +176,10 @@ class ThemeManager(Gtk.Application):
         self.style_provider = None
         self.theme_list = []       # latest discover_themes() result
         self.actions_popover = None
+        self.cursor_watch = 0      # GLib source id while the keyboard is held on open
+        self.position = theme_core.window_position()   # None: centered
+        self.move_start = ((0, 0), None)
+        self.moving = False
         self.menu_anchor = None
         # Type-to-filter as in Simple Launcher: no search field, the title shows it.
         self.filter_query = ""     # theme list
@@ -196,35 +218,33 @@ class ThemeManager(Gtk.Application):
         Gtk4LayerShell.set_namespace(window, "theme-manager")
         Gtk4LayerShell.set_layer(window, Gtk4LayerShell.Layer.OVERLAY)
         Gtk4LayerShell.set_keyboard_mode(window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
-        for edge in (Gtk4LayerShell.Edge.TOP, Gtk4LayerShell.Edge.BOTTOM,
-                     Gtk4LayerShell.Edge.LEFT, Gtk4LayerShell.Edge.RIGHT):
-            Gtk4LayerShell.set_anchor(window, edge, True)
-        Gtk4LayerShell.set_exclusive_zone(window, 0)
-
-        overlay = Gtk.Overlay()
-        overlay.add_css_class("tm-overlay")
-        overlay.set_hexpand(True)
-        overlay.set_vexpand(True)
-        overlay.set_halign(Gtk.Align.FILL)
-        overlay.set_valign(Gtk.Align.FILL)
-        window.set_child(overlay)
-        overlay.set_child(Gtk.Box())
-        click = Gtk.GestureClick()
-        # Close on release so the bar never sees a half-finished click, and
-        # only for clicks outside the card.
-        click.connect("released", self.on_backdrop_click)
-        overlay.add_controller(click)
+        # No anchors: the surface is only as large as the card and centered,
+        # so the rest of the screen stays usable (e.g. dragging an image in
+        # from the file manager). Only the bar icon or Esc closes the popup.
+        # -1: ignore the bar's reserved zone, so margins and the centered
+        # position are both measured from the monitor's top-left corner.
+        Gtk4LayerShell.set_exclusive_zone(window, -1)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         card.add_css_class("tm-card")
         card.set_size_request(CARD_WIDTH, -1)
-        card.set_halign(Gtk.Align.CENTER)
-        card.set_valign(Gtk.Align.CENTER)
-        card.set_margin_top(24)
-        card.set_margin_bottom(24)
-        overlay.add_overlay(card)
-        self.overlay = overlay
+        window.set_child(card)
         self.card = card
+        # Drop images anywhere on the card while a wallpaper page is open:
+        # files from a file manager (uri-list), the image bytes a browser
+        # offers for a dragged picture, or file paths as text. The drop is read
+        # by hand (DropTargetAsync) because browsers offer the bytes under
+        # parameterised types like `application/octet-stream;name="x.jpg"`.
+        # MOVE must be allowed too: Hyprland preselects it, and a COPY-only
+        # target is refused before "enter". We always ask for COPY, so the
+        # source never deletes its file.
+        drop = Gtk.DropTargetAsync.new(None, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        drop.connect("accept", lambda _t, d: self.drop_allowed() and drop_source_kind(d) is not None)
+        drop.connect("drag-enter", self.on_drag_motion)
+        drop.connect("drag-motion", self.on_drag_motion)
+        drop.connect("drag-leave", lambda *_: self.drop_zone.remove_css_class("active"))
+        drop.connect("drop", self.on_drop)
+        card.add_controller(drop)
         list_height = max(320, min(LIST_HEIGHT, monitor_height() - 2 * SCREEN_MARGIN))
 
         header = Gtk.Box(spacing=8)
@@ -236,6 +256,19 @@ class ThemeManager(Gtk.Application):
         title.set_hexpand(True)
         title.set_xalign(0)   # fill the header (START would shrink it to its 1-char natural width)
         header.append(title)
+        # Dragging the title bar moves the popup (a layer surface: placed by
+        # margins; Hyprland keeps Super + drag for itself). Double-click the
+        # title to center it again.
+        header.set_cursor_from_name("grab")
+        title.set_tooltip_text("Drag to move · double-click to center")
+        mover = Gtk.GestureDrag()
+        mover.connect("drag-begin", self.on_move_begin)
+        mover.connect("drag-update", self.on_move_update)
+        mover.connect("drag-end", self.on_move_end)
+        header.add_controller(mover)
+        recenter = Gtk.GestureClick()
+        recenter.connect("pressed", lambda _g, n, *_: n == 2 and self.move_to(None, save=True))
+        header.add_controller(recenter)
         self.hidden_button = Gtk.Button(icon_name="view-reveal-symbolic")
         self.hidden_button.set_tooltip_text("Show hidden themes and wallpapers")
         self.hidden_button.add_css_class("flat")
@@ -290,6 +323,14 @@ class ThemeManager(Gtk.Application):
         hover.connect("motion", lambda _c, x, y: self.on_list_pointer(x, y, moved=True))
         hover.connect("leave", lambda *_: setattr(self, "pointer_at", None))
         card.add_controller(hover)
+        # Keyboard: taken exclusively on open (a card-sized on-demand layer is
+        # not focused by itself), then on demand as soon as the pointer moves.
+        # From there it follows the pointer like any window, and other apps
+        # can start drags again (an exclusive layer blocks that).
+        focus = Gtk.EventControllerMotion()
+        focus.connect("enter", lambda *_: self.release_keyboard())
+        focus.connect("leave", lambda *_: self.release_keyboard())
+        card.add_controller(focus)
         stack.add_named(scroller, "themes")
 
         # --- wallpapers page
@@ -322,7 +363,7 @@ class ThemeManager(Gtk.Application):
         paste_box.append(Gtk.Image.new_from_icon_name("edit-paste-symbolic"))
         paste_box.append(Gtk.Label(label="Paste image (Ctrl+V)"))
         self.paste_button.set_child(paste_box)
-        self.paste_button.set_tooltip_text("Add the image copied to the clipboard (e.g. copied from the web)")
+        self.paste_button.set_tooltip_text("Add the image copied to the clipboard (from the web or the file manager)")
         self.paste_button.connect("clicked", lambda *_: self.paste_clipboard())
         web_button = Gtk.Button()
         web_button.add_css_class("tm-paste")
@@ -336,13 +377,26 @@ class ThemeManager(Gtk.Application):
         buttons.append(self.paste_button)
         buttons.append(web_button)
         self.wp_toolbar.append(buttons)
+        # A visible drop zone; it lights up while files are dragged over the page.
+        drop_zone = Gtk.Box(spacing=10)
+        drop_zone.add_css_class("tm-dropzone")
+        drop_icon = Gtk.Image.new_from_icon_name("insert-image-symbolic")
+        drop_icon.set_pixel_size(28)
+        drop_zone.append(drop_icon)
+        drop_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        drop_title = Gtk.Label(label="Drag & drop images here", xalign=0)
+        drop_title.add_css_class("tm-dropzone-title")
+        drop_text.append(drop_title)
         # A wrapping label asks for its one-line width unless capped, which
         # made the wallpaper page wider than the theme list.
-        drop_hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=40)
+        drop_hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=38)
         drop_hint.add_css_class("tm-hint")
-        self.wp_toolbar.append(drop_hint)
+        drop_text.append(drop_hint)
+        drop_zone.append(drop_text)
+        self.wp_toolbar.append(drop_zone)
         wallpaper_page.append(self.wp_toolbar)
         self.drop_hint = drop_hint
+        self.drop_zone = drop_zone
 
         wp_scroller = Gtk.ScrolledWindow()
         wp_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
@@ -359,12 +413,6 @@ class ThemeManager(Gtk.Application):
         wp_scroller.set_child(self.wp_grid)
         wallpaper_page.append(wp_scroller)
         stack.add_named(wallpaper_page, "wallpapers")
-
-        # Drop images anywhere on the wallpaper page. GTK4 delivers
-        # `text/uri-list` as a string payload (newline-separated file URIs).
-        drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.COPY)
-        drop.connect("drop", self.on_drop)
-        wallpaper_page.add_controller(drop)
 
         # --- web wallpaper search, laid out like the wallpapers
         web_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -544,12 +592,18 @@ class ThemeManager(Gtk.Application):
             sel_fg = fg_hex
 
         css = f"""
-        window#thememanager-window, .tm-overlay {{ background: transparent; }}
+        window#thememanager-window {{ background: transparent; }}
         .tm-card {{ background: {bg_hex}; color: {fg_hex};
             border: 1px solid {accent_hex}; border-radius: {radius}px; padding: 17px; }}
         .tm-title {{ font-size: 15px; font-weight: 600; }}
         .tm-confirm {{ font-size: 18px; font-weight: 600; }}
         .tm-hint {{ color: {muted_hex}; font-size: 14px; }}
+        .tm-dropzone {{ border: 2px dashed alpha({fg_hex}, 0.30); border-radius: {radius}px;
+            padding: 10px 12px; }}
+        .tm-dropzone image {{ color: {muted_hex}; }}
+        .tm-dropzone.active {{ border-color: {accent_hex}; background: alpha({accent_hex}, 0.12); }}
+        .tm-dropzone.active image {{ color: {accent_hex}; }}
+        .tm-dropzone-title {{ font-weight: 600; font-size: 15px; }}
         .tm-header-btn {{ padding: 4px; min-width: 0; min-height: 0; margin-right: 4px; }}
         .tm-list {{ background: transparent; }}
         .tm-list row {{ border-radius: {radius}px; padding: 6px 2px 6px 6px; min-height: 92px; }}
@@ -1012,10 +1066,10 @@ class ThemeManager(Gtk.Application):
         self.wp_title.set_label(f"{theme_core.plain_text(theme.name)} — wallpapers")
         system = theme.scope == "system"
         self.paste_button.set_tooltip_text(
-            "Add the image copied to the clipboard (e.g. copied from the web)"
+            "Add the image copied to the clipboard (from the web or the file manager)"
             + (" — stored in your per-theme folder" if system else ""))
         self.drop_hint.set_label(
-            "Drop image files here, or paste one copied from the web. "
+            "From the file manager, or copy and paste with Ctrl+V. "
             + ("Stored in the user wallpaper folder, next to the theme's own wallpapers."
                if system else
                "Stored in the theme's user wallpaper folder."))
@@ -1663,8 +1717,9 @@ class ThemeManager(Gtk.Application):
             theme_core.notify("Could not read the clipboard", str(error))
             return
         if found is None:
-            theme_core.notify("No image in the clipboard",
-                              "Copy an image first (e.g. right-click → Copy image in the browser).")
+            # No image bytes: maybe image files copied in the file manager.
+            self._async(lambda: theme_core.clipboard_files(),
+                        lambda paths, files_error: self.after_paste_files(paths, files_error))
             return
         mime, data = found
         ext = theme_core.extension_for_mime(mime) or ".png"
@@ -1678,14 +1733,133 @@ class ThemeManager(Gtk.Application):
             return
         self.refresh_wallpapers()
 
-    def on_drop(self, _drop_target, value, _x, _y):
+    def after_paste_files(self, paths, error: Exception | None):
+        if error is not None or not paths:
+            theme_core.notify("No image in the clipboard",
+                              "Copy an image first (in the browser or the file manager).")
+            return
+        self.add_files(paths)
+
+    def drop_allowed(self) -> bool:
+        return self.active_theme is not None and \
+            self.stack.get_visible_child_name() == "wallpapers"
+
+    def on_drag_motion(self, _target, _drop, _x, _y):
+        if not self.drop_allowed():
+            return 0
+        self.drop_zone.add_css_class("active")
+        return Gdk.DragAction.COPY
+
+    def on_drop(self, _target, drop, _x, _y):
+        self.drop_zone.remove_css_class("active")
+        kind = drop_source_kind(drop) if self.drop_allowed() else None
+        if kind is None:
+            return False
+        what, mime = kind
+
+        def done(ok: bool):
+            drop.finish(Gdk.DragAction.COPY if ok else 0)
+
+        if what == "bytes":
+            def got_stream(_drop, result):
+                try:
+                    stream, _mime = drop.read_finish(result)
+                except GLib.Error:
+                    done(False)
+                    theme_core.notify("Nothing added", "The image could not be read.")
+                    return
+                name = theme_core.offered_file_name(mime) or "dropped-image"
+                self.read_stream(stream, theme_core.MAX_BACKGROUND_BYTES,
+                                 lambda data: (done(data is not None), self.add_image_data(data, name)))
+            drop.read_async([mime], GLib.PRIORITY_DEFAULT, None, got_stream)
+            return True
+
+        gtype = Gdk.FileList if what == "files" else GObject.TYPE_STRING
+
+        def got_value(_drop, result):
+            try:
+                value = drop.read_value_finish(result)
+            except GLib.Error:
+                value = None
+            done(value is not None)
+            self.drop_value(value)
+        drop.read_value_async(gtype, GLib.PRIORITY_DEFAULT, None, got_value)
+        return True
+
+    def read_stream(self, stream, limit: int, on_done, timeout_s: int = 30):
+        """Read a GInputStream to the end without blocking the UI; None if it
+        fails, exceeds `limit` bytes or takes longer than `timeout_s`."""
+        chunks: list[bytes] = []
+        cancel = Gio.Cancellable()
+        state = {"done": False, "timer": 0}
+
+        def finish(data):
+            if state["done"]:
+                return
+            state["done"] = True
+            if state["timer"]:
+                GLib.source_remove(state["timer"])
+                state["timer"] = 0
+            if data is None:
+                cancel.cancel()
+                stream.close_async(GLib.PRIORITY_DEFAULT, None, None)
+            on_done(data)
+
+        def next_chunk(_stream=None, result=None):
+            if result is not None:
+                try:
+                    chunk = stream.read_bytes_finish(result).get_data() or b""
+                except GLib.Error:
+                    finish(None)
+                    return
+                if not chunk:
+                    finish(b"".join(chunks))
+                    return
+                chunks.append(chunk)
+                if sum(map(len, chunks)) > limit:
+                    finish(None)
+                    return
+            if not state["done"]:
+                stream.read_bytes_async(1024 * 1024, GLib.PRIORITY_DEFAULT, cancel, next_chunk)
+
+        def expired():
+            state["timer"] = 0   # this source ends by returning False
+            finish(None)
+            return False
+
+        state["timer"] = GLib.timeout_add_seconds(timeout_s, expired)
+        next_chunk()
+
+    def add_image_data(self, data: bytes | None, name: str):
+        theme = self.active_theme
+        if theme is None:
+            return
+        if data is None:
+            theme_core.notify("Nothing added", "The image could not be read (or is over 50 MiB).")
+            return
+        try:
+            dest = theme_core.add_background_data(None, theme.slug, data, name=name)
+        except (ValueError, OSError) as error:
+            theme_core.notify("Could not add wallpaper", str(error))
+            return
+        theme_core.notify("Wallpaper added", f"{dest.name} → {theme_core.plain_text(theme.name)}")
+        self.refresh_wallpapers()
+
+    def drop_value(self, value) -> bool:
+        """Add the files named by a dropped file list or text."""
+        if not self.drop_allowed():
+            return False
+        paths = dropped_paths(value) if value is not None else []
+        if not paths:
+            theme_core.notify("Nothing added", "Drop local image files (JPG, PNG, WebP, GIF, BMP, HEIC).")
+            return False
+        return self.add_files(paths)
+
+    def add_files(self, paths: list[Path]) -> bool:
         theme = self.active_theme
         if theme is None:
             return False
-        paths = parse_uris(value.get_string() or "")[:MAX_DROPS]
-        if not paths:
-            theme_core.notify("Nothing added", "Drop local image files (JPG, PNG, WebP, GIF, BMP).")
-            return False
+        paths = paths[:MAX_DROPS]
 
         def copy_all():
             added, errors = [], []
@@ -1900,14 +2074,6 @@ class ThemeManager(Gtk.Application):
             return True
         return False
 
-    def on_backdrop_click(self, _gesture, _n_press, x, y):
-        widget = self.overlay.pick(x, y, Gtk.PickFlags.DEFAULT)
-        while widget is not None:
-            if widget is self.card:
-                return
-            widget = widget.get_parent()
-        self.close()
-
     def toggle(self):
         if self.window.is_visible():
             self.close()
@@ -1925,8 +2091,100 @@ class ThemeManager(Gtk.Application):
         if theme_core.sync_enabled():
             theme_core.prune_switcher_previews(self.hidden)
         self.refresh_themes()
+        self.grab_keyboard()
+        self.move_to(self.position)
         self.window.present()
         self.select_row(self.rows.get_selected_row())
+
+    # --- moving the popup -----------------------------------------------------
+
+    def monitor_geometry(self):
+        display = Gdk.Display.get_default()
+        surface = self.window.get_surface()
+        monitor = display.get_monitor_at_surface(surface) if display and surface else None
+        if monitor is None and display is not None and display.get_monitors().get_n_items():
+            monitor = display.get_monitors().get_item(0)
+        return monitor.get_geometry() if monitor is not None else None
+
+    def current_position(self) -> tuple[int, int]:
+        if self.position is not None:
+            return self.position
+        geo = self.monitor_geometry()
+        if geo is None:
+            return 0, 0
+        return (max(0, (geo.width - self.window.get_width()) // 2),
+                max(0, (geo.height - self.window.get_height()) // 2))
+
+    def move_to(self, position, save: bool = False):
+        """Place the card's top-left at `position` (monitor-relative, kept on
+        screen), or center it for None."""
+        if position is not None:
+            geo = self.monitor_geometry()
+            if geo is not None:
+                position = (min(max(0, int(position[0])), max(0, geo.width - self.window.get_width())),
+                            min(max(0, int(position[1])), max(0, geo.height - self.window.get_height())))
+        self.position = position
+        for edge in (Gtk4LayerShell.Edge.TOP, Gtk4LayerShell.Edge.LEFT):
+            Gtk4LayerShell.set_anchor(self.window, edge, position is not None)
+        if position is not None:
+            Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.LEFT, position[0])
+            Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.TOP, position[1])
+        if save:
+            try:
+                theme_core.save_window_position(position)
+            except OSError:
+                pass
+
+    def on_move_begin(self, _gesture, _x, _y):
+        self.moving = True
+        self.move_start = (self.current_position(), theme_core.cursor_position())
+
+    def on_move_update(self, gesture, dx, dy):
+        if not self.moving:
+            return
+        # The gesture's offsets are relative to the surface, which moves with
+        # the pointer; Hyprland's global cursor position does not drift.
+        (x, y), cursor_start = self.move_start
+        cursor = theme_core.cursor_position() if cursor_start is not None else None
+        if cursor is not None:
+            dx, dy = cursor[0] - cursor_start[0], cursor[1] - cursor_start[1]
+        else:
+            x, y = self.current_position()   # fallback: remaining distance to the grab point
+        self.move_to((x + round(dx), y + round(dy)))
+
+    def on_move_end(self, gesture, dx, dy):
+        if not self.moving:
+            return
+        self.moving = False
+        if self.position is not None:
+            self.move_to(self.position, save=True)
+
+    def grab_keyboard(self):
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.EXCLUSIVE)
+        if self.cursor_watch:
+            GLib.source_remove(self.cursor_watch)
+        start = theme_core.cursor_position()
+
+        def watch():
+            # The pointer may leave for another window without touching the card.
+            if not self.window.is_visible():
+                self.cursor_watch = 0
+                return False
+            now = theme_core.cursor_position()
+            if start is None or now is None or \
+                    abs(now[0] - start[0]) + abs(now[1] - start[1]) > CURSOR_SLACK:
+                self.cursor_watch = 0
+                self.release_keyboard()
+                return False
+            return True
+
+        self.cursor_watch = GLib.timeout_add(200, watch)
+
+    def release_keyboard(self):
+        if self.cursor_watch:
+            GLib.source_remove(self.cursor_watch)
+            self.cursor_watch = 0
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
 
     def close(self):
         if self.actions_menu_open():

@@ -18,7 +18,8 @@ from pathlib import Path
 import gi
 
 gi.require_version("GLib", "2.0")
-from gi.repository import GLib  # noqa: E402
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib  # noqa: E402
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
@@ -51,6 +52,10 @@ class ViewLayerTest(unittest.TestCase):
         self._orig_apply = theme_core.apply_theme
         self._orig_notify = theme_core.notify
         self._orig_clipboard = theme_core.clipboard_image
+        self._orig_clipboard_files = theme_core.clipboard_files
+        self._orig_cursor = theme_core.cursor_position
+        theme_core.cursor_position = lambda: None
+        theme_core.clipboard_files = lambda **kw: []
         theme_core.default_roots = lambda: self.roots
         theme_core.hidden_file = lambda: self.hidden_file
         self.applied: list[str] = []
@@ -152,6 +157,8 @@ class ViewLayerTest(unittest.TestCase):
         theme_core.apply_theme = self._orig_apply
         theme_core.notify = self._orig_notify
         theme_core.clipboard_image = self._orig_clipboard
+        theme_core.clipboard_files = self._orig_clipboard_files
+        theme_core.cursor_position = self._orig_cursor
         (theme_core.switcher_cache_dir, theme_core.menu_extension_file,
          theme_core.preload_switcher) = self._orig_switcher
         theme_core.refresh_switcher_cache = self._orig_refresh
@@ -270,7 +277,7 @@ class ViewLayerTest(unittest.TestCase):
         src.write_bytes(PNG)
         self.app.open_wallpapers_for(theme)
         uri = GLib.filename_to_uri(str(src), None)
-        self.app.on_drop(None, GLib.Variant("s", uri), 0, 0)
+        self.app.drop_value(uri)
         dest = list((self.roots.user_backgrounds / "alpha").iterdir())
         self.assertEqual(len(dest), 1)
         self.assertIn("added", " ".join(t for t, _ in self.notices).lower())
@@ -284,13 +291,60 @@ class ViewLayerTest(unittest.TestCase):
             paths.append(p)
         self.app.open_wallpapers_for(theme)
         uris = "\n".join(GLib.filename_to_uri(str(p), None) for p in paths)
-        self.app.on_drop(None, GLib.Variant("s", uris), 0, 0)
+        self.app.drop_value(uris)
         self.assertEqual(len(list((self.roots.user_backgrounds / "alpha").iterdir())), 3)
+
+    def test_on_drop_file_list_from_file_manager(self):
+        theme = self.make_theme("user", "alpha")
+        src = Path(self.tmp.name) / "from nautilus.png"
+        src.write_bytes(PNG)
+        self.app.open_wallpapers_for(theme)
+        files = Gdk.FileList.new_from_list([Gio.File.new_for_path(str(src))])
+        self.assertTrue(self.app.drop_value(files))
+        dest = list((self.roots.user_backgrounds / "alpha").iterdir())
+        self.assertEqual([d.name for d in dest], ["from nautilus.png"])
+
+    def test_browser_image_bytes_are_added(self):
+        theme = self.make_theme("user", "alpha")
+        self.app.open_wallpapers_for(theme)
+        self.app.add_image_data(PNG, "43lk53.jpg")
+        dest = list((self.roots.user_backgrounds / "alpha").iterdir())
+        self.assertEqual([d.name for d in dest], ["43lk53.png"])
+        self.app.add_image_data(b"<html>", "page.html")
+        self.assertEqual(len(list((self.roots.user_backgrounds / "alpha").iterdir())), 1)
+        self.assertTrue(any("could not" in t.lower() for t, _ in self.notices))
+
+    def run_stream(self, stream, limit, timeout_s=5):
+        result = []
+        loop = GLib.MainLoop()
+        self.app.read_stream(stream, limit, lambda data: (result.append(data), loop.quit()),
+                             timeout_s=timeout_s)
+        GLib.timeout_add_seconds(10, loop.quit)
+        loop.run()
+        return result
+
+    def test_read_stream_bounds(self):
+        ok = self.run_stream(Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(b"a" * 3000)), 4096)
+        self.assertEqual(ok, [b"a" * 3000])
+        big = self.run_stream(Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(b"a" * 5000)), 4096)
+        self.assertEqual(big, [None])
+
+    def test_read_stream_stalled_source_times_out(self):
+        import os as oslib
+        import time as timelib
+        read_fd, write_fd = oslib.pipe()
+        self.addCleanup(oslib.close, write_fd)
+        gi.require_version("GioUnix", "2.0")
+        from gi.repository import GioUnix
+        stream = GioUnix.InputStream.new(read_fd, True)
+        start = timelib.monotonic()
+        self.assertEqual(self.run_stream(stream, 4096, timeout_s=1), [None])
+        self.assertLess(timelib.monotonic() - start, 3)
 
     def test_on_drop_ignores_plain_text(self):
         theme = self.make_theme("user", "alpha")
         self.app.open_wallpapers_for(theme)
-        self.app.on_drop(None, GLib.Variant("s", "hello world, no uris"), 0, 0)
+        self.app.drop_value("hello world, no uris")
         d = self.roots.user_backgrounds / "alpha"
         self.assertFalse(d.exists() and any(d.iterdir()))
         self.assertIn("nothing", " ".join(t for t, _ in self.notices).lower())
@@ -300,8 +354,7 @@ class ViewLayerTest(unittest.TestCase):
         src = Path(self.tmp.name) / "notes.txt"
         src.write_text("not an image")
         self.app.open_wallpapers_for(theme)
-        self.app.on_drop(None, GLib.Variant("s",
-                         GLib.filename_to_uri(str(src), None)), 0, 0)
+        self.app.drop_value(GLib.filename_to_uri(str(src), None))
         d = self.roots.user_backgrounds / "alpha"
         self.assertFalse(d.exists() and any(d.iterdir()))
         self.assertTrue(any("skipped" in t.lower() for t, _ in self.notices))
@@ -314,6 +367,18 @@ class ViewLayerTest(unittest.TestCase):
         dest = list((self.roots.user_backgrounds / "alpha").iterdir())
         self.assertEqual(len(dest), 1)
         self.assertTrue(dest[0].name.startswith("pasted-image"))
+
+    def test_paste_copied_file_adds_image(self):
+        theme = self.make_theme("user", "alpha")
+        src = Path(self.tmp.name) / "holiday photo.png"
+        src.write_bytes(PNG)
+        theme_core.clipboard_image = lambda **kw: None
+        theme_core.clipboard_files = lambda **kw: [src]
+        self.app.open_wallpapers_for(theme)
+        self.app.paste_clipboard()
+        dest = list((self.roots.user_backgrounds / "alpha").iterdir())
+        self.assertEqual(len(dest), 1)
+        self.assertTrue(dest[0].name.startswith("holiday"))
 
     def test_paste_empty_clipboard_notifies(self):
         theme = self.make_theme("user", "alpha")
