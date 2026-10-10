@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import theme_core
 import wallpaper_search as ws
 
-JPEG = b"\xff\xd8\xff" + b"\x00" * 32
+from images import jpeg
+
+JPEG = jpeg()
 
 
 def item(wid="abc123", **over):

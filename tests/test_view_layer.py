@@ -27,7 +27,9 @@ sys.path.insert(0, str(PLUGIN_DIR))
 import theme_core  # noqa: E402
 import theme_popup  # noqa: E402
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+from images import gif, jpeg, png
+
+PNG = png()
 
 
 class ViewLayerTest(unittest.TestCase):
@@ -263,6 +265,29 @@ class ViewLayerTest(unittest.TestCase):
         # Back button returns to the list.
         self.app.show_themes()
         self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+
+    def test_oversized_images_are_never_decoded(self):
+        # A theme can ship a tiny file that declares a 60000×60000 canvas;
+        # neither its tile nor its preview may reach GTK's decoder.
+        theme = self.make_theme("system", "bomb", ("huge.png", "fine.png"))
+        (theme.path / "backgrounds" / "huge.png").write_bytes(png(60000, 60000))
+        (theme.path / "preview.png").write_bytes(gif(1920, 1080, frames=40))
+        decoded, requested = [], []
+        pixbuf = theme_popup.GdkPixbuf.Pixbuf
+        orig_load = pixbuf.new_from_file_at_scale
+        orig_request = self.app.decoder.request
+        pixbuf.new_from_file_at_scale = lambda path, *a: decoded.append(Path(path).name) or orig_load(path, *a)
+        self.app.decoder.request = lambda picture, path, w, h: requested.append(str(path))
+        try:
+            self.app.refresh_themes()
+            self.app.open_wallpapers_for(self.make_theme("system", "bomb"))
+            self.assertEqual({Path(p).name for p in requested}, {"huge.png", "fine.png", "preview.png"})
+            for path in requested:
+                theme_popup.scaled_pixbuf(path, 100, 100)   # what the worker thread runs
+        finally:
+            pixbuf.new_from_file_at_scale = orig_load
+            self.app.decoder.request = orig_request
+        self.assertEqual(decoded, ["fine.png"])
 
     def test_empty_wallpaper_state(self):
         theme = self.make_theme("user", "alpha")
@@ -640,7 +665,7 @@ class ViewLayerTest(unittest.TestCase):
 
     def test_paste_jpeg_keeps_jpeg_extension(self):
         theme = self.make_theme("user", "alpha")
-        theme_core.clipboard_image = lambda **kw: ("image/jpeg", b"\xff\xd8\xff" + b"\x00" * 16)
+        theme_core.clipboard_image = lambda **kw: ("image/jpeg", jpeg())
         self.app.open_wallpapers_for(theme)
         self.app.paste_clipboard()
         dest = list((self.roots.user_backgrounds / "alpha").iterdir())

@@ -9,6 +9,7 @@ All file work goes through theme_core, which enforces the trust rules.
 """
 
 import os
+import queue
 import re
 import signal
 import sys
@@ -123,14 +124,45 @@ class FixedPicture(Gtk.Picture):
         return size, size, -1, -1
 
 
-def scaled_texture(path: str, width: int, height: int):
-    """A texture decoded at (twice) the display size, not the full 1800px
-    preview, so a long theme list stays light on memory. None on failure."""
+def scaled_pixbuf(path: str, width: int, height: int):
+    """A pixbuf decoded at (twice) the display size, not the full 1800px
+    preview, so a long list stays light on memory. None on failure.
+
+    The header is checked first: GTK's loaders allocate the declared canvas
+    before scaling, so a small crafted file with huge dimensions (or frames)
+    is never handed to them."""
+    if theme_core.image_size_problem(path):
+        return None
     try:
-        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, width * 2, height * 2, True)
-        return Gdk.Texture.new_for_pixbuf(pixbuf)
+        return GdkPixbuf.Pixbuf.new_from_file_at_scale(path, width * 2, height * 2, True)
     except (GLib.Error, TypeError):
         return None
+
+
+class ImageDecoder:
+    """Decodes previews and wallpaper thumbnails on worker threads and hands
+    the result to a Gtk.Picture on the main loop, so neither a large image
+    nor a slow disk ever freezes the popup."""
+
+    def __init__(self, workers: int):
+        self.jobs = queue.SimpleQueue()
+        for _ in range(workers):
+            threading.Thread(target=self.work, daemon=True).start()
+
+    def request(self, picture, path: str, width: int, height: int):
+        self.jobs.put((picture, str(path), width, height))
+
+    def work(self):
+        while True:
+            picture, path, width, height = self.jobs.get()
+            pixbuf = scaled_pixbuf(path, width, height)
+            if pixbuf is not None:
+                GLib.idle_add(self.show, picture, pixbuf)
+
+    @staticmethod
+    def show(picture, pixbuf):
+        picture.set_paintable(Gdk.Texture.new_for_pixbuf(pixbuf))
+        return GLib.SOURCE_REMOVE
 
 
 def parse_uris(text: str) -> list[Path]:
@@ -183,6 +215,7 @@ class ThemeManager(Gtk.Application):
         self.move_start = ((0, 0), None)
         self.moving = False
         self.menu_anchor = None
+        self.decoder = ImageDecoder(PREVIEW_WORKERS)
         # Type-to-filter as in Simple Launcher: no search field, the title shows it.
         self.filter_query = ""     # theme list
         self.wp_filter = ""        # wallpaper page
@@ -840,9 +873,10 @@ class ThemeManager(Gtk.Application):
         frame = Gtk.Box()
         frame.add_css_class("tm-preview")
         frame.set_valign(Gtk.Align.CENTER)
-        texture = scaled_texture(theme.preview, PREVIEW_W, PREVIEW_H) if theme.preview else None
-        if texture is not None:
-            frame.append(FixedPicture(PREVIEW_W, PREVIEW_H, texture))
+        if theme.preview:
+            picture = FixedPicture(PREVIEW_W, PREVIEW_H)
+            self.decoder.request(picture, theme.preview, PREVIEW_W, PREVIEW_H)
+            frame.append(picture)
         else:
             icon = Gtk.Image.new_from_icon_name("applications-graphics")
             icon.set_pixel_size(48)
@@ -1221,9 +1255,8 @@ class ThemeManager(Gtk.Application):
 
     def show_web_thumb(self, wid: str, path: str):
         picture = self.web_pictures.pop(wid, None)
-        texture = scaled_texture(path, TILE, TILE * 9 // 16) if picture is not None else None
-        if texture is not None:
-            picture.set_paintable(texture)
+        if picture is not None:
+            self.decoder.request(picture, path, TILE, TILE * 9 // 16)
         return GLib.SOURCE_REMOVE
 
     def show_web_menu(self, button, item):
@@ -1335,9 +1368,8 @@ class ThemeManager(Gtk.Application):
         picture.set_content_fit(Gtk.ContentFit.COVER)
         picture.set_size_request(TILE, TILE * 9 // 16)
         cached = theme_catalog.preview_path(entry)
-        texture = scaled_texture(str(cached), TILE, TILE * 9 // 16) if cached.is_file() else None
-        if texture is not None:
-            picture.set_paintable(texture)
+        if cached.is_file():
+            self.decoder.request(picture, cached, TILE, TILE * 9 // 16)
         else:
             self.catalog_pictures[entry.slug] = picture
         frame = Gtk.Overlay()
@@ -1398,9 +1430,8 @@ class ThemeManager(Gtk.Application):
 
     def show_preview(self, slug: str, path: str):
         picture = self.catalog_pictures.pop(slug, None)
-        texture = scaled_texture(path, TILE, TILE * 9 // 16) if picture is not None else None
-        if texture is not None:
-            picture.set_paintable(texture)
+        if picture is not None:
+            self.decoder.request(picture, path, TILE, TILE * 9 // 16)
         return GLib.SOURCE_REMOVE
 
     def show_catalog_menu(self, button, entry):
@@ -1571,7 +1602,8 @@ class ThemeManager(Gtk.Application):
         if wallpaper.hidden:
             tile.add_css_class("tm-row-hidden")
 
-        picture = Gtk.Picture.new_for_filename(str(wallpaper.path))
+        picture = Gtk.Picture()
+        self.decoder.request(picture, wallpaper.path, TILE, TILE * 9 // 16)
         picture.set_content_fit(Gtk.ContentFit.COVER)
         picture.set_size_request(TILE, TILE * 9 // 16)  # wallpapers are 16:9
         picture.set_valign(Gtk.Align.CENTER)

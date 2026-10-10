@@ -20,6 +20,7 @@ Trust rules (mirroring the marketplace security review):
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -39,6 +40,11 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 HEIF_EXTS = {".heic", ".heif"}
 MAX_BACKGROUND_BYTES = 50 * 1024 * 1024   # one wallpaper, whatever its source
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024    # anything read from a subprocess
+# Decoded size, checked from the image header before anything is decoded: a
+# small, highly compressed file can still declare a huge canvas, and GTK's
+# loaders allocate the full canvas (every frame for animations) up front.
+MAX_IMAGE_SIDE = 16384
+MAX_IMAGE_PIXELS = 64_000_000             # width × height × frames, ~256 MiB RGBA
 PREVIEW_NAMES = ("preview.png", "preview.jpg", "preview.jpeg",
                  "preview.webp", "preview.gif", "preview.bmp")
 
@@ -575,6 +581,15 @@ def _copy_bounded(source: Path, dest: Path) -> None:
         raise
 
 
+def _require_sane_size(dest: Path) -> None:
+    """Remove a just-stored image whose header declares a canvas too large to
+    decode safely, and say why."""
+    problem = image_size_problem(dest)
+    if problem:
+        dest.unlink(missing_ok=True)
+        raise ValueError(problem)
+
+
 def add_background_file(roots: Roots | None, slug: str, source: str | Path) -> Path:
     """Copy one image file into the theme's per-theme user background folder
     (`~/.config/omarchy/backgrounds/<slug>/`), which Omarchy merges with the
@@ -592,6 +607,7 @@ def add_background_file(roots: Roots | None, slug: str, source: str | Path) -> P
         raise ValueError("image too large (max 50 MiB)")
     dest = _unique_dest(roots, slug, _sanitize_name(source.name))
     _copy_bounded(source, dest)
+    _require_sane_size(dest)   # checked on our copy, so the source cannot change after
     return dest
 
 
@@ -616,6 +632,7 @@ def _add_heif_file(roots: Roots, slug: str, source: Path) -> Path:
         stem = _sanitize_name(source.stem) or "image"
         dest = _unique_dest(roots, slug, f"{stem}.jpg")
         _copy_bounded(converted, dest)
+        _require_sane_size(dest)
     return dest
 
 
@@ -632,6 +649,7 @@ def add_background_bytes(roots: Roots | None, slug: str, data: bytes,
     name = _sanitize_name(name)
     if not _is_image_name(name):
         raise ValueError(f"not an image: {name}")
+    check_image_size(data)
     dest = _unique_dest(roots, slug, name)
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
     with os.fdopen(fd, "wb") as handle:
@@ -992,6 +1010,158 @@ def image_extension(data: bytes) -> str | None:
     if data[:2] == b"BM":
         return ".bmp"
     return None
+
+
+def _image_header_size(handle) -> tuple[int, int, int] | None:
+    """``(width, height, frames)`` from an image header, reading only header
+    and chunk/segment lengths, never pixel data. None if the format is not
+    one we show or the header is malformed."""
+    head = handle.read(32)
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        if head[12:16] != b"IHDR":
+            return None
+        return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big"), 1
+    if head[:3] == b"\xff\xd8\xff":
+        return _jpeg_size(handle)
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return _gif_size(handle, head)
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return _webp_size(handle)
+    if head[:2] == b"BM" and len(head) >= 26:
+        if int.from_bytes(head[14:18], "little") == 12:   # OS/2 core header
+            return int.from_bytes(head[18:20], "little"), int.from_bytes(head[20:22], "little"), 1
+        width = int.from_bytes(head[18:22], "little", signed=True)
+        height = int.from_bytes(head[22:26], "little", signed=True)
+        return abs(width), abs(height), 1   # negative height = top-down rows
+    return None
+
+
+def _jpeg_size(handle) -> tuple[int, int, int] | None:
+    handle.seek(2)
+    for _ in range(10000):   # segments are walked by length, never scanned
+        byte = handle.read(1)
+        if byte != b"\xff":
+            return None
+        marker = handle.read(1)
+        while marker == b"\xff":   # fill bytes
+            marker = handle.read(1)
+        if not marker:
+            return None
+        code = marker[0]
+        if code == 0x01 or 0xD0 <= code <= 0xD7:   # no length field
+            continue
+        if code in (0xD9, 0xDA):   # end of image / start of scan before any frame header
+            return None
+        length = int.from_bytes(handle.read(2), "big")
+        if length < 2:
+            return None
+        if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+            data = handle.read(5)
+            if len(data) < 5:
+                return None
+            return int.from_bytes(data[3:5], "big"), int.from_bytes(data[1:3], "big"), 1
+        handle.seek(length - 2, io.SEEK_CUR)
+    return None
+
+
+def _gif_size(handle, head: bytes) -> tuple[int, int, int] | None:
+    """Canvas size and frame count. Frames are counted by walking block
+    lengths; a frame larger than the canvas grows the reported size."""
+    width = int.from_bytes(head[6:8], "little")
+    height = int.from_bytes(head[8:10], "little")
+    pos = 13
+    if head[10] & 0x80:
+        pos += 3 << ((head[10] & 0x07) + 1)
+    handle.seek(pos)
+    frames = 0
+
+    def skip_sub_blocks() -> bool:
+        while True:
+            size = handle.read(1)
+            if not size:
+                return False
+            if size[0] == 0:
+                return True
+            handle.seek(size[0], io.SEEK_CUR)
+
+    while True:
+        block = handle.read(1)
+        if block == b"\x2c":   # image descriptor
+            desc = handle.read(9)
+            if len(desc) < 9:
+                break
+            frames += 1
+            width = max(width, int.from_bytes(desc[0:2], "little") + int.from_bytes(desc[4:6], "little"))
+            height = max(height, int.from_bytes(desc[2:4], "little") + int.from_bytes(desc[6:8], "little"))
+            if desc[8] & 0x80:
+                handle.seek(3 << ((desc[8] & 0x07) + 1), io.SEEK_CUR)
+            handle.read(1)   # LZW minimum code size
+            if not skip_sub_blocks():
+                break
+            if width * height * frames > MAX_IMAGE_PIXELS:
+                break   # already over budget, no need to walk the rest
+        elif block == b"\x21":   # extension
+            handle.read(1)
+            if not skip_sub_blocks():
+                break
+        else:   # trailer, EOF or garbage
+            break
+    return (width, height, frames) if frames else None
+
+
+def _webp_size(handle) -> tuple[int, int, int] | None:
+    handle.seek(12)
+    size = None
+    frames = 0
+    for _ in range(100000):
+        header = handle.read(8)
+        if len(header) < 8:
+            break
+        kind, length = header[:4], int.from_bytes(header[4:8], "little")
+        data = handle.read(min(length, 10))
+        if kind == b"VP8X" and len(data) >= 10:
+            size = (1 + int.from_bytes(data[4:7], "little"), 1 + int.from_bytes(data[7:10], "little"))
+        elif kind == b"VP8 " and len(data) >= 10 and size is None:
+            size = (int.from_bytes(data[6:8], "little") & 0x3FFF,
+                    int.from_bytes(data[8:10], "little") & 0x3FFF)
+        elif kind == b"VP8L" and len(data) >= 5 and size is None:
+            bits = int.from_bytes(data[1:5], "little")
+            size = (1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF))
+        elif kind == b"ANMF":
+            frames += 1
+            if size and size[0] * size[1] * frames > MAX_IMAGE_PIXELS:
+                break
+        handle.seek(length + (length & 1) - len(data), io.SEEK_CUR)
+    return (size[0], size[1], max(frames, 1)) if size else None
+
+
+def image_size_problem(source) -> str | None:
+    """Why an image must not be decoded, or None if its header declares a
+    sane size. ``source`` is a path or image bytes. Only the header and
+    block lengths are read, so this is cheap even for a crafted file."""
+    try:
+        if isinstance(source, (bytes, bytearray, memoryview)):
+            size = _image_header_size(io.BytesIO(bytes(source)))
+        else:
+            with open(source, "rb") as handle:
+                size = _image_header_size(handle)
+    except (OSError, ValueError):
+        return "unreadable image"
+    if size is None:
+        return "not a supported image (JPG, PNG, WebP, GIF, BMP)"
+    width, height, frames = size
+    if not width or not height:
+        return "image has no size"
+    if width > MAX_IMAGE_SIDE or height > MAX_IMAGE_SIDE or width * height * frames > MAX_IMAGE_PIXELS:
+        return f"image too large to show ({width}×{height}{f' × {frames} frames' if frames > 1 else ''})"
+    return None
+
+
+def check_image_size(source) -> None:
+    """Raise ValueError if ``source`` (path or bytes) is not safe to decode."""
+    problem = image_size_problem(source)
+    if problem:
+        raise ValueError(problem)
 
 
 def add_background_data(roots: Roots | None, slug: str, data: bytes,

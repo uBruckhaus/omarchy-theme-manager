@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.theme-manager",
   "name": "Theme Manager",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Every Omarchy theme in one list, user and system: apply, hide or delete a theme, and manage each theme's wallpapers. Add them by drag & drop from the file manager or straight from a web page, by pasting, or by web search; iPhone HEIC photos are converted. Hidden themes and wallpapers also disappear from Omarchy's own pickers. Browse and install new themes from omarchy.org. A movable floating popup that stays open while you work.",

@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import theme_core
+from images import bmp, gif, jpeg, png, webp
 
 
 def make_roots(tmp: Path) -> theme_core.Roots:
@@ -159,13 +160,13 @@ class WallpaperTests(unittest.TestCase):
 
     def test_add_file_copies_into_user_folder(self):
         src = Path(self.tmp.name) / "photo.PNG"
-        src.write_bytes(b"imagedata")
+        src.write_bytes(png())
         dest = theme_core.add_background_file(self.roots, "nord", src)
         self.assertTrue(dest.is_relative_to(self.roots.user_backgrounds / "nord"))
         self.assertEqual(dest.name.lower(), "photo.png")
-        self.assertEqual(dest.read_bytes(), b"imagedata")
+        self.assertEqual(dest.read_bytes(), png())
         # Original untouched
-        self.assertEqual(src.read_bytes(), b"imagedata")
+        self.assertEqual(src.read_bytes(), png())
 
     @unittest.skipUnless(shutil.which("heif-enc") and shutil.which("heif-dec")
                          and shutil.which("magick"), "needs libheif and ImageMagick")
@@ -180,15 +181,54 @@ class WallpaperTests(unittest.TestCase):
         self.assertEqual(dest.read_bytes()[:3], b"\xff\xd8\xff")
 
     def test_add_data_takes_type_from_bytes(self):
-        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
-        dest = theme_core.add_background_data(self.roots, "nord", png, name="photo.jpg")
+        dest = theme_core.add_background_data(self.roots, "nord", png(), name="photo.jpg")
         self.assertEqual(dest.name, "photo.png")
-        dest = theme_core.add_background_data(self.roots, "nord", b"GIF89a" + b"\x00" * 8,
+        dest = theme_core.add_background_data(self.roots, "nord", gif(),
                                               name="../../evil")
         self.assertEqual(dest.parent, self.roots.user_backgrounds / "nord")
         self.assertEqual(dest.suffix, ".gif")
         with self.assertRaises(ValueError):
             theme_core.add_background_data(self.roots, "nord", b"<svg></svg>", name="x.png")
+
+    def test_image_size_reads_headers_of_every_format(self):
+        cases = {"png": png(1920, 1080), "jpeg": jpeg(1920, 1080, app_padding=60000),
+                 "gif": gif(1920, 1080), "webp": webp(1920, 1080), "bmp": bmp(1920, -1080)}
+        for name, data in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(theme_core.image_size_problem(data))
+                path = Path(self.tmp.name) / f"ok.{name}"
+                path.write_bytes(data)
+                self.assertIsNone(theme_core.image_size_problem(path))
+
+    def test_decompression_bombs_are_refused_before_decoding(self):
+        bombs = {"png": png(60000, 60000), "png-wide": png(100000, 10),
+                 "jpeg": jpeg(65000, 65000), "gif": gif(16000, 16000),
+                 "gif-frames": gif(1920, 1080, frames=40), "webp": webp(16000, 16000),
+                 "webp-frames": webp(1920, 1080, frames=40), "bmp": bmp(1 << 20, 1 << 20)}
+        for name, data in bombs.items():
+            with self.subTest(name):
+                self.assertLess(len(data), 4096)   # tiny files, huge canvases
+                self.assertIn("too large", theme_core.image_size_problem(data))
+
+    def test_malformed_or_unknown_headers_are_refused(self):
+        for data in (b"", b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"\xff\xd8\xff\xe0\x00\x00",
+                     b"\xff\xd8\xff\xda\x00\x08", b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x3b",
+                     b"RIFF\x00\x00\x00\x00WEBP", b"<svg></svg>", png(0, 10)):
+            with self.subTest(data=data[:12]):
+                self.assertIsNotNone(theme_core.image_size_problem(data))
+
+    def test_imports_refuse_huge_canvases_and_store_nothing(self):
+        bomb = png(60000, 60000)
+        src = Path(self.tmp.name) / "bomb.png"
+        src.write_bytes(bomb)
+        with self.assertRaises(ValueError):
+            theme_core.add_background_file(self.roots, "nord", src)
+        with self.assertRaises(ValueError):
+            theme_core.add_background_bytes(self.roots, "nord", bomb, name="pasted.png")
+        with self.assertRaises(ValueError):
+            theme_core.add_background_data(self.roots, "nord", gif(1920, 1080, frames=40))
+        nord = self.roots.user_backgrounds / "nord"
+        self.assertFalse(nord.exists() and any(nord.iterdir()))
 
     def test_offered_file_name(self):
         self.assertEqual(theme_core.offered_file_name('application/octet-stream;name="43lk53.jpg"'),
@@ -221,7 +261,7 @@ class WallpaperTests(unittest.TestCase):
 
     def test_add_file_unique_names(self):
         src = Path(self.tmp.name) / "a.png"
-        src.write_bytes(b"img")
+        src.write_bytes(png())
         first = theme_core.add_background_file(self.roots, "nord", src)
         second = theme_core.add_background_file(self.roots, "nord", src)
         self.assertNotEqual(first, second)
@@ -240,9 +280,9 @@ class WallpaperTests(unittest.TestCase):
             theme_core.add_background_file(self.roots, "..", Path("x.png"))
 
     def test_add_bytes_roundtrip(self):
-        dest = theme_core.add_background_bytes(self.roots, "nord", b"\x89PNG",
+        dest = theme_core.add_background_bytes(self.roots, "nord", png(),
                                                name="pasted-image.png")
-        self.assertEqual(dest.read_bytes(), b"\x89PNG")
+        self.assertEqual(dest.read_bytes(), png())
         with self.assertRaises(ValueError):
             theme_core.add_background_bytes(self.roots, "nord", b"", name="x.png")
 
@@ -546,7 +586,7 @@ class HiddenWallpaperTests(unittest.TestCase):
         make_theme(self.roots, "system", "sys", ("a.png",))
         theme = self.theme("sys")
         src = self.root / "x.png"
-        src.write_bytes(b"\x89PNG fake")
+        src.write_bytes(png())
         added = theme_core.add_background_file(self.roots, "sys", src)
         info = next(w for w in theme_core.list_backgrounds(self.roots, theme) if w.name == "x.png")
         theme_core.set_wallpaper_hidden(self.roots, theme, info, True)
