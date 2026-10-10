@@ -341,6 +341,114 @@ class ViewLayerTest(unittest.TestCase):
         self.assertEqual(self.run_stream(stream, 4096, timeout_s=1), [None])
         self.assertLess(timelib.monotonic() - start, 3)
 
+    def fake_drop(self, mime, stream):
+        """A foreign drag source offering `mime` with `stream` as payload. It
+        fails the test if anything reads it through read_value_async."""
+        test = self
+
+        class Formats:
+            def get_mime_types(self):
+                return [mime]
+
+        class FakeDrop:
+            finished = []
+
+            def get_formats(self):
+                return Formats()
+
+            def read_async(self, mimes, _prio, _cancel, callback):
+                test.assertEqual(mimes, [mime])
+                GLib.idle_add(lambda: callback(self, None) and False)
+
+            def read_finish(self, _result):
+                return stream, mime
+
+            def read_value_async(self, *_args):
+                test.fail("drops must not be read through read_value_async")
+
+            def finish(self, action):
+                self.finished.append(action)
+        return FakeDrop()
+
+    def run_drop(self, drop, seconds=5):
+        loop = GLib.MainLoop()
+        self.assertTrue(self.app.on_drop(None, drop, 0, 0))
+
+        def check():
+            if drop.finished:
+                loop.quit()
+                return False
+            return True
+        GLib.timeout_add(20, check)
+        GLib.timeout_add_seconds(seconds, loop.quit)
+        loop.run()
+
+    def test_dropped_uri_list_is_read_bounded(self):
+        theme = self.make_theme("user", "alpha")
+        src = Path(self.tmp.name) / "listed.png"
+        src.write_bytes(PNG)
+        self.app.open_wallpapers_for(theme)
+        uri = GLib.filename_to_uri(str(src), None).encode()
+        drop = self.fake_drop("text/uri-list",
+                              Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(uri + b"\r\n")))
+        self.run_drop(drop)
+        self.assertEqual(drop.finished, [Gdk.DragAction.COPY])
+        self.assertEqual([d.name for d in (self.roots.user_backgrounds / "alpha").iterdir()],
+                         ["listed.png"])
+
+    def test_oversized_uri_list_drop_is_refused(self):
+        theme = self.make_theme("user", "alpha")
+        src = Path(self.tmp.name) / "big.png"
+        src.write_bytes(PNG)
+        self.app.open_wallpapers_for(theme)
+        uri = GLib.filename_to_uri(str(src), None).encode() + b"\n"
+        payload = uri + b"#" * (2 * 1024 * 1024)   # 2 MiB, over MAX_DROP_LIST_BYTES
+        drop = self.fake_drop("text/uri-list",
+                              Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(payload)))
+        self.run_drop(drop)
+        self.assertEqual(drop.finished, [0])
+        d = self.roots.user_backgrounds / "alpha"
+        self.assertFalse(d.exists() and any(d.iterdir()))
+        self.assertTrue(any("too long" in b for _, b in self.notices))
+
+    def test_text_drop_is_read_bounded(self):
+        theme = self.make_theme("user", "alpha")
+        src = Path(self.tmp.name) / "as text.png"
+        src.write_bytes(PNG)
+        self.app.open_wallpapers_for(theme)
+        drop = self.fake_drop("text/plain;charset=utf-8",
+                              Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(str(src).encode())))
+        self.run_drop(drop)
+        self.assertEqual(drop.finished, [Gdk.DragAction.COPY])
+        self.assertEqual(len(list((self.roots.user_backgrounds / "alpha").iterdir())), 1)
+
+    def test_stalled_uri_list_drop_times_out(self):
+        import os as oslib
+        import time as timelib
+        theme = self.make_theme("user", "alpha")
+        self.app.open_wallpapers_for(theme)
+        read_fd, write_fd = oslib.pipe()
+        self.addCleanup(oslib.close, write_fd)
+        oslib.write(write_fd, b"file:///tmp/x\n")   # some data, then nothing
+        gi.require_version("GioUnix", "2.0")
+        from gi.repository import GioUnix
+        drop = self.fake_drop("text/uri-list", GioUnix.InputStream.new(read_fd, True))
+        old = theme_popup.DROP_LIST_TIMEOUT
+        theme_popup.DROP_LIST_TIMEOUT = 1
+        self.addCleanup(setattr, theme_popup, "DROP_LIST_TIMEOUT", old)
+        start = timelib.monotonic()
+        self.run_drop(drop)
+        self.assertEqual(drop.finished, [0])
+        self.assertLess(timelib.monotonic() - start, 3)
+
+    def test_uri_list_stops_after_max_drops(self):
+        paths = []
+        for i in range(theme_popup.MAX_DROPS + 5):
+            p = Path(self.tmp.name) / f"many-{i}.png"
+            p.write_bytes(PNG)
+            paths.append(GLib.filename_to_uri(str(p), None))
+        self.assertEqual(len(theme_popup.parse_uris("\n".join(paths))), theme_popup.MAX_DROPS)
+
     def test_on_drop_ignores_plain_text(self):
         theme = self.make_theme("user", "alpha")
         self.app.open_wallpapers_for(theme)

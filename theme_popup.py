@@ -31,7 +31,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Gtk4LayerShell, Pango
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Gtk4LayerShell, Pango
 
 # Once Gtk4LayerShell is loaded into this process by ld.so, remove it from
 # LD_PRELOAD so child processes do not inherit it.
@@ -62,6 +62,8 @@ SYNC_SCRIPT = Path(__file__).resolve().parent / "switcher_sync.py"
 PREVIEW_WORKERS = 4    # parallel preview downloads on the import page
 CURSOR_SLACK = 24  # px the pointer may move after opening before the keyboard is released
 MAX_DROPS = 10  # one drop gesture adds at most this many wallpapers
+MAX_DROP_LIST_BYTES = 1024 * 1024  # a dropped uri-list or text, as for the clipboard
+DROP_LIST_TIMEOUT = 10  # seconds a drop source gets to deliver that list
 
 
 def write_pid_file():
@@ -134,7 +136,7 @@ def scaled_texture(path: str, width: int, height: int):
 def parse_uris(text: str) -> list[Path]:
     """File paths from a `text/uri-list` (or plain path list) drop. Non-file
     URIs are dropped; nothing here is ever executed."""
-    return theme_core.parse_file_list(text)
+    return theme_core.parse_file_list(text, limit=MAX_DROPS)
 
 
 IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp")
@@ -1774,16 +1776,25 @@ class ThemeManager(Gtk.Application):
             drop.read_async([mime], GLib.PRIORITY_DEFAULT, None, got_stream)
             return True
 
-        gtype = Gdk.FileList if what == "files" else GObject.TYPE_STRING
-
-        def got_value(_drop, result):
+        # File lists and text are read as raw streams too, never through
+        # read_value_async: GTK would buffer the whole payload before any
+        # limit applies, so a foreign drag source could exhaust memory.
+        def got_list(_drop, result):
             try:
-                value = drop.read_value_finish(result)
+                stream, _mime = drop.read_finish(result)
             except GLib.Error:
-                value = None
-            done(value is not None)
-            self.drop_value(value)
-        drop.read_value_async(gtype, GLib.PRIORITY_DEFAULT, None, got_value)
+                done(False)
+                theme_core.notify("Nothing added", "The drop could not be read.")
+                return
+
+            def got_data(data):
+                done(data is not None)
+                if data is None:
+                    theme_core.notify("Nothing added", "The dropped file list was too long or too slow.")
+                    return
+                self.drop_value(data.decode("utf-8", "replace"))
+            self.read_stream(stream, MAX_DROP_LIST_BYTES, got_data, timeout_s=DROP_LIST_TIMEOUT)
+        drop.read_async([mime], GLib.PRIORITY_DEFAULT, None, got_list)
         return True
 
     def read_stream(self, stream, limit: int, on_done, timeout_s: int = 30):

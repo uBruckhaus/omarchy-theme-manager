@@ -1049,12 +1049,14 @@ _FILE_LIST_MIMES = ("text/uri-list", "x-special/gnome-copied-files",
                     "text/plain;charset=utf-8", "text/plain")
 
 
-def parse_file_list(text: str) -> list[Path]:
+def parse_file_list(text: str, limit: int | None = None) -> list[Path]:
     """Existing local files named in a uri-list, gnome-copied-files or plain
     text list: one ``file://`` URI or absolute path per line. Other URIs are
-    ignored; nothing here is ever executed."""
+    ignored; nothing here is ever executed. Stops after `limit` files."""
     paths: list[Path] = []
     for line in (text or "").splitlines():
+        if limit is not None and len(paths) >= limit:
+            break
         token = line.strip()
         if not token or token.startswith("#") or token in ("copy", "cut"):
             continue
