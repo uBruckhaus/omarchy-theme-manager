@@ -38,3 +38,39 @@ def webp(width: int = 1, height: int = 1, frames: int = 0) -> bytes:
 
 def bmp(width: int = 1, height: int = 1) -> bytes:
     return b"BM" + b"\x00" * 12 + struct.pack("<Iii", 40, width, height) + b"\x00" * 28
+
+
+def _box(kind: bytes, payload: bytes, full: bool = False, version: int = 0, flags: int = 0) -> bytes:
+    if full:
+        payload = bytes([version]) + flags.to_bytes(3, "big") + payload
+    return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+def heif(width: int = 64, height: int = 64, grid: tuple[int, int] | None = None,
+         item_type: bytes = b"hvc1", ispe: bool = True) -> bytes:
+    """A HEIF container (no coded pixels) with one image item of `item_type`
+    whose 'ispe' says width × height; with `grid`, the item is a grid whose
+    output canvas (stored in 'idat') is grid[0] × grid[1]."""
+    if grid is not None:
+        item_type = b"grid"
+    ftyp = _box(b"ftyp", b"heic\x00\x00\x00\x00mif1heic")
+    hdlr = _box(b"hdlr", b"\x00" * 4 + b"pict" + b"\x00" * 13, full=True)
+    pitm = _box(b"pitm", struct.pack(">H", 1), full=True)
+    infe = _box(b"infe", struct.pack(">HH", 1, 0) + item_type + b"\x00", full=True, version=2)
+    iinf = _box(b"iinf", struct.pack(">H", 1) + infe, full=True)
+    grid_data = b""
+    if grid is not None:
+        big = grid[0] > 0xFFFF or grid[1] > 0xFFFF
+        grid_data = bytes([0, 1 if big else 0, 0, 0]) + (struct.pack(">II", *grid) if big
+                                                         else struct.pack(">HH", *grid))
+    # iloc v1: offset 4 bytes, length 4 bytes, base 0, index 0; construction method 1 (idat).
+    iloc = _box(b"iloc", bytes([0x44, 0x00]) + struct.pack(">H", 1)
+                + struct.pack(">HHHH", 1, 1, 0, 1) + struct.pack(">II", 0, len(grid_data)),
+                full=True, version=1)
+    props = _box(b"ispe", struct.pack(">II", width, height), full=True) if ispe else b""
+    ipco = _box(b"ipco", props)
+    ipma = _box(b"ipma", struct.pack(">IHB", 1, 1, 1) + b"\x81", full=True)
+    iprp = _box(b"iprp", ipco + ipma)
+    idat = _box(b"idat", grid_data)
+    meta = _box(b"meta", hdlr + pitm + iinf + iloc + iprp + idat, full=True)
+    return ftyp + meta + _box(b"mdat", b"\x00" * 16)

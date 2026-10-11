@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import theme_core
-from images import bmp, gif, jpeg, png, webp
+from images import bmp, gif, heif, jpeg, png, webp
 
 
 def make_roots(tmp: Path) -> theme_core.Roots:
@@ -268,7 +268,7 @@ class WallpaperTests(unittest.TestCase):
 
     def test_heic_decoder_output_is_size_capped(self):
         src = Path(self.tmp.name) / "big.heic"
-        src.write_bytes(b"x")
+        src.write_bytes(heif(4032, 3024))
         seen = []
         orig = theme_core.read_bounded_output
         theme_core.read_bounded_output = lambda argv, **kw: seen.append(argv) or (b"", False)
@@ -278,8 +278,42 @@ class WallpaperTests(unittest.TestCase):
         finally:
             theme_core.read_bounded_output = orig
         self.assertTrue(seen[0][0].endswith("prlimit"))
-        self.assertEqual(seen[0][1], f"--fsize={theme_core.MAX_BACKGROUND_BYTES}")
-        self.assertTrue(seen[0][3].endswith("heif-dec"))
+        self.assertEqual(seen[0][1], f"--as={theme_core.HEIF_DECODER_MAX_MEMORY}")
+        self.assertEqual(seen[0][2], f"--fsize={theme_core.MAX_BACKGROUND_BYTES}")
+        self.assertTrue(seen[0][4].endswith("heif-dec"))
+        # The decoder reads a private copy, not the path the user handed in.
+        self.assertNotEqual(seen[0][-2], str(src))
+
+    def test_heic_size_is_checked_before_the_decoder_runs(self):
+        cases = {"ispe": heif(60000, 60000), "grid": heif(512, 512, grid=(30000, 30000)),
+                 "grid-32bit": heif(512, 512, grid=(100000, 100000)),
+                 "overlay": heif(item_type=b"iovl"), "no size": heif(ispe=False),
+                 "truncated": heif()[:40], "not heif": b"x" * 64}
+        seen = []
+        orig = theme_core.read_bounded_output
+        theme_core.read_bounded_output = lambda argv, **kw: seen.append(argv) or (b"", False)
+        try:
+            for name, data in cases.items():
+                with self.subTest(name):
+                    src = Path(self.tmp.name) / f"{name}.heic"
+                    src.write_bytes(data)
+                    self.assertIsNotNone(theme_core.heif_size_problem(src))
+                    with self.assertRaises(ValueError):
+                        theme_core.add_background_file(self.roots, "nord", src)
+        finally:
+            theme_core.read_bounded_output = orig
+        self.assertEqual(seen, [])   # libheif never saw any of them
+        for ok in (heif(4032, 3024), heif(512, 512, grid=(8064, 6048))):
+            src = Path(self.tmp.name) / "ok.heic"
+            src.write_bytes(ok)
+            self.assertIsNone(theme_core.heif_size_problem(src))
+
+    def test_heif_meta_box_is_read_with_a_cap(self):
+        src = Path(self.tmp.name) / "huge-meta.heic"
+        oversized = theme_core.HEIF_MAX_META_BYTES + 64
+        src.write_bytes(b"\x00\x00\x00\x10ftypheic\x00\x00\x00\x00"
+                        + oversized.to_bytes(4, "big") + b"meta" + b"\x00" * 64)
+        self.assertIsNotNone(theme_core.heif_size_problem(src))
 
     def test_add_broken_heic_is_rejected(self):
         src = Path(self.tmp.name) / "broken.heic"

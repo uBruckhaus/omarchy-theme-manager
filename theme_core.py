@@ -38,6 +38,7 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 # Phone photos (HEIC/HEIF) are converted to JPEG on import with libheif's
 # `heif-dec`; wallpaper tools cannot show them directly.
 HEIF_EXTS = {".heic", ".heif"}
+HEIF_DECODER_MAX_MEMORY = 2 * 1024 * 1024 * 1024   # address space for heif-dec
 MAX_BACKGROUND_BYTES = 50 * 1024 * 1024   # one wallpaper, whatever its source
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024    # anything read from a subprocess
 MAX_PASTE_TEXT_BYTES = 4096               # text pasted into a search field
@@ -623,11 +624,20 @@ def _add_heif_file(roots: Roots, slug: str, source: Path) -> Path:
     if decoder is None or limiter is None:
         raise ValueError("HEIC photos need libheif (heif-dec) installed")
     with tempfile.TemporaryDirectory(prefix="theme-manager-heif-") as tmp:
+        # Work on a private copy, so the file checked is the file decoded.
+        private = Path(tmp) / "source.heic"
+        _copy_bounded(source, private)
+        problem = heif_size_problem(private)
+        if problem:
+            raise ValueError(problem)
         converted = Path(tmp) / "image.jpg"
-        # prlimit caps every file the decoder writes, so a crafted photo with
-        # huge dimensions cannot fill the temp directory before our size check.
-        _, ok = read_bounded_output([limiter, f"--fsize={MAX_BACKGROUND_BYTES}", "--",
-                                     decoder, "--quality", "92", str(source), str(converted)],
+        # Declared sizes are checked above; prlimit is the backstop. --as caps
+        # the decoder's memory (a 64 MP tiled photo needs about 1.3 GiB of
+        # address space), --fsize every file it writes.
+        _, ok = read_bounded_output([limiter, f"--as={HEIF_DECODER_MAX_MEMORY}",
+                                     f"--fsize={MAX_BACKGROUND_BYTES}", "--",
+                                     decoder, "--quiet", "--quality", "92",
+                                     str(private), str(converted)],
                                     max_bytes=65536, timeout=60.0)
         if not ok or not converted.is_file():
             raise ValueError(f"could not convert {source.name}")
@@ -1137,6 +1147,170 @@ def _webp_size(handle) -> tuple[int, int, int] | None:
                 break
         handle.seek(length + (length & 1) - len(data), io.SEEK_CUR)
     return (size[0], size[1], max(frames, 1)) if size else None
+
+
+HEIF_MAX_META_BYTES = 4 * 1024 * 1024      # the 'meta' box holds item info, not pixels
+
+
+def _bmff_boxes(data: bytes, start: int = 0, end: int | None = None):
+    """``(type, payload_start, payload_end)`` for each ISO-BMFF box in
+    data[start:end]; stops at the first malformed length."""
+    end = len(data) if end is None else end
+    pos = start
+    for _ in range(10000):
+        if pos + 8 > end:
+            return
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        kind = data[pos + 4:pos + 8]
+        header = 8
+        if size == 1:
+            if pos + 16 > end:
+                return
+            size, header = int.from_bytes(data[pos + 8:pos + 16], "big"), 16
+        elif size == 0:
+            size = end - pos
+        if size < header or pos + size > end:
+            return
+        yield kind, pos + header, pos + size
+        pos += size
+
+
+def _heif_meta(handle) -> bytes | None:
+    """The top-level 'meta' box payload, read with a size cap."""
+    handle.seek(0)
+    for _ in range(64):
+        header = handle.read(8)
+        if len(header) < 8:
+            return None
+        size, kind = int.from_bytes(header[:4], "big"), header[4:8]
+        offset = 8
+        if size == 1:
+            size, offset = int.from_bytes(handle.read(8), "big"), 16
+        if kind == b"meta":
+            if not offset < size <= HEIF_MAX_META_BYTES + offset:
+                return None
+            data = handle.read(size - offset)
+            return data if len(data) == size - offset else None
+        if size < offset:   # size 0 ("to end of file") or malformed, before any meta
+            return None
+        handle.seek(size - offset, io.SEEK_CUR)
+    return None
+
+
+def heif_size_problem(path) -> str | None:
+    """Why a HEIC/HEIF file must not be handed to the decoder, or None.
+
+    Reads only the 'meta' box: every image spatial extent ('ispe') and the
+    output canvas of every grid item (from 'idat' or the file via 'iloc').
+    The largest one must fit the decoded-image budget, so a small file
+    declaring a huge (tiled) canvas never reaches libheif. Overlay canvases
+    are not supported and are refused."""
+    try:
+        with open(path, "rb") as handle:
+            meta = _heif_meta(handle)
+            if meta is None or len(meta) < 4:
+                return "not a readable HEIC/HEIF photo"
+            boxes = {}
+            for kind, a, b in _bmff_boxes(meta, 4):   # meta is a FullBox
+                boxes.setdefault(kind, (a, b))
+            sizes = []
+            if b"iprp" in boxes:
+                for kind, a, b in _bmff_boxes(meta, *boxes[b"iprp"]):
+                    if kind == b"ipco":
+                        for prop, pa, pb in _bmff_boxes(meta, a, b):
+                            if prop == b"ispe" and pb - pa >= 12:
+                                sizes.append((int.from_bytes(meta[pa + 4:pa + 8], "big"),
+                                              int.from_bytes(meta[pa + 8:pa + 12], "big")))
+            if not sizes:
+                return "HEIC/HEIF photo declares no image size"
+            types = _heif_item_types(meta, boxes.get(b"iinf"))
+            if b"iovl" in types.values():
+                return "HEIC/HEIF overlay images are not supported"
+            grids = [item for item, kind in types.items() if kind == b"grid"]
+            if grids:
+                for item, data in _heif_item_data(handle, meta, boxes, grids).items():
+                    if data is None or len(data) < 8:
+                        return "unreadable HEIC/HEIF grid"
+                    if data[1] & 1:   # 32-bit output size
+                        if len(data) < 12:
+                            return "unreadable HEIC/HEIF grid"
+                        sizes.append((int.from_bytes(data[4:8], "big"), int.from_bytes(data[8:12], "big")))
+                    else:
+                        sizes.append((int.from_bytes(data[4:6], "big"), int.from_bytes(data[6:8], "big")))
+    except (OSError, ValueError, IndexError):
+        return "not a readable HEIC/HEIF photo"
+    for width, height in sizes:
+        if not width or not height:
+            return "image has no size"
+        if width > MAX_IMAGE_SIDE or height > MAX_IMAGE_SIDE or width * height > MAX_IMAGE_PIXELS:
+            return f"image too large to convert ({width}×{height})"
+    return None
+
+
+def _heif_item_types(meta: bytes, iinf) -> dict[int, bytes]:
+    """item ID → item type from 'iinf' (infe version 2/3 entries)."""
+    types = {}
+    if iinf is None:
+        return types
+    a, b = iinf
+    version = meta[a]
+    first = a + 4 + (2 if version == 0 else 4)   # FullBox header + entry count
+    for kind, ea, eb in _bmff_boxes(meta, first, b):
+        if kind != b"infe" or eb - ea < 4:
+            continue
+        infe_version = meta[ea]
+        if infe_version == 2 and eb - ea >= 12:
+            types[int.from_bytes(meta[ea + 4:ea + 6], "big")] = meta[ea + 8:ea + 12]
+        elif infe_version == 3 and eb - ea >= 14:
+            types[int.from_bytes(meta[ea + 4:ea + 8], "big")] = meta[ea + 10:ea + 14]
+    return types
+
+
+def _heif_item_data(handle, meta: bytes, boxes: dict, items: list[int]) -> dict[int, bytes | None]:
+    """The first 12 bytes of each item's data, located through 'iloc'."""
+    out = {item: None for item in items}
+    if b"iloc" not in boxes:
+        return out
+    a, b = boxes[b"iloc"]
+    version = meta[a]
+    pos = a + 4
+    offset_size, length_size = meta[pos] >> 4, meta[pos] & 15
+    base_size, index_size = meta[pos + 1] >> 4, (meta[pos + 1] & 15) if version in (1, 2) else 0
+    pos += 2
+
+    def take(n: int) -> int:
+        nonlocal pos
+        if pos + n > b:
+            raise ValueError("truncated iloc")
+        value = int.from_bytes(meta[pos:pos + n], "big")
+        pos += n
+        return value
+
+    count = take(2 if version < 2 else 4)
+    idat = boxes.get(b"idat")
+    for _ in range(min(count, 65535)):
+        item = take(2 if version < 2 else 4)
+        method = take(2) & 15 if version in (1, 2) else 0
+        take(2)   # data reference index
+        base = take(base_size)
+        extents = take(2)
+        first = None
+        for e in range(extents):
+            if index_size:
+                take(index_size)
+            extent_offset = take(offset_size)
+            take(length_size)
+            if e == 0:
+                first = base + extent_offset
+        if item not in out or first is None:
+            continue
+        if method == 1 and idat is not None:      # inside the meta box
+            start = idat[0] + first
+            out[item] = meta[start:min(start + 12, idat[1])]
+        elif method == 0:                          # file offset
+            handle.seek(first)
+            out[item] = handle.read(12)
+    return out
 
 
 def image_size_problem(source) -> str | None:
