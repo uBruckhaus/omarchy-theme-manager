@@ -602,6 +602,26 @@ class ViewLayerTest(unittest.TestCase):
         self.app.apply_theme_action(beta)
         self.assertEqual(self.applied, ["beta"])
 
+    def test_apply_and_delete_keep_popup_open(self):
+        for slug in ("beta", "gamma", "delta"):
+            self.make_theme("user", slug)
+        self.app.refresh_themes()
+        self.app.window.present()
+        quits = []
+        self.app.quit = lambda: quits.append(True)
+        beta = next(t for t in self.app.theme_list if t.slug == "beta")
+        self.app.apply_theme_action(beta)
+        self.assertEqual(self.applied, ["beta"])
+        self.assertTrue(self.app.window.get_visible())
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "beta")
+        gamma = next(t for t in self.app.theme_list if t.slug == "gamma")
+        self.app.perform_delete_theme(gamma)
+        self.assertFalse((self.roots.user_themes / "gamma").exists())
+        self.assertTrue(self.app.window.get_visible())
+        self.assertNotIn("gamma", [r.tm_theme.slug for r in self.rows_list()])
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "delta")   # the next one
+        self.assertEqual(quits, [])
+
     def test_delete_theme_user(self):
         theme = self.make_theme("user", "beta", ("b1.png",))
         self.app.perform_delete_theme(theme)

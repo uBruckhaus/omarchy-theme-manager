@@ -1555,7 +1555,6 @@ class ThemeManager(Gtk.Application):
                 theme_core.unhide_theme(theme.slug)
             except OSError:
                 pass
-        self.close()
         self._async(lambda: theme_core.apply_theme(theme.slug),
                     lambda ok, error: self.after_apply(theme, ok, error))
 
@@ -1565,7 +1564,15 @@ class ThemeManager(Gtk.Application):
         else:
             theme_core.notify("Could not apply theme",
                               f"{theme.name}: {error or 'omarchy theme set failed'}")
-        self.quit()  # The popup's job is done; the next toggle re-discovers state.
+        # The popup stays open: take on the new theme's colors and mark it current.
+        if self.theme.reload():
+            self.apply_theme_css()
+        self.hidden = self.load_hidden_list()
+        self.refresh_themes(keep=theme.slug)
+        if self.stack.get_visible_child_name() == "import":
+            self.fill_catalog(self.catalog, None)
+        else:
+            self.focus_selected_theme()
 
     def confirm_delete_theme(self, theme: theme_core.ThemeInfo):
         message = f"Delete theme “{theme_core.plain_text(theme.name)}”?"
@@ -1578,7 +1585,6 @@ class ThemeManager(Gtk.Application):
 
     def perform_delete_theme(self, theme: theme_core.ThemeInfo):
         """The confirmed step: actually remove the theme (off-thread)."""
-        self.close()
         def remove():
             path = theme_core.remove_theme(None, theme.slug)
             # The theme folder changed: rebuild Omarchy's picker cache now,
@@ -1593,7 +1599,27 @@ class ThemeManager(Gtk.Application):
             theme_core.notify("Theme removed", theme.name)
         else:
             theme_core.notify("Could not delete theme", f"{theme.name}: {error}")
-        self.quit()
+        self.refresh_themes(keep=self.neighbor_slug(theme.slug) if error is None else theme.slug)
+        self.focus_selected_theme()
+
+    def focus_selected_theme(self):
+        if self.stack.get_visible_child_name() == "themes":
+            self.select_row(self.rows.get_selected_row())
+
+    def neighbor_slug(self, slug: str) -> str | None:
+        """The theme listed after `slug` (or before it, at the end): where the
+        selection goes once `slug` is gone."""
+        slugs = []
+        row = self.rows.get_first_child()
+        while row is not None:
+            if hasattr(row, "tm_theme"):
+                slugs.append(row.tm_theme.slug)
+            row = row.get_next_sibling()
+        if slug not in slugs:
+            return None
+        i = slugs.index(slug)
+        rest = slugs[i + 1:] or slugs[:i][-1:]
+        return rest[0] if rest else None
 
     # --- wallpapers --------------------------------------------------------------------
 
