@@ -244,7 +244,52 @@ class ThemeManager(Gtk.Application):
 
     # --- window ----------------------------------------------------------------
 
+    def guard_text_field(self, entry):
+        """Route every way text can enter a search field from another client
+        through bounded reads. GTK's own paste, middle-click paste and text
+        drops buffer the whole offer in memory with no limit or deadline."""
+        text = entry.get_delegate()
+        text.set_max_length(theme_core.MAX_FIELD_CHARS)
+        # Ctrl+V, Shift+Insert and the context menu's Paste all emit this.
+        text.connect("paste-clipboard", self.on_field_paste, entry)
+        # Middle-click pastes the primary selection; claim button 2 before
+        # the field's own gesture sees it (primary paste is also off globally).
+        middle = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
+        middle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        middle.connect("pressed", lambda gesture, *_: gesture.set_state(Gtk.EventSequenceState.CLAIMED))
+        entry.add_controller(middle)
+        # Text dropped on the field: drop the field's own (unbounded) target,
+        # so drops fall through to the window's bounded drop handling.
+        controllers = text.observe_controllers()
+        for i in reversed(range(controllers.get_n_items())):
+            controller = controllers.get_item(i)
+            if isinstance(controller, (Gtk.DropTarget, Gtk.DropTargetAsync)):
+                text.remove_controller(controller)
+
+    def on_field_paste(self, text, entry):
+        text.stop_emission_by_name("paste-clipboard")
+
+        def worker():
+            pasted = theme_core.clipboard_text()
+            GLib.idle_add(self.insert_pasted, entry, pasted)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def insert_pasted(self, entry, pasted: str | None):
+        if pasted is None:
+            theme_core.notify("Theme Manager", "Clipboard text is too long to paste "
+                              f"(max {theme_core.MAX_PASTE_TEXT_BYTES // 1024} KiB)")
+        elif pasted:
+            entry.delete_selection()
+            position = entry.insert_text(pasted, entry.get_position())
+            entry.set_position(position)
+        return GLib.SOURCE_REMOVE
+
     def build_window(self):
+        settings = Gtk.Settings.get_default()
+        if settings is not None:
+            # No middle-click paste anywhere in the popup (see guard_text_field).
+            settings.set_property("gtk-enable-primary-paste", False)
         window = Gtk.ApplicationWindow(application=self)
         window.set_decorated(False)
         window.set_title("Theme Manager")
@@ -473,6 +518,7 @@ class ThemeManager(Gtk.Application):
         self.web_search = Gtk.SearchEntry()
         self.web_search.set_placeholder_text("Search, e.g. misty forest, neon city")
         self.web_search.connect("activate", lambda *_: self.run_web_search())
+        self.guard_text_field(self.web_search)
         web_page.append(self.web_search)
         self.web_hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=40)
         self.web_hint.add_css_class("tm-hint")
@@ -528,6 +574,7 @@ class ThemeManager(Gtk.Application):
         self.import_search.set_placeholder_text("Search themes")
         self.import_search.set_hexpand(True)
         self.import_search.connect("search-changed", lambda *_: self.import_grid.invalidate_filter())
+        self.guard_text_field(self.import_search)
         im_toolbar.append(self.import_search)
         refresh = Gtk.Button(icon_name="view-refresh-symbolic")
         refresh.add_css_class("tm-paste")

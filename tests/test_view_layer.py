@@ -492,6 +492,55 @@ class ViewLayerTest(unittest.TestCase):
         self.assertFalse(d.exists() and any(d.iterdir()))
         self.assertTrue(any("skipped" in t.lower() for t, _ in self.notices))
 
+    def pump_until(self, condition, seconds: float = 3.0):
+        import time
+        deadline = time.monotonic() + seconds
+        context = GLib.MainContext.default()
+        while not condition() and time.monotonic() < deadline:
+            context.iteration(False)
+            time.sleep(0.01)
+        return condition()
+
+    def test_search_fields_never_use_gtks_unbounded_paste(self):
+        orig = theme_core.clipboard_text
+        reads = []
+        theme_core.clipboard_text = lambda **kw: reads.append(1) or "misty forest"
+        try:
+            for entry in (self.app.web_search, self.app.import_search):
+                text = entry.get_delegate()
+                self.assertEqual(text.get_max_length(), theme_core.MAX_FIELD_CHARS)
+                # No drop target of its own: GTK would buffer dropped text unbounded.
+                controllers = text.observe_controllers()
+                kinds = {type(controllers.get_item(i)).__name__ for i in range(controllers.get_n_items())}
+                self.assertFalse(kinds & {"DropTarget", "DropTargetAsync"})
+                # Ctrl+V, Shift+Insert and the context menu's clipboard.paste all emit this signal.
+                entry.set_text("")
+                text.emit("paste-clipboard")
+                self.assertTrue(self.pump_until(lambda: entry.get_text() == "misty forest"))
+                # Pasting into a selection replaces it, at the cursor.
+                entry.set_text("a b c")
+                entry.select_region(2, 3)
+                text.emit("paste-clipboard")
+                self.assertTrue(self.pump_until(lambda: entry.get_text() == "a misty forest c"))
+        finally:
+            theme_core.clipboard_text = orig
+        self.assertEqual(len(reads), 4)
+        settings = theme_popup.Gtk.Settings.get_default()
+        self.assertFalse(settings.get_property("gtk-enable-primary-paste"))
+
+    def test_oversized_clipboard_text_is_refused(self):
+        orig = theme_core.clipboard_text
+        theme_core.clipboard_text = lambda **kw: None
+        try:
+            entry = self.app.web_search
+            entry.set_text("keep")
+            entry.get_delegate().emit("paste-clipboard")
+            self.assertTrue(self.pump_until(lambda: self.notices))
+        finally:
+            theme_core.clipboard_text = orig
+        self.assertEqual(entry.get_text(), "keep")
+        self.assertIn("too long", self.notices[-1][1])
+
     def test_paste_adds_image(self):
         theme = self.make_theme("user", "alpha")
         theme_core.clipboard_image = lambda **kw: ("image/png", PNG)

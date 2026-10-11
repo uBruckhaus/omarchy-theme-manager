@@ -230,6 +230,36 @@ class WallpaperTests(unittest.TestCase):
         nord = self.roots.user_backgrounds / "nord"
         self.assertFalse(nord.exists() and any(nord.iterdir()))
 
+    def test_clipboard_text_is_bounded_and_flattened(self):
+        calls = []
+        replies = {}
+
+        def fake(argv, max_bytes=0, timeout=0, env=None):
+            calls.append((argv, max_bytes, timeout))
+            return replies[argv[-1]]
+
+        orig = theme_core.read_bounded_output
+        theme_core.read_bounded_output = fake
+        try:
+            replies.update({"--list-types": (b"image/png\ntext/plain;charset=utf-8\n", True),
+                            "text/plain;charset=utf-8": (b"misty\r\nforest\x1b[31m\x00 x", True)})
+            self.assertEqual(theme_core.clipboard_text(), "misty forest [31m x")
+            argv, max_bytes, timeout = calls[-1]
+            self.assertEqual(max_bytes, theme_core.MAX_PASTE_TEXT_BYTES)
+            self.assertLessEqual(timeout, 2.0)
+            self.assertEqual(argv[:2], ["wl-paste", "--no-newline"])
+            # An endless or slow stream: the bounded reader gives up, nothing is pasted.
+            replies["text/plain;charset=utf-8"] = (b"x" * theme_core.MAX_PASTE_TEXT_BYTES, False)
+            self.assertIsNone(theme_core.clipboard_text())
+            replies["--list-types"] = (b"", False)   # empty clipboard
+            self.assertEqual(theme_core.clipboard_text(), "")
+            replies["--list-types"] = (b"image/png\n", True)
+            self.assertEqual(theme_core.clipboard_text(), "")
+            replies.update({"--list-types": (b"text/plain\n", True), "text/plain": (b"y" * 4000, True)})
+            self.assertEqual(len(theme_core.clipboard_text()), theme_core.MAX_FIELD_CHARS)
+        finally:
+            theme_core.read_bounded_output = orig
+
     def test_offered_file_name(self):
         self.assertEqual(theme_core.offered_file_name('application/octet-stream;name="43lk53.jpg"'),
                          "43lk53.jpg")

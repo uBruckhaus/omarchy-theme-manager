@@ -40,6 +40,8 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 HEIF_EXTS = {".heic", ".heif"}
 MAX_BACKGROUND_BYTES = 50 * 1024 * 1024   # one wallpaper, whatever its source
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024    # anything read from a subprocess
+MAX_PASTE_TEXT_BYTES = 4096               # text pasted into a search field
+MAX_FIELD_CHARS = 200                     # longest text a search field holds
 # Decoded size, checked from the image header before anything is decoded: a
 # small, highly compressed file can still declare a huge canvas, and GTK's
 # loaders allocate the full canvas (every frame for animations) up front.
@@ -970,6 +972,8 @@ def read_bounded_output(argv: list[str], max_bytes: int = MAX_COMMAND_OUTPUT_BYT
         proc.kill()
         thread.join(2.0)
         truncated = True
+    elif truncated:
+        proc.kill()   # over the cap: don't wait for a writer blocked on a full pipe
     try:
         returncode = proc.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
@@ -1255,6 +1259,32 @@ def clipboard_files(timeout: float = 3.0) -> list[Path]:
         if paths:
             return paths
     return []
+
+
+_TEXT_MIMES = ("text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT")
+
+
+def clipboard_text(max_bytes: int = MAX_PASTE_TEXT_BYTES, timeout: float = 2.0) -> str | None:
+    """Plain text from the Wayland clipboard for a search field, read with
+    `wl-paste` under a byte cap and deadline (GTK's own paste buffers the
+    whole offer with neither). Control characters and line breaks become
+    single spaces. '' if the clipboard has no text; None if the offer was
+    too long, too slow or failed."""
+    types_raw, _ = read_bounded_output(["wl-paste", "--list-types"],
+                                       max_bytes=65536, timeout=timeout)
+    # An empty clipboard makes wl-paste fail: nothing to paste, not an error.
+    offered = {line.strip() for line in types_raw.decode("utf-8", "replace").splitlines()}
+    for mime in _TEXT_MIMES:
+        if mime not in offered:
+            continue
+        data, ok = read_bounded_output(["wl-paste", "--no-newline", "--type", mime],
+                                       max_bytes=max_bytes, timeout=timeout)
+        if not ok:
+            return None
+        text = "".join(" " if ord(ch) < 32 or 127 <= ord(ch) < 160 else ch
+                       for ch in data.decode("utf-8", "replace"))
+        return " ".join(text.split())[:MAX_FIELD_CHARS]
+    return ""
 
 
 def _hyprland_socket() -> Path | None:
