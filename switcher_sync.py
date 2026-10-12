@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import theme_core  # noqa: E402
+import theme_custom  # noqa: E402
 
 
 def main(argv: list[str]) -> int:
@@ -27,6 +28,9 @@ def main(argv: list[str]) -> int:
         # terminal) is wanted again: take it off the hidden list.
         theme_core.unhide_theme(theme_core.current_theme())
         theme_core.sync_current_theme()
+        # A theme made with Theme Manager brings its font (and other themes
+        # bring yours back), also when applied from Omarchy's own picker.
+        theme_custom.apply_theme_font(theme_core.current_theme())
         theme_core.prune_switcher_previews(theme_core.load_hidden())
         theme_core.refresh_switcher_cache(Path(__file__).resolve().parent / "theme-switcher")
         return 0

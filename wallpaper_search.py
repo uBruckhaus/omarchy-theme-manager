@@ -145,6 +145,40 @@ def _prune_thumbs(directory: Path) -> None:
         old.unlink(missing_ok=True)
 
 
+MAX_PREVIEWS_CACHED = 3
+
+
+def preview_path(result: WebWallpaper) -> Path:
+    return cache_dir() / "preview" / result.file_name
+
+
+def fetch_preview(result: WebWallpaper) -> Path | None:
+    """The full image, for a desktop preview before adding it. Kept in a
+    small cache (the last few) under the same size and pixel limits as an
+    added wallpaper."""
+    path = preview_path(result)
+    if path.is_file() and not path.is_symlink():
+        return path
+    if not FULL_RE.match(result.full) or result.file_size > theme_core.MAX_BACKGROUND_BYTES:
+        return None
+    data = theme_core.fetch_https(result.full, theme_core.MAX_BACKGROUND_BYTES, timeout=60.0)
+    if not data or not theme_core.is_image_data(data):
+        return None
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    theme_core._atomic_write_bytes(path, data, mode=0o600)
+    if theme_core.image_size_problem(path):
+        path.unlink(missing_ok=True)
+        return None
+    try:
+        files = sorted((f for f in path.parent.iterdir() if f.is_file() and not f.is_symlink()),
+                       key=lambda f: f.stat().st_mtime)
+    except OSError:
+        files = []
+    for old in files[:-MAX_PREVIEWS_CACHED]:
+        old.unlink(missing_ok=True)
+    return path
+
+
 def already_added(roots: theme_core.Roots | None, slug: str, result: WebWallpaper) -> bool:
     roots = roots or theme_core.default_roots()
     folder = roots.user_backgrounds / slug

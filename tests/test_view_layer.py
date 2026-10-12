@@ -136,6 +136,46 @@ class ViewLayerTest(unittest.TestCase):
         wallpaper_search.download = fake_download
         wallpaper_search.open_page = lambda item: self.opened.append(item.page) or True
 
+        # Desktop previews, the clipboard and workspace automation: recorded, never real.
+        import theme_auto
+        self.auto = theme_auto
+        self._orig_extra = (theme_core.show_background, theme_core.restore_background,
+                            theme_auto.state_file, theme_auto.active_workspace)
+        self.previews: list[str] = []
+        theme_core.show_background = lambda path: self.previews.append(Path(path).name) or True
+        theme_core.restore_background = lambda roots=None: self.previews.append("<restore>") or True
+        theme_auto.state_file = lambda: root / "cache" / "auto-state.json"
+        self.active_ws = 1
+        theme_auto.active_workspace = lambda: self.active_ws
+        import theme_custom
+        self.custom = theme_custom
+        self._orig_fonts = (theme_custom.list_fonts, theme_custom.current_font, theme_custom.set_font)
+        self.font = "Mono A"
+        self.fonts_set: list[str] = []
+        theme_custom.list_fonts = lambda: ["Mono A", "Mono B"]
+        theme_custom.current_font = lambda: self.font
+
+        def set_font(font):
+            self.fonts_set.append(font)
+            self.font = font
+            return True
+        theme_custom.set_font = set_font
+        # Keyboard shortcuts: a private ~/.config/hypr, no real hyprctl.
+        import theme_shortcuts
+        self.sc = theme_shortcuts
+        self._orig_sc = {name: getattr(theme_shortcuts, name) for name in
+                         ("HYPR_DIR", "config_errors", "read_live_binds", "enter_capture", "leave_capture")}
+        self.hypr = root / "hypr"
+        self.hypr.mkdir()
+        (self.hypr / "hyprland.lua").write_text('require("default.hypr.omarchy")\n')
+        (self.hypr / "bindings.lua").write_text('o.bind("SUPER + CTRL + N", "Notes", "obsidian")\n')
+        theme_shortcuts.HYPR_DIR = self.hypr
+        theme_shortcuts.config_errors = lambda: ""
+        theme_shortcuts.read_live_binds = lambda: [{"mask": 64, "key": "return", "description": "Terminal"}]
+        self.captures: list[str] = []
+        theme_shortcuts.enter_capture = lambda: self.captures.append("enter") or True
+        theme_shortcuts.leave_capture = lambda: self.captures.append("leave")
+
         # --- build the real window ----------------------------------------
         self.app = theme_popup.ThemeManager()
         # Deterministic, in-process async (no GLib main loop in the test).
@@ -172,6 +212,11 @@ class ViewLayerTest(unittest.TestCase):
          self.catalog_mod.open_in_browser, self.catalog_mod.cache_dir) = self._orig_catalog
         (self.ws.search, self.ws.fetch_thumb, self.ws.download, self.ws.open_page) = self._orig_ws
         theme_popup.ThemeManager._async = self._orig_async
+        (theme_core.show_background, theme_core.restore_background,
+         self.auto.state_file, self.auto.active_workspace) = self._orig_extra
+        (self.custom.list_fonts, self.custom.current_font, self.custom.set_font) = self._orig_fonts
+        for name, value in self._orig_sc.items():
+            setattr(self.sc, name, value)
         self.tmp.cleanup()
 
     # -- helpers -------------------------------------------------------------
@@ -195,6 +240,10 @@ class ViewLayerTest(unittest.TestCase):
             out.append(child)
             child = child.get_next_sibling()
         return out
+
+    def wallpaper_tiles(self) -> list:
+        """Wallpaper tiles only (not the "Add wallpapers" tile)."""
+        return [t for t in self.children(self.app.wp_grid) if hasattr(t, "tm_wallpaper")]
 
     def rows_list(self) -> list:
         """Theme rows only (not the "N hidden themes" hint)."""
@@ -257,8 +306,7 @@ class ViewLayerTest(unittest.TestCase):
         self.make_wallpaper("alpha", "user1.png")
         self.app.open_wallpapers_for(theme)
         self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
-        tiles = [t.get_child() if isinstance(t, gi.repository.Gtk.FlowBoxChild) else t
-                 for t in self.children(self.app.wp_grid)]
+        tiles = [t.get_child() for t in self.wallpaper_tiles()]
         names = sorted(tile.get_last_child().get_property("label")
                        for tile in tiles if isinstance(tile.get_last_child(), gi.repository.Gtk.Label))
         self.assertEqual(names, ["ship1.png", "ship2.png", "user1.png"])
@@ -293,7 +341,8 @@ class ViewLayerTest(unittest.TestCase):
         theme = self.make_theme("user", "alpha")
         self.app.open_wallpapers_for(theme)
         tiles = self.children(self.app.wp_grid)
-        self.assertEqual(len(tiles), 1)  # the empty-state tile
+        self.assertEqual(len(tiles), 1)  # the add tile, saying there are none yet
+        self.assertTrue(tiles[0].tm_add)
         self.assertEqual(self.app.wp_title.get_property("label"), "Alpha — wallpapers")
 
     def test_on_drop_adds_image(self):
@@ -707,7 +756,7 @@ class ViewLayerTest(unittest.TestCase):
         self.make_theme("user", "alpha")
         self.app.refresh_themes()
         row = self.rows_list()[0]
-        self.app.rows.emit("row-activated", row)
+        self.app.rows.emit("child-activated", row)
         self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
         self.assertEqual(self.app.active_theme.slug, "alpha")
 
@@ -743,8 +792,15 @@ class ViewLayerTest(unittest.TestCase):
     def test_drop_hint_is_shown(self):
         theme = self.make_theme("system", "gamma")
         self.app.open_wallpapers_for(theme)
-        self.assertIsNotNone(self.app.drop_hint.get_parent())
-        self.assertTrue(self.app.drop_hint.get_label())
+        add = self.children(self.app.wp_grid)[0]
+        self.assertTrue(add.tm_add)
+        self.assertIn("Drop images here", " ".join(w.get_label() for w in self.descendants(add)
+                                                    if isinstance(w, gi.repository.Gtk.Label)))
+        self.assertIn("Stored in", add.get_tooltip_text())
+        self.app.light_add_tile(True)
+        self.assertTrue(self.app.add_tile.has_css_class("active"))
+        self.app.light_add_tile(False)
+        self.assertFalse(self.app.add_tile.has_css_class("active"))
 
     def test_hide_and_unhide_sync_omarchy_picker(self):
         theme = self.make_theme("system", "gamma")
@@ -794,12 +850,12 @@ class ViewLayerTest(unittest.TestCase):
     def test_hiding_wallpaper_removes_tile_until_eye_is_on(self):
         theme = self.make_theme("system", "gamma", ("g1.png", "g2.png"))
         self.app.open_wallpapers_for(theme)
-        self.assertEqual(len(self.children(self.app.wp_grid)), 2)
+        self.assertEqual(len(self.wallpaper_tiles()), 2)
         info = next(w for w in theme_core.list_backgrounds(None, theme) if w.name == "g1.png")
         self.app.set_wallpaper_hidden(info, True)
-        self.assertEqual(len(self.children(self.app.wp_grid)), 1)
+        self.assertEqual(len(self.wallpaper_tiles()), 1)
         self.app.toggle_show_hidden()
-        tiles = self.children(self.app.wp_grid)
+        tiles = self.wallpaper_tiles()
         self.assertEqual(len(tiles), 2)
         hidden = next(t for t in tiles if t.tm_wallpaper.name == "g1.png")
         self.assertTrue(hidden.tm_wallpaper.hidden)
@@ -1003,7 +1059,7 @@ class ViewLayerTest(unittest.TestCase):
         self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
         self.app.on_key(None, Gdk.KEY_Escape, 0, 0)          # clears the filter, stays
         self.assertEqual(self.app.wp_filter, "")
-        self.assertEqual(len(self.children(self.app.wp_grid)), 3)
+        self.assertEqual(len(self.wallpaper_tiles()), 3)
         self.app.on_key(None, Gdk.KEY_Escape, 0, 0)          # now goes back
         self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
 
@@ -1047,9 +1103,9 @@ class ViewLayerTest(unittest.TestCase):
         self.app.hidden = {"nord", "white"}
         self.app.refresh_themes()
         self.assertEqual([r.tm_theme.slug for r in self.rows_list()], ["gamma"])
-        hint = [r for r in self.children(self.app.rows) if not hasattr(r, "tm_theme")]
-        self.assertEqual(len(hint), 1)
-        self.assertIn("2 hidden themes", hint[0].get_child().get_label())
+        self.assertEqual(len(self.children(self.app.rows)), 1)    # only themes in the grid
+        self.assertTrue(self.app.hidden_hint.get_visible())
+        self.assertIn("2 hidden themes", self.app.hidden_hint.get_label())
 
     def test_active_theme_is_never_hidden(self):
         theme = self.make_theme("user", "alpha")      # current
@@ -1111,8 +1167,496 @@ class ViewLayerTest(unittest.TestCase):
         self.assertEqual(self.refreshes, [])
         self.app.hidden = {"gamma"}
         self.app.refresh_themes()
-        hint = [r for r in self.children(self.app.rows) if not hasattr(r, "tm_theme")]
-        self.assertIn("Settings", hint[0].get_child().get_label())
+        self.assertIn("Settings", self.app.hidden_hint.get_label())
+
+
+    # -- 1.3.0: favorites, settings, resizing, undo, previews, workspaces ---------
+
+    def test_favorites_come_first_with_a_star(self):
+        for slug in ("alpha", "beta", "gamma"):
+            self.make_theme("system", slug)
+        self.app.refresh_themes()
+        entries = self.menu_entries(next(t for t in theme_core.discover_themes() if t.slug == "gamma"))
+        entries["Add to favorites"].emit("clicked")
+        self.assertEqual([r.tm_theme.slug for r in self.rows_list()][0], "gamma")
+        self.assertEqual(self.auto.load_favorites(), ["gamma"])
+        gamma = self.rows_list()[0]
+        self.assertTrue(any(isinstance(w, gi.repository.Gtk.Label) and w.get_label() == "★"
+                            for w in self.descendants(gamma)))
+        self.assertIn("Remove from favorites", self.menu_entries(gamma.tm_theme))
+
+    def test_sort_by_recently_used(self):
+        for slug in ("alpha", "beta", "gamma"):
+            self.make_theme("system", slug)
+        self.auto.record_recent("gamma", when=10.0)
+        self.auto.record_recent("beta", when=5.0)
+        self.app.save_setting(sort="recent")
+        self.assertEqual([r.tm_theme.slug for r in self.rows_list()], ["gamma", "beta", "alpha"])
+
+    def test_applying_records_recent_use(self):
+        theme = self.make_theme("system", "gamma")
+        self.app.apply_theme_action(theme)
+        self.assertIn("gamma", self.auto.load_recent())
+
+    def test_rows_with_star_and_badges_stay_within_the_card(self):
+        Gtk = gi.repository.Gtk
+        self.make_theme("system", "alpha")   # current (state says alpha), system
+        self.auto.set_favorite("alpha", True)
+        self.app.refresh_themes()
+        page = self.app.stack.get_child_by_name("themes")
+        self.assertLessEqual(page.measure(Gtk.Orientation.HORIZONTAL, -1)[1], theme_popup.CARD_WIDTH)
+
+    def test_settings_page_saves_choices(self):
+        Gdk = gi.repository.Gdk
+        self.make_theme("system", "day-one")
+        self.make_theme("system", "night-one")
+        self.app.open_settings()
+        self.assertEqual(self.app.stack.get_visible_child_name(), "settings")
+        self.app.save_setting(slideshow_minutes=15, workspace_wallpapers=True)
+        self.app.save_schedule(day="day-one", night="night-one", night_at="20:30")
+        self.app.set_schedule_enabled(True)
+        self.assertEqual(self.auto.slideshow_minutes(), 15)
+        self.assertTrue(self.auto.workspace_wallpapers_enabled())
+        plan = self.auto.schedule()
+        self.assertEqual((plan["enabled"], plan["day"], plan["night"], plan["night_at"]),
+                         (True, "day-one", "night-one", "20:30"))
+        # Rebuilt controls show the saved values; building them saves nothing.
+        before = theme_core.settings_file().read_text()
+        self.app.fill_settings()
+        self.assertEqual(theme_core.settings_file().read_text(), before)
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+
+    def test_schedule_theme_from_the_theme_menu(self):
+        theme = self.make_theme("system", "gamma")
+        self.menu_entries(theme)["Use as night theme"].emit("clicked")
+        self.assertEqual(self.auto.schedule()["night"], "gamma")
+        self.assertIn("This is the night theme", self.menu_entries(theme))
+
+    def test_resize_changes_columns_and_is_saved(self):
+        Gdk = gi.repository.Gdk
+        theme = self.make_theme("system", "gamma", tuple(f"w{i}.png" for i in range(6)))
+        self.app.open_wallpapers_for(theme)
+        self.assertEqual(self.app.wp_grid.get_max_children_per_line(), 2)
+        self.app.resize_to(820, 700, save=True)
+        self.assertEqual(self.app.columns, 4)
+        self.assertEqual(self.app.wp_grid.get_max_children_per_line(), 4)
+        self.assertEqual(theme_core.window_size(), (820, 700))
+        # Left from the middle column moves left instead of leaving the page.
+        tiles = self.children(self.app.wp_grid)
+        tiles[2].grab_focus()
+        self.app.window.set_focus(tiles[2])
+        self.app.on_key(None, Gdk.KEY_Left, 0, 0)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
+        tiles[4].grab_focus()
+        self.app.window.set_focus(tiles[4])          # first tile of the second row
+        self.app.on_key(None, Gdk.KEY_Left, 0, 0)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.app.resize_to(10, 10)                     # never below the minimum
+        self.assertEqual((self.app.card_w, self.app.list_h), theme_core.MIN_WINDOW_SIZE)
+        self.app.resize_to(theme_popup.CARD_WIDTH, theme_popup.LIST_HEIGHT, save=True)
+        self.assertIsNone(theme_core.window_size())    # the default size is not stored
+
+    def test_theme_tiles_show_their_names(self):
+        Gtk = gi.repository.Gtk
+        for slug in ("alpha", "tokyo-night"):
+            self.make_theme("system", slug)
+        self.app.resize_to(700, 600)
+        self.app.refresh_themes()
+        tile = next(r for r in self.rows_list() if r.tm_theme.slug == "tokyo-night")
+        name = next(w for w in self.descendants(tile) if isinstance(w, Gtk.Label) and w.has_css_class("tm-tile-name"))
+        self.assertEqual(name.get_label(), "Tokyo Night")
+        caption = name.get_parent()
+        self.assertEqual(caption.get_halign(), Gtk.Align.FILL)   # a centered box gave the name no room
+
+    def test_double_click_on_title_resets_size_and_centers(self):
+        self.app.resize_to(900, 700, save=True)
+        self.app.move_to((50, 60), save=True)
+        self.app.on_move_begin(None, 0, 0)
+        self.app.on_move_end(None, 0, 0)
+        self.assertEqual(theme_core.window_position(), (50, 60))   # one press: nothing changes
+        self.app.on_move_begin(None, 0, 0)                          # the second press
+        self.assertEqual((self.app.card_w, self.app.list_h), (theme_popup.CARD_WIDTH, theme_popup.LIST_HEIGHT))
+        self.assertIsNone(self.app.position)
+        self.assertIsNone(theme_core.window_position())
+        self.assertIsNone(theme_core.window_size())
+
+    def test_wider_popup_shows_theme_cards_in_columns(self):
+        Gdk = gi.repository.Gdk
+        for slug in ("alpha", "beta", "gamma", "delta", "eps"):
+            self.make_theme("system", slug)
+        self.app.refresh_themes()
+        self.assertEqual(self.app.rows.get_max_children_per_line(), 1)
+        self.assertFalse(self.rows_list()[0].get_child().has_css_class("tm-tile"))   # the list
+        self.app.resize_to(900, 600)
+        self.assertEqual(self.app.rows.get_max_children_per_line(), 4)            # like the wallpapers
+        self.assertTrue(self.rows_list()[0].get_child().has_css_class("tm-tile"))
+        self.app.resize_to(480, 600)
+        self.assertEqual(self.app.rows.get_max_children_per_line(), 2)
+        self.app.select_row(self.rows_list()[0])                 # alpha, left column
+        self.app.on_key(None, Gdk.KEY_Right, 0, 0)               # → moves to the right column
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "beta")
+        self.assertIsNone(self.app.actions_popover)
+        # alpha beta / delta eps / gamma
+        self.app.on_key(None, Gdk.KEY_Down, 0, 0)                # ↓ goes one line down
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "eps")
+        self.app.on_key(None, Gdk.KEY_Left, 0, 0)
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "delta")
+        self.app.on_key(None, Gdk.KEY_Menu, 0, 0)                # the menu key still opens the menu
+        self.assertIsNotNone(self.app.actions_popover)
+        self.app.actions_popover.popdown()
+        self.app.resize_to(theme_popup.CARD_WIDTH, 600)          # default width: the list again
+        self.assertEqual(self.app.rows.get_max_children_per_line(), 1)
+        self.assertFalse(self.rows_list()[0].get_child().has_css_class("tm-tile"))
+
+    def test_delete_wallpaper_offers_undo_from_the_trash(self):
+        trash = Path(self.tmp.name) / "Trash"
+        self.roots = theme_core.Roots(self.roots.user_themes, self.roots.system_themes,
+                                      self.roots.user_backgrounds, self.roots.state_current, trash=trash)
+        theme = self.make_theme("user", "beta")
+        path = self.make_wallpaper("beta", "keep.png")
+        self.app.open_wallpapers_for(theme)
+        info = next(w for w in theme_core.list_backgrounds(None, theme) if w.name == "keep.png")
+        self.app.confirm_delete_wallpaper(info)
+        self.assertIn("trash", self.app.confirm_label.get_label())
+        self.app.accept_confirm()
+        self.assertFalse(path.exists())
+        self.assertTrue((trash / "files" / "keep.png").exists())
+        self.assertTrue(self.app.undo_bar.get_reveal_child())
+        Gdk = gi.repository.Gdk
+        self.app.on_key(None, Gdk.KEY_z, 0, Gdk.ModifierType.CONTROL_MASK)
+        self.assertTrue(path.exists())
+        self.assertFalse(self.app.undo_bar.get_reveal_child())
+        self.assertEqual([t.tm_wallpaper.name for t in self.wallpaper_tiles()], ["keep.png"])
+
+    def test_delete_theme_offers_undo(self):
+        trash = Path(self.tmp.name) / "Trash"
+        self.roots = theme_core.Roots(self.roots.user_themes, self.roots.system_themes,
+                                      self.roots.user_backgrounds, self.roots.state_current, trash=trash)
+        theme = self.make_theme("user", "beta")
+        self.app.refresh_themes()
+        self.app.perform_delete_theme(theme)
+        self.assertFalse(theme.path.exists())
+        self.app.undo_delete()
+        self.assertTrue(theme.path.is_dir())
+        self.assertIn("beta", [r.tm_theme.slug for r in self.rows_list()])
+
+    def test_space_previews_until_released(self):
+        Gdk = gi.repository.Gdk
+        theme = self.make_theme("system", "gamma", ("g1.png", "g2.png"))
+        self.app.open_wallpapers_for(theme)
+        tile = self.wallpaper_tiles()[1]
+        self.app.window.set_focus(tile)
+        self.app.on_key(None, Gdk.KEY_space, 0, 0)
+        self.app.on_key(None, Gdk.KEY_space, 0, 0)     # auto-repeat while held
+        self.assertEqual(self.previews, ["g2.png"])
+        self.assertIsNone(self.app.actions_popover)    # no menu: Space previews now
+        self.app.on_key_released(None, Gdk.KEY_space, 0, 0)
+        self.assertEqual(self.previews, ["g2.png", "<restore>"])
+        # From the menu: shown for a few seconds; closing the popup restores at once.
+        self.wallpaper_menu(tile.tm_wallpaper)["Preview on desktop"].emit("clicked")
+        self.app.close()
+        self.assertEqual(self.previews[-2:], ["g2.png", "<restore>"])
+        self.assertIsNone(self.app.preview)
+
+    def test_web_preview_loads_the_full_image(self):
+        Gdk = gi.repository.Gdk
+        full = Path(self.tmp.name) / "full.jpg"
+        full.write_bytes(PNG)
+        orig = self.ws.fetch_preview
+        self.ws.fetch_preview = lambda item: full
+        try:
+            theme = self.make_theme("user", "beta")
+            self.app.open_wallpapers_for(theme)
+            self.app.open_web_search()
+            self.app.web_search.set_text("forest")
+            self.app.run_web_search()
+            tile = self.children(self.app.web_grid)[0]
+            self.app.window.set_focus(tile)
+            self.app.on_key(None, Gdk.KEY_space, 0, 0)
+            self.assertEqual(self.previews, ["full.jpg"])
+            self.app.on_key_released(None, Gdk.KEY_space, 0, 0)
+            self.assertEqual(self.previews, ["full.jpg", "<restore>"])
+        finally:
+            self.ws.fetch_preview = orig
+
+    def test_workspace_menu_assigns_and_clears(self):
+        theme = self.make_theme("system", "alpha", ("a1.png", "a2.png"))  # the current theme
+        self.app.open_wallpapers_for(theme)
+        wallpaper = self.wallpaper_tiles()[0].tm_wallpaper
+        self.assertIn("Show on workspace…", self.wallpaper_menu(wallpaper))
+        self.app.assign_workspace(wallpaper, 3, True)
+        self.assertEqual(self.auto.load_workspace_map(), {"alpha": {3: "a1.png"}})
+        self.assertTrue(self.auto.workspace_wallpapers_enabled())     # switched on by the first use
+        self.assertIn("On workspace 3…", self.wallpaper_menu(self.wallpaper_tiles()[0].tm_wallpaper))
+        badge_labels = [w.get_label() for w in self.descendants(self.wallpaper_tiles()[0])
+                        if isinstance(w, gi.repository.Gtk.Label)]
+        self.assertIn("ws 3", badge_labels)
+        self.active_ws = 3
+        self.app.assign_workspace(wallpaper, 3, True)                 # in front: shown right away
+        self.assertEqual(self.backgrounds_set[-1].rsplit("/", 1)[-1], "a1.png")
+        self.app.clear_workspaces(wallpaper)
+        self.assertEqual(self.auto.load_workspace_map(), {})
+
+    def test_add_tile_opens_the_file_chooser(self):
+        Gdk = gi.repository.Gdk
+        theme = self.make_theme("user", "beta")
+        self.make_wallpaper("beta", "one.png")
+        self.app.open_wallpapers_for(theme)
+        chosen = []
+        self.app.choose_files = lambda: chosen.append(True)
+        add = self.children(self.app.wp_grid)[0]
+        self.assertTrue(add.tm_add)
+        self.app.window.set_focus(add)
+        self.app.on_key(None, Gdk.KEY_Return, 0, 0)
+        self.app.wp_grid.emit("child-activated", add)
+        self.assertEqual(chosen, [True, True])
+        # Filtering hides the add tile.
+        self.type_keys("one")
+        self.assertFalse(any(getattr(t, "tm_add", False) for t in self.children(self.app.wp_grid)))
+
+    def test_new_theme_from_a_theme(self):
+        Gdk = gi.repository.Gdk
+        base = self.make_theme("system", "gamma", ("g1.png", "g2.png"))
+        (base.path / "colors.toml").write_text('accent = "#112233"\nbackground = "#000000"\n')
+        self.menu_entries(base)["New theme from this…"].emit("clicked")
+        self.assertEqual(self.app.stack.get_visible_child_name(), "editor")
+        self.assertEqual(self.app.ed_name.get_text(), "My Gamma")
+        self.assertEqual(self.app.ed["entries"]["accent"].get_text(), "#112233")
+        entry = self.app.ed["entries"]["accent"]
+        entry.set_text("40c0ff")                      # the # is optional
+        entry.emit("activate")
+        self.assertEqual(self.app.ed["palette"].colors["accent"], "#40c0ff")
+        self.app.set_editor_color("red", "nonsense")
+        self.assertIn("not a color", self.app.ed_hint.get_label())
+        self.assertEqual(self.app.ed["entries"]["red"].get_text(), self.app.ed["palette"].colors["red"])
+        self.app.ed_hint.set_label("")
+        self.app.set_editor_font(2)                   # "Mono B"
+        self.app.ed_name.set_text("Night Owl")
+        self.app.save_editor(apply=True)
+        folder = self.roots.user_themes / "night-owl"
+        self.assertIn('accent = "#40c0ff"', (folder / "colors.toml").read_text())
+        self.assertEqual(sorted(p.name for p in (folder / "backgrounds").iterdir()), ["g1.png", "g2.png"])
+        self.assertEqual(self.applied, ["night-owl"])
+        self.assertEqual(self.fonts_set, ["Mono B"])  # the theme's font, once applied
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "night-owl")
+        # A custom theme can be edited again; other themes can't.
+        mine = next(t for t in theme_core.discover_themes() if t.slug == "night-owl")
+        self.assertIn("Edit theme…", self.menu_entries(mine))
+        self.assertNotIn("Edit theme…", self.menu_entries(base))
+
+    def test_edit_custom_theme_and_escape_cancels(self):
+        Gdk = gi.repository.Gdk
+        base = self.make_theme("system", "gamma")
+        self.custom.create_theme(base, "Mine", self.custom.load_palette(base), None, wallpapers=False)
+        mine = next(t for t in theme_core.discover_themes() if t.slug == "mine")
+        self.app.open_editor(mine, edit=True)
+        self.app.set_editor_color("background", "#ffffff")
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.assertNotIn("#ffffff", (mine.path / "colors.toml").read_text())
+        self.app.open_editor(mine, edit=True)
+        self.app.set_editor_color("background", "#ffffff")
+        self.app.save_editor(apply=False)
+        self.assertIn('background = "#ffffff"', (mine.path / "colors.toml").read_text())
+        self.assertIn('mode = "light"', (mine.path / "colors.toml").read_text())
+        self.assertEqual(self.applied, [])            # not in use: not applied
+
+    def test_new_theme_from_a_wallpaper(self):
+        base = self.make_theme("system", "gamma", ("1-misty-forest.png", "other.png"))
+        self.app.open_wallpapers_for(base)
+        tile = next(t for t in self.wallpaper_tiles() if t.tm_wallpaper.name == "1-misty-forest.png")
+        self.wallpaper_menu(tile.tm_wallpaper)["New theme from this wallpaper…"].emit("clicked")
+        self.assertEqual(self.app.stack.get_visible_child_name(), "editor")
+        self.assertEqual(self.app.ed_name.get_text(), "Misty Forest")
+        self.assertIn("1-misty-forest.png", self.app.ed_title.get_label())
+        self.app.save_editor(apply=False)
+        folder = self.roots.user_themes / "misty-forest"
+        self.assertEqual([p.name for p in (folder / "backgrounds").iterdir()], ["1-misty-forest.png"])
+        self.assertTrue((folder / "colors.toml").is_file())
+
+    def test_rename_custom_theme_in_use(self):
+        base = self.make_theme("system", "gamma")
+        self.custom.create_theme(base, "Old Name", self.custom.load_palette(base), None, wallpapers=False)
+        self.make_wallpaper("old-name", "mine.png")
+        self.auto.set_favorite("old-name", True)
+        self.state_current.write_text("old-name\n")
+        mine = next(t for t in theme_core.discover_themes() if t.slug == "old-name")
+        self.app.open_editor(mine, edit=True)
+        self.assertEqual(self.app.ed_name.get_text(), "Old Name")
+        self.app.ed_name.set_text("New Name")
+        self.app.save_editor(apply=False)
+        self.assertFalse((self.roots.user_themes / "old-name").exists())
+        self.assertTrue((self.roots.user_themes / "new-name" / "colors.toml").is_file())
+        self.assertTrue((self.roots.user_backgrounds / "new-name" / "mine.png").is_file())
+        self.assertEqual(self.auto.load_favorites(), ["new-name"])
+        self.assertEqual(self.applied, ["new-name"])            # it was in use: applied again
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "new-name")
+
+    def test_editor_refuses_a_taken_name(self):
+        base = self.make_theme("system", "gamma")
+        self.app.open_editor(base)
+        self.app.ed_name.set_text("Gamma")
+        self.app.save_editor(apply=False)
+        self.assertIn("already exists", self.app.ed_hint.get_label())
+        self.assertEqual(self.app.stack.get_visible_child_name(), "editor")
+
+    def test_editor_page_fits_the_card(self):
+        Gtk = gi.repository.Gtk
+        base = self.make_theme("system", "gamma")
+        self.app.open_editor(base)
+        page = self.app.stack.get_child_by_name("editor")
+        self.assertLessEqual(page.measure(Gtk.Orientation.HORIZONTAL, -1)[1], theme_popup.CARD_WIDTH)
+
+    def press(self, keyval, *mods):
+        Gdk = gi.repository.Gdk
+        masks = {"SUPER": Gdk.ModifierType.SUPER_MASK, "SHIFT": Gdk.ModifierType.SHIFT_MASK,
+                 "CTRL": Gdk.ModifierType.CONTROL_MASK, "ALT": Gdk.ModifierType.ALT_MASK}
+        state = 0
+        for mod in mods:
+            state |= masks[mod]
+        return self.app.on_key(None, keyval, 0, state)
+
+    def test_theme_shortcut_from_its_menu(self):
+        Gdk = gi.repository.Gdk
+        theme = self.make_theme("system", "gamma")
+        self.app.refresh_themes()
+        self.menu_entries(theme)["Shortcut…"].emit("clicked")
+        self.assertEqual(self.app.stack.get_visible_child_name(), "shortcut")
+        self.assertIn("Apply Gamma", self.app.sc_title.get_label())
+        self.assertEqual(self.captures, ["enter"])                     # bound combos reach the page
+        self.press(Gdk.KEY_g, "SUPER", "CTRL")                         # held modifiers + a key
+        self.assertEqual(self.app.current_combo(), {"mods": ["SUPER", "CTRL"], "key": "G"})
+        self.assertIn("free", self.app.sc_status.get_label())
+        self.press(Gdk.KEY_Return)                                     # Enter alone assigns
+        lua = (self.hypr / "theme-manager-shortcuts.lua").read_text()
+        self.assertIn('o.bind("SUPER + CTRL + G", "Theme Manager: Apply Gamma"', lua)
+        self.assertIn("theme_auto.py apply gamma", lua)
+        self.assertIn(self.sc.REQUIRE_LINE, (self.hypr / "hyprland.lua").read_text())
+        self.assertIn("Shortcut: Super + Ctrl + G…", self.menu_entries(theme))
+        self.press(Gdk.KEY_Escape)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.assertEqual(self.captures[-1], "leave")
+        row = next(r for r in self.rows_list() if r.tm_theme.slug == "gamma")
+        self.assertIn("Super+Ctrl+G", [w.get_label() for w in self.descendants(row)
+                                        if isinstance(w, gi.repository.Gtk.Label)])
+
+    def test_taken_keys_are_coloured_and_can_be_rebound(self):
+        Gdk = gi.repository.Gdk
+        self.app.open_settings()
+        self.app.open_shortcut_page("open")
+        self.app.set_shortcut_combo(["SUPER", "CTRL"], None)
+        chips = {c.get_child().get_label(): c.get_child() for c in self.children(self.app.sc_letters)}
+        self.assertTrue(chips["N"].has_css_class("sc-yours-key"))      # your bindings.lua
+        self.assertTrue(chips["T"].has_css_class("sc-free-key"))
+        self.app.pick_shortcut_key("N")
+        self.assertEqual(self.app.sc_apply.get_label(), "Rebind")
+        self.app.apply_shortcut()
+        self.assertEqual(self.sc.load_state()["open"]["replaces"], "Notes")
+        self.assertIn('hl.unbind("SUPER + CTRL + N")', (self.hypr / "theme-manager-shortcuts.lua").read_text())
+        # Omarchy's keys show as such.
+        self.app.set_shortcut_combo(["SUPER"], "Return")
+        self.assertIn("Omarchy", self.app.sc_status.get_label())
+        # Remove gives the key back and takes the file and the line out again.
+        self.app.remove_shortcut()
+        self.assertEqual(self.sc.load_state(), {})
+        self.assertFalse((self.hypr / "theme-manager-shortcuts.lua").exists())
+        self.assertNotIn(self.sc.REQUIRE_LINE, (self.hypr / "hyprland.lua").read_text())
+        self.press(Gdk.KEY_Escape)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "settings")
+
+    def test_shortcut_needs_a_modifier_and_moves_between_actions(self):
+        Gdk = gi.repository.Gdk
+        self.app.open_shortcut_page("next-wallpaper")
+        self.app.set_shortcut_combo([], None)
+        self.press(Gdk.KEY_w)
+        self.assertFalse(self.app.sc_apply.get_sensitive())
+        self.app.set_shortcut_combo(["SUPER", "CTRL"], "W")
+        self.app.apply_shortcut()
+        self.app.close_shortcut_page()
+        self.app.open_shortcut_page("prev-wallpaper")
+        self.app.set_shortcut_combo(["SUPER", "CTRL"], "W")
+        self.assertEqual(self.app.sc_apply.get_label(), "Move here")
+        self.app.apply_shortcut()
+        self.assertEqual(list(self.sc.load_state()), ["prev-wallpaper"])
+
+    def test_deleted_theme_key_goes_when_undo_ends(self):
+        trash = Path(self.tmp.name) / "Trash"
+        self.roots = theme_core.Roots(self.roots.user_themes, self.roots.system_themes,
+                                      self.roots.user_backgrounds, self.roots.state_current, trash=trash)
+        theme = self.make_theme("user", "beta")
+        self.sc.save_and_apply({"apply:beta": self.sc.make_combo(["SUPER", "CTRL"], "B")})
+        self.app.refresh_themes()
+        self.app.perform_delete_theme(theme)
+        self.assertIn("apply:beta", self.sc.load_state())         # Undo could still bring it back
+        self.app.undo_delete()
+        self.assertIn("apply:beta", self.sc.load_state())
+        self.assertIn("Super + Ctrl + B", (self.hypr / "theme-manager-shortcuts.lua").read_text()
+                      .replace("SUPER", "Super").replace("CTRL", "Ctrl"))
+        self.app.perform_delete_theme(next(t for t in theme_core.discover_themes() if t.slug == "beta"))
+        self.app.end_undo()                                        # the undo time is over
+        self.assertEqual(self.sc.load_state(), {})
+        self.assertIn(("Shortcut removed", "The key of Beta is free again."), self.notices)
+
+    def test_deleted_theme_without_trash_loses_its_key_at_once(self):
+        theme = self.make_theme("user", "beta")
+        self.sc.save_and_apply({"apply:beta": self.sc.make_combo(["SUPER", "CTRL"], "B")})
+        self.app.perform_delete_theme(theme)
+        self.assertEqual(self.sc.load_state(), {})
+
+    def test_hidden_theme_key_is_marked(self):
+        theme = self.make_theme("system", "gamma")
+        self.sc.save_and_apply({"apply:gamma": self.sc.make_combo(["SUPER", "CTRL"], "G")})
+        self.app.hidden = {"gamma"}
+        self.assertIn("Shortcut: Super + Ctrl + G (works while hidden)…", self.menu_entries(theme))
+        self.app.hidden = set()
+        self.assertIn("Shortcut: Super + Ctrl + G…", self.menu_entries(theme))
+
+    def test_follows_a_theme_change_made_elsewhere(self):
+        self.make_theme("system", "alpha", ("a1.png",))
+        gamma = self.make_theme("system", "gamma", ("g1.png",))
+        self.app.current_slug = "alpha"
+        self.app.refresh_themes()
+        self.app.open_wallpapers_for(gamma)
+        self.assertFalse(self.app.active_theme.current)
+        self.state_current.write_text("gamma\n")          # e.g. gamma's key was pressed
+        self.app.follow_theme_change()
+        self.assertTrue(self.app.active_theme.current)
+        tile = self.wallpaper_tiles()[0]
+        self.assertIn("Set as background", self.wallpaper_menu(tile.tm_wallpaper))
+        current = [r.tm_theme.slug for r in self.rows_list() if r.tm_theme.current]
+        self.assertEqual(current, ["gamma"])
+
+    def test_theme_name_changes_are_watched(self):
+        self.app.watch_current_theme()
+        self.assertIsNotNone(self.app.state_monitor)
+        seen = []
+        self.app.follow_theme_change = lambda: seen.append(True) or False
+        Gio = gi.repository.Gio
+        name = Gio.File.new_for_path(str(self.state_current))
+        self.app.on_state_changed(None, Gio.File.new_for_path(str(self.state_current.parent / "other")), None, 0)
+        self.assertEqual(self.app.theme_sync, 0)            # other files are ignored
+        self.app.on_state_changed(None, name, None, 0)
+        self.assertNotEqual(self.app.theme_sync, 0)          # theme.name: follow shortly
+        GLib.source_remove(self.app.theme_sync)
+
+    def test_settings_list_every_shortcut(self):
+        self.make_theme("system", "gamma")
+        self.sc.save_and_apply({"apply:gamma": self.sc.make_combo(["SUPER", "CTRL"], "G")})
+        self.app.open_settings()
+        labels = [w.get_label() for w in self.descendants(self.app.settings_box)
+                  if isinstance(w, gi.repository.Gtk.Label)]
+        for text in ("Open Theme Manager", "Next wallpaper", "Previous wallpaper", "Next favorite theme",
+                     "Apply Gamma"):
+            self.assertIn(text, labels)
+
+    def descendants(self, widget) -> list:
+        out = []
+        for child in self.children(widget):
+            out.append(child)
+            out.extend(self.descendants(child))
+        return out
 
 
 if __name__ == "__main__":

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.theme-manager",
   "name": "Theme Manager",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
-  "description": "Every Omarchy theme in one list, user and system: apply, hide or delete a theme, and manage each theme's wallpapers. Add them by drag & drop from the file manager or straight from a web page, by pasting, or by web search; iPhone HEIC photos are converted. Hidden themes and wallpapers also disappear from Omarchy's own pickers. Browse and install new themes from omarchy.org. A movable floating popup that stays open while you work.",
+  "description": "Every Omarchy theme in one place: apply, favorite, hide or delete with undo, and give any theme its own key. Make your own themes from any theme or wallpaper: pick colors and a font with a live preview. Manage wallpapers: drop, paste, choose or search the web, preview them on the desktop, give each workspace its own or let them rotate. Day and night themes, next wallpaper by scrolling the bar icon, favorites on right-click, themes from omarchy.org.",
   "kinds": [
     "bar-widget"
   ],

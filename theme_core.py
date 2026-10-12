@@ -19,6 +19,7 @@ Trust rules (mirroring the marketplace security review):
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -67,6 +68,9 @@ class Roots:
     system_themes: Path      # $OMARCHY_PATH/themes (usually /usr/share/omarchy/themes)
     user_backgrounds: Path   # ~/.config/omarchy/backgrounds/<theme>/ (per-theme user wallpapers)
     state_current: Path      # ~/.local/state/omarchy/current
+    # The freedesktop trash deletes go to (~/.local/share/Trash), or None to
+    # delete for good.
+    trash: Path | None = None
 
 
 def default_roots() -> Roots:
@@ -77,6 +81,7 @@ def default_roots() -> Roots:
         system_themes=omarchy_path / "themes",
         user_backgrounds=home / ".config/omarchy/backgrounds",
         state_current=home / ".local/state/omarchy/current",
+        trash=Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "Trash",
     )
 
 
@@ -395,6 +400,25 @@ def window_position(path: Path | None = None) -> tuple[int, int] | None:
             all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 100000 for v in value):
         return value[0], value[1]
     return None
+
+
+MIN_WINDOW_SIZE = (420, 320)   # the card's width and its list's height, logical px
+
+
+def window_size(path: Path | None = None) -> tuple[int, int] | None:
+    """The card width and list height the user last resized the popup to,
+    or None for the default size."""
+    value = _load_settings(path or settings_file()).get("size")
+    if isinstance(value, list) and len(value) == 2 and \
+            all(isinstance(v, int) and not isinstance(v, bool) for v in value) and \
+            MIN_WINDOW_SIZE[0] <= value[0] < 20000 and MIN_WINDOW_SIZE[1] <= value[1] < 20000:
+        return value[0], value[1]
+    return None
+
+
+def save_window_size(size: tuple[int, int] | None, path: Path | None = None) -> None:
+    _update_settings(path or settings_file(),
+                     size=None if size is None else [int(size[0]), int(size[1])])
 
 
 def save_window_position(position: tuple[int, int] | None, path: Path | None = None) -> None:
@@ -863,8 +887,32 @@ def set_desktop_background(path: Path) -> bool:
     return ok
 
 
-def remove_wallpaper(roots: Roots | None, path: str | Path) -> Path:
-    """Delete one wallpaper file.
+def show_background(path: Path) -> bool:
+    """Show an image on the desktop for a moment (a preview) without making
+    it the background: Omarchy's background link is left alone, so
+    `restore_background()` brings the real one back. Images that declare
+    a huge canvas are refused: the shell would decode them in full."""
+    if image_size_problem(path):
+        return False
+    _, ok = read_bounded_output(["omarchy-shell", "-q", "background", "set", str(path)],
+                                max_bytes=65536, timeout=5.0)
+    return ok
+
+
+def restore_background(roots: Roots | None = None) -> bool:
+    """Back from a preview to the background Omarchy's link points at."""
+    roots = roots or default_roots()
+    try:
+        target = (roots.state_current / "background").resolve(strict=True)
+    except OSError:
+        return False
+    return show_background(target)
+
+
+def remove_wallpaper(roots: Roots | None, path: str | Path,
+                     receipt: list | None = None) -> Path:
+    """Delete one wallpaper file: into the trash when `roots.trash` is set
+    (the TrashReceipt is appended to `receipt`, for undo).
 
     Allowed only inside `~/.config/omarchy/backgrounds/<slug>/` or a *user*
     theme's `backgrounds/` directory; system theme wallpapers are refused.
@@ -884,7 +932,7 @@ def remove_wallpaper(roots: Roots | None, path: str | Path) -> Path:
 
     user_bg = roots.user_backgrounds.resolve()
     if parent_real.is_relative_to(user_bg):
-        target.unlink()
+        _discard(roots, target, receipt)
         return target
 
     user_themes = roots.user_themes.resolve()
@@ -893,15 +941,105 @@ def remove_wallpaper(roots: Roots | None, path: str | Path) -> Path:
         if len(parts) >= 2 and parts[1] == "backgrounds":
             if theme_from_git(user_themes / parts[0]):
                 raise PermissionError(LOCK_GIT)
-            target.unlink()
+            _discard(roots, target, receipt)
             return target
 
     raise PermissionError(LOCK_SYSTEM)
 
 
+# --- trash ---------------------------------------------------------------------
+#
+# Deletes go to the freedesktop trash (the same one the file manager uses), so
+# a wallpaper or theme deleted by mistake can be restored: right away with
+# Undo in the popup, later from the file manager's trash.
+
+@dataclass(frozen=True)
+class TrashReceipt:
+    original: Path   # where the file or folder was
+    trashed: Path    # where it is now (Trash/files/<name>)
+    info: Path       # its Trash/info/<name>.trashinfo
+
+
+def _private_trash_dir(path: Path) -> Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir() or path.stat().st_uid != os.getuid():
+        raise PermissionError(f"{path} is not a private trash directory")
+    return path
+
+
+def move_to_trash(trash: Path, target: Path) -> TrashReceipt:
+    """Move `target` (a file, or a directory as a whole) into the trash
+    following the freedesktop.org spec: the .trashinfo is claimed first with
+    O_EXCL, then the item is renamed next to it. Raises OSError (EXDEV) when
+    the trash is on another filesystem; nothing is moved then."""
+    files = _private_trash_dir(trash / "files")
+    info_dir = _private_trash_dir(trash / "info")
+    original = Path(os.path.abspath(target))
+    base = _sanitize_name(original.name) or "item"
+    stem, dot, ext = base.partition(".") if not original.is_dir() else (base, "", "")
+    for n in range(1, 1000):
+        name = base if n == 1 else f"{stem}.{n}{dot}{ext}"
+        info = info_dir / f"{name}.trashinfo"
+        try:
+            fd = os.open(info, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            continue
+        dest = files / name
+        if dest.exists() or dest.is_symlink():
+            os.close(fd)
+            info.unlink(missing_ok=True)
+            continue
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write("[Trash Info]\n"
+                             f"Path={urllib.parse.quote(str(original))}\n"
+                             f"DeletionDate={time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+            os.rename(original, dest)
+        except BaseException:
+            info.unlink(missing_ok=True)
+            raise
+        return TrashReceipt(original, dest, info)
+    raise OSError("the trash has too many items with this name")
+
+
+def restore_from_trash(receipt: TrashReceipt) -> Path:
+    """Undo move_to_trash: the item goes back where it was, if that place
+    is still free."""
+    if receipt.original.exists() or receipt.original.is_symlink():
+        raise FileExistsError(f"{receipt.original.name} exists again; restore it from the trash by hand")
+    if not receipt.trashed.exists() and not receipt.trashed.is_symlink():
+        raise FileNotFoundError(f"{receipt.trashed.name} is no longer in the trash")
+    receipt.original.parent.mkdir(parents=True, exist_ok=True)
+    os.rename(receipt.trashed, receipt.original)
+    receipt.info.unlink(missing_ok=True)
+    return receipt.original
+
+
+def _discard(roots: Roots, target: Path, receipt: list | None) -> None:
+    """Trash `target` when a trash is configured, else delete it. Symlinks
+    are always just unlinked: the trash would keep a link, not a file."""
+    if target.is_symlink():
+        target.unlink()
+        return
+    if roots.trash is not None:
+        try:
+            done = move_to_trash(roots.trash, target)
+        except OSError as error:
+            if getattr(error, "errno", None) != errno.EXDEV:
+                raise
+        else:
+            if receipt is not None:
+                receipt.append(done)
+            return
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+
+
 # --- themes --------------------------------------------------------------------
 
-def remove_theme(roots: Roots | None, slug: str) -> Path:
+def remove_theme(roots: Roots | None, slug: str, receipt: list | None = None) -> Path:
     """Remove a *user* theme. System themes are refused; a slug that only
     exists in the system root raises FileNotFoundError.
 
@@ -927,7 +1065,7 @@ def remove_theme(roots: Roots | None, slug: str) -> Path:
     target_real = target.resolve()
     if not target_real.is_relative_to(base_real):
         raise PermissionError(f"refusing to remove {target}: escapes the user theme root")
-    shutil.rmtree(target)
+    _discard(roots, target, receipt)
     return target
 
 

@@ -420,6 +420,104 @@ class RemoveThemeTests(unittest.TestCase):
                 theme_core.remove_theme(self.roots, slug)
 
 
+class TrashTests(unittest.TestCase):
+    """Deletes go to the freedesktop trash when the roots name one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = make_roots(Path(self.tmp.name))
+        self.trash = Path(self.tmp.name) / "Trash"
+        self.roots = theme_core.Roots(base.user_themes, base.system_themes,
+                                      base.user_backgrounds, base.state_current, trash=self.trash)
+
+    def test_wallpaper_goes_to_trash_and_comes_back(self):
+        folder = self.roots.user_backgrounds / "nord"
+        folder.mkdir(parents=True)
+        wall = folder / "sea.png"
+        wall.write_bytes(png())
+        receipts = []
+        theme_core.remove_wallpaper(self.roots, wall, receipt=receipts)
+        self.assertFalse(wall.exists())
+        (receipt,) = receipts
+        self.assertEqual(receipt.trashed, self.trash / "files" / "sea.png")
+        self.assertEqual(receipt.trashed.read_bytes(), png())
+        info = receipt.info.read_text()
+        self.assertIn("[Trash Info]", info)
+        self.assertIn(f"Path={wall}", info)
+        self.assertIn("DeletionDate=", info)
+        self.assertEqual(oct(receipt.info.stat().st_mode & 0o777), "0o600")
+        theme_core.restore_from_trash(receipt)
+        self.assertEqual(wall.read_bytes(), png())
+        self.assertFalse(receipt.info.exists())
+
+    def test_same_name_twice_gets_a_new_trash_name(self):
+        folder = self.roots.user_backgrounds / "nord"
+        folder.mkdir(parents=True)
+        receipts = []
+        for _ in range(2):
+            (folder / "sea.png").write_bytes(png())
+            theme_core.remove_wallpaper(self.roots, folder / "sea.png", receipt=receipts)
+        self.assertEqual([r.trashed.name for r in receipts], ["sea.png", "sea.2.png"])
+
+    def test_theme_folder_goes_to_trash(self):
+        theme = make_theme(self.roots, "user", "vault", backgrounds=("1.jpg",))
+        receipts = []
+        theme_core.remove_theme(self.roots, "vault", receipt=receipts)
+        self.assertFalse(theme.exists())
+        self.assertTrue((receipts[0].trashed / "backgrounds" / "1.jpg").is_file())
+        theme_core.restore_from_trash(receipts[0])
+        self.assertTrue((theme / "backgrounds" / "1.jpg").is_file())
+
+    def test_restore_refuses_to_overwrite(self):
+        folder = self.roots.user_backgrounds / "nord"
+        folder.mkdir(parents=True)
+        (folder / "sea.png").write_bytes(png())
+        receipts = []
+        theme_core.remove_wallpaper(self.roots, folder / "sea.png", receipt=receipts)
+        (folder / "sea.png").write_bytes(b"new")
+        with self.assertRaises(FileExistsError):
+            theme_core.restore_from_trash(receipts[0])
+        self.assertEqual((folder / "sea.png").read_bytes(), b"new")
+
+    def test_symlink_is_unlinked_not_trashed(self):
+        folder = self.roots.user_backgrounds / "nord"
+        folder.mkdir(parents=True)
+        outside = Path(self.tmp.name) / "outside.png"
+        outside.write_bytes(png())
+        (folder / "link.png").symlink_to(outside)
+        receipts = []
+        theme_core.remove_wallpaper(self.roots, folder / "link.png", receipt=receipts)
+        self.assertEqual(receipts, [])
+        self.assertTrue(outside.exists())
+        self.assertFalse((self.trash / "files" / "link.png").exists())
+
+    def test_trash_that_is_a_symlink_is_refused(self):
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        self.trash.mkdir()
+        (self.trash / "files").symlink_to(elsewhere)
+        folder = self.roots.user_backgrounds / "nord"
+        folder.mkdir(parents=True)
+        (folder / "sea.png").write_bytes(png())
+        with self.assertRaises(PermissionError):
+            theme_core.remove_wallpaper(self.roots, folder / "sea.png")
+        self.assertTrue((folder / "sea.png").exists())
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+
+class WindowSizeTests(unittest.TestCase):
+    def test_size_roundtrip_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            self.assertIsNone(theme_core.window_size(path))
+            theme_core.save_window_size((800, 700), path)
+            self.assertEqual(theme_core.window_size(path), (800, 700))
+            for bad in ([100, 700], [800, 10], ["800", 700], [True, 700], [800]):
+                path.write_text(__import__("json").dumps({"size": bad}))
+                self.assertIsNone(theme_core.window_size(path), bad)
+
+
 class BoundedProcessTests(unittest.TestCase):
     def test_normal_output(self):
         out, ok = theme_core.read_bounded_output(["echo", "hello"])
