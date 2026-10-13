@@ -30,6 +30,7 @@ from pathlib import Path
 
 import theme_core
 import theme_custom
+from i18n import _
 
 SLIDESHOW_CHOICES = (0, 5, 10, 15, 30, 60, 120)   # minutes; 0 = off
 SORT_CHOICES = ("name", "recent")
@@ -248,14 +249,14 @@ def set_workspace_wallpaper(slug: str, workspace: int, name: str | None) -> None
     """Show wallpaper `name` of theme `slug` on `workspace` (None: clear it)."""
     slug = theme_core._validate_slug(slug)
     if not 1 <= int(workspace) <= MAX_WORKSPACE:
-        raise ValueError("workspace out of range")
+        raise ValueError(_("workspace out of range"))
     mapping = load_workspace_map()
     assignments = mapping.setdefault(slug, {})
     if name is None:
         assignments.pop(int(workspace), None)
     else:
         if theme_core._sanitize_name(name) != name:
-            raise ValueError("bad wallpaper name")
+            raise ValueError(_("bad wallpaper name"))
         assignments[int(workspace)] = name
     save_workspace_map(mapping)
 
@@ -400,7 +401,7 @@ def apply_theme(slug: str) -> bool:
     first, and it counts as recently used."""
     slug = theme_core._validate_slug(slug)
     if slug not in {t.slug for t in theme_core.discover_themes()}:
-        raise FileNotFoundError(f"theme {slug!r} is not installed")
+        raise FileNotFoundError(_("theme {0} is not installed").format(repr(slug)))
     try:
         theme_core.unhide_theme(slug)
     except OSError:
@@ -490,10 +491,10 @@ def forget_dead_key(slug: str) -> int:
     try:
         removed = theme_shortcuts.drop_theme(slug)
     except (OSError, RuntimeError, ValueError) as error:
-        theme_core.notify(f"{name} no longer exists", f"Its key could not be removed: {error}")
+        theme_core.notify(_("{0} no longer exists").format(name), _("Its key could not be removed: {0}").format(error))
         return 1
-    theme_core.notify(f"{name} no longer exists",
-                      "Its key was removed and is free again." if removed else "")
+    theme_core.notify(_("{0} no longer exists").format(name),
+                      _("Its key was removed and is free again.") if removed else "")
     return 1
 
 
@@ -520,7 +521,7 @@ def main(argv: list[str]) -> int:
             except FileNotFoundError:
                 return forget_dead_key(args[0])
             if not ok:
-                theme_core.notify("Could not apply theme", args[0])
+                theme_core.notify(_("Could not apply theme"), args[0])
                 return 1
         else:
             print(__doc__.strip(), file=sys.stderr)

@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 
 import theme_core
+from i18n import _, N_
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 HYPR_DIR = Path.home() / ".config/hypr"
@@ -29,10 +30,10 @@ MAX_CONFIG_BYTES = 1024 * 1024
 # The actions a key can run: label and the command (fixed arguments only).
 # Besides these, "apply:<theme>" applies one theme (a key per theme).
 ACTIONS = {
-    "open": ("Open Theme Manager", ["theme-toggle"]),
-    "next-wallpaper": ("Next wallpaper", ["/usr/bin/python3", "theme_auto.py", "bg", "next"]),
-    "prev-wallpaper": ("Previous wallpaper", ["/usr/bin/python3", "theme_auto.py", "bg", "prev"]),
-    "next-favorite": ("Next favorite theme", ["/usr/bin/python3", "theme_auto.py", "theme", "next"]),
+    "open": (N_("Open Theme Manager"), ["theme-toggle"]),
+    "next-wallpaper": (N_("Next wallpaper"), ["/usr/bin/python3", "theme_auto.py", "bg", "next"]),
+    "prev-wallpaper": (N_("Previous wallpaper"), ["/usr/bin/python3", "theme_auto.py", "bg", "prev"]),
+    "next-favorite": (N_("Next favorite theme"), ["/usr/bin/python3", "theme_auto.py", "theme", "next"]),
 }
 
 MOD_BITS = {"SHIFT": 1, "CTRL": 4, "ALT": 8, "SUPER": 64}
@@ -67,7 +68,7 @@ def theme_of(action: str) -> str | None:
 
 def action_label(action: str) -> str:
     slug = theme_of(action)
-    return f"Apply {theme_core.display_name(slug)}" if slug else ACTIONS[action][0]
+    return _("Apply {0}").format(theme_core.display_name(slug)) if slug else _(ACTIONS[action][0])
 
 
 def action_argv(action: str) -> list[str]:
@@ -265,7 +266,7 @@ class Bindings:
         if user:
             return CUSTOM, user[-1]["description"] or f"your {user[-1]['file']}"
         if live:
-            return OMARCHY, live[-1]["description"] or "Omarchy binding"
+            return OMARCHY, live[-1]["description"] or _("Omarchy binding")
         return FREE, ""
 
 
@@ -400,7 +401,7 @@ def config_errors() -> str:
     out, ok = theme_core.read_bounded_output(["hyprctl", "configerrors"], max_bytes=65536, timeout=5.0)
     text = out.decode("utf-8", "replace").strip()
     if not ok:
-        return "hyprctl configerrors failed"
+        return _("hyprctl configerrors failed")
     return "" if not text or text.lower() in {"no errors", "none"} else text
 
 

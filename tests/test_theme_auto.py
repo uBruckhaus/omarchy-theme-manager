@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import theme_auto
 import theme_core
+import i18n  # noqa: E402
+
+i18n._lang = "en"  # the assertions below read English texts
 from images import png
 
 

@@ -34,6 +34,11 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
+import i18n
+from i18n import _, N_
+
+# The interface language is stored with Theme Manager's other settings.
+i18n.SETTINGS_FILE = Path.home() / ".config/omarchy/theme-manager/settings.json"
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 # Phone photos (HEIC/HEIF) are converted to JPEG on import with libheif's
@@ -612,7 +617,7 @@ def _copy_bounded(source: Path, dest: Path) -> None:
             while chunk := src.read(1024 * 1024):
                 total += len(chunk)
                 if total > MAX_BACKGROUND_BYTES:
-                    raise ValueError("image too large (max 50 MiB)")
+                    raise ValueError(_("image too large (max 50 MiB)"))
                 dst.write(chunk)
     except BaseException:
         dest.unlink(missing_ok=True)
@@ -629,7 +634,7 @@ def _require_sane_size(dest: Path) -> None:
                 handle.seek(0)
                 data = handle.read(MAX_BACKGROUND_BYTES + 1)
                 if len(data) > MAX_BACKGROUND_BYTES:
-                    raise ValueError("image too large (max 50 MiB)")
+                    raise ValueError(_("image too large (max 50 MiB)"))
                 clean = strip_png_metadata(data)
                 if clean != data:
                     _replace_bytes(dest, clean)
@@ -669,9 +674,9 @@ def add_background_file(roots: Roots | None, slug: str, source: str | Path) -> P
     if source.suffix.lower() in HEIF_EXTS:
         return _add_heif_file(roots, slug, source)
     if not _is_image_name(source.name):
-        raise ValueError(f"not an image: {source.name}")
+        raise ValueError(_("not an image: {0}").format(source.name))
     if source.stat().st_size > MAX_BACKGROUND_BYTES:
-        raise ValueError("image too large (max 50 MiB)")
+        raise ValueError(_("image too large (max 50 MiB)"))
     dest = _unique_dest(roots, slug, _sanitize_name(source.name))
     _copy_bounded(source, dest)
     _require_sane_size(dest)   # checked on our copy, so the source cannot change after
@@ -682,11 +687,11 @@ def _add_heif_file(roots: Roots, slug: str, source: Path) -> Path:
     """Convert a HEIC/HEIF photo to JPEG in a private temporary directory,
     then copy it in like any other image."""
     if source.stat().st_size > MAX_BACKGROUND_BYTES:
-        raise ValueError("image too large (max 50 MiB)")
+        raise ValueError(_("image too large (max 50 MiB)"))
     decoder = shutil.which("heif-dec")
     limiter = shutil.which("prlimit")
     if decoder is None or limiter is None:
-        raise ValueError("HEIC photos need libheif (heif-dec) installed")
+        raise ValueError(_("HEIC photos need libheif (heif-dec) installed"))
     with tempfile.TemporaryDirectory(prefix="theme-manager-heif-") as tmp:
         # Work on a private copy, so the file checked is the file decoded.
         private = Path(tmp) / "source.heic"
@@ -698,13 +703,13 @@ def _add_heif_file(roots: Roots, slug: str, source: Path) -> Path:
         # Declared sizes are checked above; prlimit is the backstop. --as caps
         # the decoder's memory (a 64 MP tiled photo needs about 1.3 GiB of
         # address space), --fsize every file it writes.
-        _, ok = read_bounded_output([limiter, f"--as={HEIF_DECODER_MAX_MEMORY}",
+        _out, ok = read_bounded_output([limiter, f"--as={HEIF_DECODER_MAX_MEMORY}",
                                      f"--fsize={MAX_BACKGROUND_BYTES}", "--",
                                      decoder, "--quiet", "--quality", "92",
                                      str(private), str(converted)],
                                     max_bytes=65536, timeout=60.0)
         if not ok or not converted.is_file():
-            raise ValueError(f"could not convert {source.name}")
+            raise ValueError(_("could not convert {0}").format(source.name))
         stem = _sanitize_name(source.stem) or "image"
         dest = _unique_dest(roots, slug, f"{stem}.jpg")
         _copy_bounded(converted, dest)
@@ -719,12 +724,12 @@ def add_background_bytes(roots: Roots | None, slug: str, data: bytes,
     slug = _validate_slug(slug)
     data = bytes(data)
     if not data:
-        raise ValueError("empty image data")
+        raise ValueError(_("empty image data"))
     if len(data) > MAX_BACKGROUND_BYTES:
-        raise ValueError("image too large (max 50 MiB)")
+        raise ValueError(_("image too large (max 50 MiB)"))
     name = _sanitize_name(name)
     if not _is_image_name(name):
-        raise ValueError(f"not an image: {name}")
+        raise ValueError(_("not an image: {0}").format(name))
     if data[:8] == PNG_SIGNATURE:
         data = strip_png_metadata(data)
     check_image_size(data)
@@ -756,8 +761,8 @@ def extension_for_mime(mime: str) -> str | None:
 
 HIDDEN_DIR = ".hidden"   # added wallpapers are hidden by moving them here
 
-LOCK_SYSTEM = "Ships with a system theme (owned by root, restored by updates): hide it instead"
-LOCK_GIT = "Part of a theme installed from git; deleting would break `omarchy theme update`: hide it instead"
+LOCK_SYSTEM = N_("Ships with a system theme (owned by root, restored by updates): hide it instead")
+LOCK_GIT = N_("Part of a theme installed from git; deleting would break `omarchy theme update`: hide it instead")
 
 
 def hidden_wallpapers_file() -> Path:
@@ -799,10 +804,10 @@ def _theme_sources(roots: Roots, theme: ThemeInfo) -> list[tuple[Path, str]]:
     sources = []
     user_dir = roots.user_themes / theme.slug
     if user_dir.is_dir():
-        sources.append((user_dir / "backgrounds", LOCK_GIT if theme_from_git(user_dir) else ""))
+        sources.append((user_dir / "backgrounds", _(LOCK_GIT) if theme_from_git(user_dir) else ""))
     system_dir = roots.system_themes / theme.slug
     if system_dir.is_dir():
-        sources.append((system_dir / "backgrounds", LOCK_SYSTEM))
+        sources.append((system_dir / "backgrounds", _(LOCK_SYSTEM)))
     return sources
 
 
@@ -851,17 +856,17 @@ def set_wallpaper_hidden(roots: Roots | None, theme: ThemeInfo,
     if hide:
         visible = [w for w in list_backgrounds(roots, theme) if not w.hidden]
         if len(visible) <= 1:
-            raise ValueError("this is the theme's last visible wallpaper")
+            raise ValueError(_("this is the theme's last visible wallpaper"))
     if wallpaper.source == "user":
         base = (roots.user_backgrounds / slug).resolve()
         src = Path(wallpaper.path)
         if src.is_symlink() or not src.parent.resolve().is_relative_to(base):
-            raise PermissionError("not one of your added wallpapers")
+            raise PermissionError(_("not one of your added wallpapers"))
         dest_dir = base / HIDDEN_DIR if hide else base
         dest_dir.mkdir(mode=0o700, exist_ok=True)
         dest = dest_dir / _sanitize_name(src.name)
         if dest.exists() or dest.is_symlink():
-            raise FileExistsError(f"{dest.name} already exists there")
+            raise FileExistsError(_("{0} already exists there").format(dest.name))
         os.rename(src, dest)
         return
     hidden = load_hidden_wallpapers()
@@ -966,14 +971,14 @@ def remove_wallpaper(roots: Roots | None, path: str | Path,
     roots = roots or default_roots()
     target = Path(path)
     if target.is_dir():
-        raise PermissionError("refusing to remove a directory")
+        raise PermissionError(_("refusing to remove a directory"))
     if not target.exists() and not target.is_symlink():
         raise FileNotFoundError(str(target))
 
     try:
         parent_real = target.parent.resolve()
     except OSError as error:
-        raise PermissionError("cannot resolve the wallpaper path") from error
+        raise PermissionError(_("cannot resolve the wallpaper path")) from error
 
     user_bg = roots.user_backgrounds.resolve()
     if parent_real.is_relative_to(user_bg):
@@ -985,11 +990,11 @@ def remove_wallpaper(roots: Roots | None, path: str | Path,
         parts = parent_real.relative_to(user_themes).parts
         if len(parts) >= 2 and parts[1] == "backgrounds":
             if theme_from_git(user_themes / parts[0]):
-                raise PermissionError(LOCK_GIT)
+                raise PermissionError(_(LOCK_GIT))
             _discard(roots, target, receipt)
             return target
 
-    raise PermissionError(LOCK_SYSTEM)
+    raise PermissionError(_(LOCK_SYSTEM))
 
 
 # --- trash ---------------------------------------------------------------------
@@ -1044,16 +1049,16 @@ def move_to_trash(trash: Path, target: Path) -> TrashReceipt:
             info.unlink(missing_ok=True)
             raise
         return TrashReceipt(original, dest, info)
-    raise OSError("the trash has too many items with this name")
+    raise OSError(_("the trash has too many items with this name"))
 
 
 def restore_from_trash(receipt: TrashReceipt) -> Path:
     """Undo move_to_trash: the item goes back where it was, if that place
     is still free."""
     if receipt.original.exists() or receipt.original.is_symlink():
-        raise FileExistsError(f"{receipt.original.name} exists again; restore it from the trash by hand")
+        raise FileExistsError(_("{0} exists again; restore it from the trash by hand").format(receipt.original.name))
     if not receipt.trashed.exists() and not receipt.trashed.is_symlink():
-        raise FileNotFoundError(f"{receipt.trashed.name} is no longer in the trash")
+        raise FileNotFoundError(_("{0} is no longer in the trash").format(receipt.trashed.name))
     receipt.original.parent.mkdir(parents=True, exist_ok=True)
     os.rename(receipt.trashed, receipt.original)
     receipt.info.unlink(missing_ok=True)
@@ -1096,17 +1101,17 @@ def remove_theme(roots: Roots | None, slug: str, receipt: list | None = None) ->
     if slug == current_theme(roots):
         # Omarchy would keep running on a staged copy of a theme that no
         # longer exists, and nothing could re-apply it.
-        raise PermissionError("this is the active theme: apply another theme first")
+        raise PermissionError(_("this is the active theme: apply another theme first"))
     base = roots.user_themes
     base_real = base.resolve()
     target = base / slug
     if not target.exists() and not target.is_symlink():
-        raise FileNotFoundError(f"theme {slug!r} not found")
+        raise FileNotFoundError(_("theme {0} not found").format(repr(slug)))
     if target.is_symlink():
         target.unlink()
         return target
     if not target.is_dir():
-        raise FileNotFoundError(f"theme {slug!r} not found")
+        raise FileNotFoundError(_("theme {0} not found").format(repr(slug)))
     target_real = target.resolve()
     if not target_real.is_relative_to(base_real):
         raise PermissionError(f"refusing to remove {target}: escapes the user theme root")
@@ -1392,7 +1397,7 @@ def heif_size_problem(path) -> str | None:
         with open(path, "rb") as handle:
             meta = _heif_meta(handle)
             if meta is None or len(meta) < 4:
-                return "not a readable HEIC/HEIF photo"
+                return _("not a readable HEIC/HEIF photo")
             boxes = {}
             for kind, a, b in _bmff_boxes(meta, 4):   # meta is a FullBox
                 boxes.setdefault(kind, (a, b))
@@ -1405,28 +1410,28 @@ def heif_size_problem(path) -> str | None:
                                 sizes.append((int.from_bytes(meta[pa + 4:pa + 8], "big"),
                                               int.from_bytes(meta[pa + 8:pa + 12], "big")))
             if not sizes:
-                return "HEIC/HEIF photo declares no image size"
+                return _("HEIC/HEIF photo declares no image size")
             types = _heif_item_types(meta, boxes.get(b"iinf"))
             if b"iovl" in types.values():
-                return "HEIC/HEIF overlay images are not supported"
+                return _("HEIC/HEIF overlay images are not supported")
             grids = [item for item, kind in types.items() if kind == b"grid"]
             if grids:
                 for item, data in _heif_item_data(handle, meta, boxes, grids).items():
                     if data is None or len(data) < 8:
-                        return "unreadable HEIC/HEIF grid"
+                        return _("unreadable HEIC/HEIF grid")
                     if data[1] & 1:   # 32-bit output size
                         if len(data) < 12:
-                            return "unreadable HEIC/HEIF grid"
+                            return _("unreadable HEIC/HEIF grid")
                         sizes.append((int.from_bytes(data[4:8], "big"), int.from_bytes(data[8:12], "big")))
                     else:
                         sizes.append((int.from_bytes(data[4:6], "big"), int.from_bytes(data[6:8], "big")))
     except (OSError, ValueError, IndexError):
-        return "not a readable HEIC/HEIF photo"
+        return _("not a readable HEIC/HEIF photo")
     for width, height in sizes:
         if not width or not height:
-            return "image has no size"
+            return _("image has no size")
         if width > MAX_IMAGE_SIDE or height > MAX_IMAGE_SIDE or width * height > MAX_IMAGE_PIXELS:
-            return f"image too large to convert ({width}×{height})"
+            return _("image too large to convert ({0}×{1})").format(width, height)
     return None
 
 
@@ -1464,14 +1469,14 @@ def _heif_item_data(handle, meta: bytes, boxes: dict, items: list[int]) -> dict[
     def take(n: int) -> int:
         nonlocal pos
         if pos + n > b:
-            raise ValueError("truncated iloc")
+            raise ValueError(_("truncated iloc"))
         value = int.from_bytes(meta[pos:pos + n], "big")
         pos += n
         return value
 
     count = take(2 if version < 2 else 4)
     idat = boxes.get(b"idat")
-    for _ in range(min(count, 65535)):
+    for _n in range(min(count, 65535)):
         item = take(2 if version < 2 else 4)
         method = take(2) & 15 if version in (1, 2) else 0
         take(2)   # data reference index
@@ -1503,12 +1508,12 @@ def _png_chunks(data: bytes):
     while True:
         count += 1
         if count > PNG_MAX_CHUNKS or pos + 8 > len(data):
-            raise ValueError("damaged PNG")
+            raise ValueError(_("damaged PNG"))
         length = int.from_bytes(data[pos:pos + 4], "big")
         kind = bytes(data[pos + 4:pos + 8])
         end = pos + 12 + length
         if length > 0x7FFFFFFF or end > len(data):
-            raise ValueError("damaged PNG")
+            raise ValueError(_("damaged PNG"))
         yield kind, pos, end
         if kind == b"IEND":
             return
@@ -1524,13 +1529,13 @@ def _png_metadata_problem(handle) -> str | None:
     while True:
         chunks += 1
         if chunks > PNG_MAX_CHUNKS:
-            return "PNG has too many chunks"
+            return _("PNG has too many chunks")
         head = handle.read(8)
         if len(head) < 8:
-            return "damaged PNG"
+            return _("damaged PNG")
         length, kind = int.from_bytes(head[:4], "big"), head[4:]
         if length > 0x7FFFFFFF:
-            return "damaged PNG"
+            return _("damaged PNG")
         start = handle.tell()
         if kind in (b"tEXt", b"zTXt", b"iTXt"):
             texts += 1
@@ -1544,9 +1549,9 @@ def _png_metadata_problem(handle) -> str | None:
         elif kind == b"iCCP":
             compressed += length
         if texts > PNG_MAX_TEXT_CHUNKS:
-            return "PNG has too many text chunks"
+            return _("PNG has too many text chunks")
         if compressed > PNG_MAX_COMPRESSED_METADATA:
-            return "PNG has too much compressed metadata"
+            return _("PNG has too much compressed metadata")
         if kind == b"IEND":
             return None
         handle.seek(start + length + 4)
@@ -1558,7 +1563,7 @@ def strip_png_metadata(data: bytes) -> bytes:
     anything after IEND. Pixels are copied byte for byte, never decoded."""
     data = bytes(data)
     if data[:8] != PNG_SIGNATURE:
-        raise ValueError("not a PNG")
+        raise ValueError(_("not a PNG"))
     out = [PNG_SIGNATURE]
     have_iccp = False
     for kind, start, end in _png_chunks(data):
@@ -1589,16 +1594,18 @@ def image_size_problem(source) -> str | None:
                 png = handle.read(8) == PNG_SIGNATURE
                 meta = _png_metadata_problem(handle) if size and png else None
     except (OSError, ValueError):
-        return "unreadable image"
+        return _("unreadable image")
     if meta:
         return meta
     if size is None:
-        return "not a supported image (JPG, PNG, WebP, GIF, BMP)"
+        return _("not a supported image (JPG, PNG, WebP, GIF, BMP)")
     width, height, frames = size
     if not width or not height:
-        return "image has no size"
+        return _("image has no size")
     if width > MAX_IMAGE_SIDE or height > MAX_IMAGE_SIDE or width * height * frames > MAX_IMAGE_PIXELS:
-        return f"image too large to show ({width}×{height}{f' × {frames} frames' if frames > 1 else ''})"
+        if frames > 1:
+            return _("image too large to show ({0}×{1} × {2} frames)").format(width, height, frames)
+        return _("image too large to show ({0}×{1})").format(width, height)
     return None
 
 
@@ -1615,7 +1622,7 @@ def add_background_data(roots: Roots | None, slug: str, data: bytes,
     The type comes from the bytes, never from the offered name."""
     ext = image_extension(bytes(data[:16]))
     if ext is None:
-        raise ValueError("not a supported image (JPG, PNG, WebP, GIF, BMP)")
+        raise ValueError(_("not a supported image (JPG, PNG, WebP, GIF, BMP)"))
     stem = Path(_sanitize_name(name)).stem or "image"
     return add_background_bytes(roots, slug, data, name=stem + ext)
 

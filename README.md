@@ -38,6 +38,12 @@ Every Omarchy theme, user and system, in one popup: apply, favorite, hide or del
 
 Theme Manager never asks for root. Shipped wallpapers are hidden by name in `~/.config/omarchy/theme-manager/hidden-wallpapers.json` and removed only from Omarchy's per-user copy of the current theme (`~/.local/state/omarchy/current/theme/backgrounds/`), which `omarchy theme set` rebuilds on every switch. With the Omarchy sync on, a theme-set hook (`~/.config/omarchy/hooks/theme-set.d/90-theme-manager`) re-applies the hidden list after each switch.
 
+## Languages and settings
+
+The interface is built in in eight languages: English, German (Deutsch), French (Français), Spanish (Español), Italian (Italiano), Portuguese (Português), Dutch (Nederlands) and Polish (Polski). It follows the system language (`LC_ALL`, `LC_MESSAGES`, `LANG`) and falls back to English. To pick another one, open the **gear (⚙)** at the top right of the panel → **Language**. The translations ship with the plugin: nothing is downloaded or generated, and the plugin makes no extra requests for them. The choice is stored in `~/.config/omarchy/theme-manager/settings.json` (`"language"`); the bar icon's tooltip and right-click menu follow it too; **System (…)** removes it again.
+
+The settings page opens from the gear and closes with **← Back**, Backspace or Esc. Switching the language restarts the popup on the settings page, so every label is rebuilt.
+
 ## Install
 
 ```sh
@@ -69,6 +75,7 @@ Keys are kept in `~/.config/omarchy/theme-manager/shortcuts.json` and written to
 
 | Setting | What it does | Default |
 | --- | --- | --- |
+| Language | Interface language: the system's, or one of the eight built-in ones | System |
 | Sort the list | By name, or recently used first (favorites always come first) | By name |
 | Also hide in Omarchy's pickers | See *Syncing with Omarchy's pickers* below | Off |
 | Switch themes by time of day | Day theme from one time, night theme from another | Off |

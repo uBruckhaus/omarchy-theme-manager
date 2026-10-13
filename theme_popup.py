@@ -8,6 +8,7 @@ by pasting an image copied from the web, remove the ones no longer wanted.
 All file work goes through theme_core, which enforces the trust rules.
 """
 
+import colorsys
 import os
 import queue
 import re
@@ -53,6 +54,8 @@ import theme_shortcuts as shortcuts
 import wallpaper_search
 from palette import ThemePalette
 import pidfile
+import i18n
+from i18n import _, ngettext
 
 # Default outer size matches Simple Launcher: a 420 px card around a 590 px
 # list, the same on every page so switching pages never resizes the popup.
@@ -324,8 +327,8 @@ class ThemeManager(Gtk.Application):
 
     def insert_pasted(self, entry, pasted: str | None):
         if pasted is None:
-            theme_core.notify("Theme Manager", "Clipboard text is too long to paste "
-                              f"(max {theme_core.MAX_PASTE_TEXT_BYTES // 1024} KiB)")
+            theme_core.notify("Theme Manager", _("Clipboard text is too long to paste (max {0} KiB)").format(
+                theme_core.MAX_PASTE_TEXT_BYTES // 1024))
         elif pasted:
             entry.delete_selection()
             position = entry.insert_text(pasted, entry.get_position())
@@ -367,7 +370,7 @@ class ThemeManager(Gtk.Application):
         grip.set_halign(Gtk.Align.END)
         grip.set_valign(Gtk.Align.END)
         grip.set_cursor_from_name("se-resize")
-        grip.set_tooltip_text("Drag to resize · double-click for the default size")
+        grip.set_tooltip_text(_("Drag to resize · double-click for the default size"))
         sizer = Gtk.GestureDrag()
         sizer.connect("drag-begin", self.on_resize_begin)
         sizer.connect("drag-update", self.on_resize_update)
@@ -404,30 +407,36 @@ class ThemeManager(Gtk.Application):
         # margins; Hyprland keeps Super + drag for itself). Double-click the
         # title to center it again.
         header.set_cursor_from_name("grab")
-        title.set_tooltip_text("Drag to move · double-click: default size, centered")
+        title.set_tooltip_text(_("Drag to move · double-click: default size, centered"))
         mover = Gtk.GestureDrag()
         mover.connect("drag-begin", self.on_move_begin)
         mover.connect("drag-update", self.on_move_update)
         mover.connect("drag-end", self.on_move_end)
         header.add_controller(mover)
         self.hidden_button = Gtk.Button(icon_name="view-reveal-symbolic")
-        self.hidden_button.set_tooltip_text("Show hidden themes and wallpapers")
+        self.hidden_button.set_tooltip_text(_("Show hidden themes and wallpapers"))
         self.hidden_button.add_css_class("flat")
         self.hidden_button.add_css_class("tm-header-btn")
         self.hidden_button.connect("clicked", lambda *_: self.toggle_show_hidden())
         import_button = Gtk.Button(icon_name="folder-download-symbolic")
-        import_button.set_tooltip_text("Import themes from omarchy.org (Ctrl+I)")
+        import_button.set_tooltip_text(_("Import themes from omarchy.org (Ctrl+I)"))
         import_button.add_css_class("flat")
         import_button.add_css_class("tm-header-btn")
         import_button.connect("clicked", lambda *_: self.open_import())
         header.append(import_button)
-        settings_button = Gtk.Button(icon_name="emblem-system-symbolic")
-        settings_button.set_tooltip_text("Settings")
+        # The same Nerd Font gear (U+F0493) in a small bordered box as the other plugins.
+        settings_button = Gtk.Button()
+        gear = Gtk.Label(label="\U000F0493")
+        gear.add_css_class("tm-gear")
+        settings_button.set_child(gear)
+        settings_button.set_tooltip_text(_("Settings"))
         settings_button.add_css_class("flat")
         settings_button.add_css_class("tm-header-btn")
+        settings_button.add_css_class("tm-gear-btn")
         settings_button.connect("clicked", lambda *_: self.open_settings())
-        header.append(settings_button)
         header.append(self.hidden_button)
+        header.append(settings_button)   # rightmost, like the other plugins
+        self.settings_button = settings_button
         card.append(header)
 
         stack = Gtk.Stack()
@@ -490,12 +499,12 @@ class ThemeManager(Gtk.Application):
         back_button.add_css_class("tm-header-btn")
         back_box = Gtk.Box(spacing=6)
         back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label="Back"))
+        back_box.append(Gtk.Label(label=_("Back")))
         back_button.set_child(back_box)
-        back_button.set_tooltip_text("Back to themes (Left, Backspace or Esc)")
+        back_button.set_tooltip_text(_("Back to themes (Left, Backspace or Esc)"))
         back_button.connect("clicked", lambda *_: self.show_themes())
         wp_header.append(back_button)
-        self.wp_title = Gtk.Label(label="Wallpapers", xalign=0)
+        self.wp_title = Gtk.Label(label=_("Wallpapers"), xalign=0)
         self.wp_title.set_ellipsize(Pango.EllipsizeMode.END)
         self.wp_title.set_max_width_chars(1)  # natural width stays small; hexpand fills the row
         self.wp_title.add_css_class("tm-title")
@@ -508,17 +517,17 @@ class ThemeManager(Gtk.Application):
         self.paste_button.add_css_class("tm-paste")
         paste_box = Gtk.Box(spacing=6)
         paste_box.append(Gtk.Image.new_from_icon_name("edit-paste-symbolic"))
-        paste_box.append(Gtk.Label(label="Paste image (Ctrl+V)"))
+        paste_box.append(Gtk.Label(label=_("Paste image (Ctrl+V)")))
         self.paste_button.set_child(paste_box)
-        self.paste_button.set_tooltip_text("Add the image copied to the clipboard (from the web or the file manager)")
+        self.paste_button.set_tooltip_text(_("Add the image copied to the clipboard (from the web or the file manager)"))
         self.paste_button.connect("clicked", lambda *_: self.paste_clipboard())
         web_button = Gtk.Button()
         web_button.add_css_class("tm-paste")
         web_box = Gtk.Box(spacing=6)
         web_box.append(Gtk.Image.new_from_icon_name("system-search-symbolic"))
-        web_box.append(Gtk.Label(label="Search the web"))
+        web_box.append(Gtk.Label(label=_("Search the web")))
         web_button.set_child(web_box)
-        web_button.set_tooltip_text("Find wallpapers on wallhaven.cc (Ctrl+F)")
+        web_button.set_tooltip_text(_("Find wallpapers on wallhaven.cc (Ctrl+F)"))
         web_button.connect("clicked", lambda *_: self.open_web_search())
         buttons = Gtk.Box(spacing=8)
         buttons.append(self.paste_button)
@@ -555,12 +564,12 @@ class ThemeManager(Gtk.Application):
         ws_back.add_css_class("tm-header-btn")
         ws_back_box = Gtk.Box(spacing=6)
         ws_back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        ws_back_box.append(Gtk.Label(label="Back"))
+        ws_back_box.append(Gtk.Label(label=_("Back")))
         ws_back.set_child(ws_back_box)
-        ws_back.set_tooltip_text("Back to the wallpapers (Backspace or Esc)")
+        ws_back.set_tooltip_text(_("Back to the wallpapers (Backspace or Esc)"))
         ws_back.connect("clicked", lambda *_: self.close_web_search())
         ws_header.append(ws_back)
-        self.ws_title = Gtk.Label(label="Search wallpapers", xalign=0)
+        self.ws_title = Gtk.Label(label=_("Search wallpapers"), xalign=0)
         self.ws_title.set_ellipsize(Pango.EllipsizeMode.END)
         self.ws_title.set_max_width_chars(1)
         self.ws_title.add_css_class("tm-title")
@@ -568,7 +577,7 @@ class ThemeManager(Gtk.Application):
         ws_header.append(self.ws_title)
         web_page.append(ws_header)
         self.web_search = Gtk.SearchEntry()
-        self.web_search.set_placeholder_text("Search, e.g. misty forest, neon city")
+        self.web_search.set_placeholder_text(_("Search, e.g. misty forest, neon city"))
         self.web_search.connect("activate", lambda *_: self.run_web_search())
         self.guard_text_field(self.web_search)
         web_page.append(self.web_search)
@@ -606,12 +615,12 @@ class ThemeManager(Gtk.Application):
         im_back.add_css_class("tm-header-btn")
         im_back_box = Gtk.Box(spacing=6)
         im_back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        im_back_box.append(Gtk.Label(label="Back"))
+        im_back_box.append(Gtk.Label(label=_("Back")))
         im_back.set_child(im_back_box)
-        im_back.set_tooltip_text("Back to themes (Left, Backspace or Esc)")
+        im_back.set_tooltip_text(_("Back to themes (Left, Backspace or Esc)"))
         im_back.connect("clicked", lambda *_: self.show_themes())
         im_header.append(im_back)
-        im_title = Gtk.Label(label="Import themes — omarchy.org", xalign=0)
+        im_title = Gtk.Label(label=_("Import themes — omarchy.org"), xalign=0)
         im_title.set_ellipsize(Pango.EllipsizeMode.END)
         im_title.set_max_width_chars(1)
         im_title.add_css_class("tm-title")
@@ -621,14 +630,14 @@ class ThemeManager(Gtk.Application):
 
         im_toolbar = Gtk.Box(spacing=8)
         self.import_search = Gtk.SearchEntry()
-        self.import_search.set_placeholder_text("Search themes")
+        self.import_search.set_placeholder_text(_("Search themes"))
         self.import_search.set_hexpand(True)
         self.import_search.connect("search-changed", lambda *_: self.import_grid.invalidate_filter())
         self.guard_text_field(self.import_search)
         im_toolbar.append(self.import_search)
         refresh = Gtk.Button(icon_name="view-refresh-symbolic")
         refresh.add_css_class("tm-paste")
-        refresh.set_tooltip_text("Reload the list from omarchy.org")
+        refresh.set_tooltip_text(_("Reload the list from omarchy.org"))
         refresh.connect("clicked", lambda *_: self.load_catalog(force=True))
         im_toolbar.append(refresh)
         import_page.append(im_toolbar)
@@ -665,10 +674,10 @@ class ThemeManager(Gtk.Application):
         confirm_page.append(self.confirm_label)
         answers = Gtk.Box(spacing=12)
         answers.set_halign(Gtk.Align.END)
-        cancel = Gtk.Button(label="Cancel")
+        cancel = Gtk.Button(label=_("Cancel"))
         cancel.add_css_class("tm-paste")
         cancel.connect("clicked", lambda *_: self.cancel_confirm())
-        self.confirm_button = Gtk.Button(label="Delete")
+        self.confirm_button = Gtk.Button(label=_("Delete"))
         self.confirm_button.add_css_class("tm-paste")
         self.confirm_button.add_css_class("danger")
         self.confirm_button.connect("clicked", lambda *_: self.accept_confirm())
@@ -692,9 +701,9 @@ class ThemeManager(Gtk.Application):
         self.undo_label.set_ellipsize(Pango.EllipsizeMode.END)
         self.undo_label.set_max_width_chars(1)
         undo_line.append(self.undo_label)
-        undo_button = Gtk.Button(label="Undo")
+        undo_button = Gtk.Button(label=_("Undo"))
         undo_button.add_css_class("tm-paste")
-        undo_button.set_tooltip_text("Put it back (Ctrl+Z)")
+        undo_button.set_tooltip_text(_("Put it back (Ctrl+Z)"))
         undo_button.connect("clicked", lambda *_: self.undo_delete())
         undo_line.append(undo_button)
         self.undo_bar.set_child(undo_line)
@@ -717,6 +726,9 @@ class ThemeManager(Gtk.Application):
 
         self.window = window
         self.stack = stack
+        # Like the other plugins, the gear is gone while its page is open.
+        stack.connect("notify::visible-child-name",
+                      lambda st, _p: self.settings_button.set_visible(st.get_visible_child_name() != "settings"))
         self.resize_to(self.card_w, self.list_h)
         self.apply_theme_css()
         self.refresh_themes()
@@ -836,10 +848,34 @@ class ThemeManager(Gtk.Application):
         return row
 
     @staticmethod
-    def settings_heading(box, text: str):
+    def settings_heading(box, text: str, hint: str = ""):
         label = Gtk.Label(label=text, xalign=0)
         label.add_css_class("tm-setting-heading")
+        if hint:
+            label.set_tooltip_text(hint)
         box.append(label)
+
+    def setting_line(self, box, title: str, hint: str, control) -> Gtk.Box:
+        """A settings-page row like the other plugins': dim label | control;
+        the explanation is the tooltip of both."""
+        row = Gtk.Box(spacing=10)
+        row.add_css_class("tm-line")
+        label = Gtk.Label(label=title, xalign=0, wrap=True, max_width_chars=1)
+        label.add_css_class("tm-line-label")
+        label.set_size_request(130, -1)
+        label.set_valign(Gtk.Align.CENTER)
+        row.append(label)
+        if hint:
+            label.set_tooltip_text(hint)
+        if control is not None:
+            control.set_valign(Gtk.Align.CENTER)
+            control.set_halign(Gtk.Align.START)
+            control.set_hexpand(True)
+            if hint:
+                control.set_tooltip_text(hint)
+            row.append(control)
+        box.append(row)
+        return row
 
     def switch(self, active: bool, on_change) -> Gtk.Switch:
         switch = Gtk.Switch(active=active)
@@ -861,24 +897,43 @@ class ThemeManager(Gtk.Application):
         back.add_css_class("tm-header-btn")
         back_box = Gtk.Box(spacing=6)
         back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label="Back"))
+        back_box.append(Gtk.Label(label=_("Back")))
+        back_box.append(Gtk.Label(label="· ⌫"))
         back.set_child(back_box)
-        back.set_tooltip_text("Back to themes (Esc)")
+        back.add_css_class("tm-back-bordered")
+        back.set_tooltip_text(_("Back to themes (Backspace, Esc)"))
         back.connect("clicked", lambda *_: self.show_themes())
         header.append(back)
-        title = Gtk.Label(label="Settings", xalign=0, hexpand=True)
-        title.add_css_class("tm-title")
+        title = Gtk.Label(label=_("Settings").upper(), xalign=0, hexpand=True)
+        title.add_css_class("tm-section-title")
         header.append(title)
         page.append(header)
+        rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        rule.add_css_class("tm-settings-rule")
+        page.append(rule)
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
         self.settings_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.settings_box.add_css_class("tm-settings")
+        self.settings_box.add_css_class("tm-settings-page")
         scroller.set_child(self.settings_box)
         page.append(scroller)
         self.settings_ready = False
         return page
+
+    def set_language(self, code: str):
+        if code == i18n.language_setting():
+            return
+        try:
+            i18n.save_language(code)
+        except OSError as error:
+            theme_core.notify(_("Could not save the setting"), str(error))
+            return
+        os.environ["THEME_MANAGER_PAGE"] = "settings"
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
     def open_settings(self):
         self.active_theme = None
@@ -898,52 +953,62 @@ class ThemeManager(Gtk.Application):
         slugs = [t.slug for t in themes]
         names = [theme_core.plain_text(t.name, 60) for t in themes]
 
-        self.settings_heading(box, "Themes")
-        self.settings_row(box, "Sort the list", "Favorites (★ in a theme's menu) always come first.",
-                          self.dropdown(["By name", "Recently used first"],
+        # Interface language: the system's unless picked here. Switching
+        # restarts the popup (same process id) so every label is rebuilt.
+        codes = ["auto"] + [code for code, _name in i18n.LANGUAGES]
+        setting = i18n.language_setting()
+        self.setting_line(box, _("Language"), _("Theme Manager restarts in the new language."),
+                          self.dropdown([_("System ({0})").format(i18n.language_name(i18n.system_language()))]
+                                        + [name for _code, name in i18n.LANGUAGES],
+                                        codes.index(setting) if setting in codes else 0,
+                                        lambda i: self.set_language(codes[i])))
+
+        self.settings_heading(box, _("Themes").upper())
+        self.setting_line(box, _("Sort the list"), _("Favorites (★ in a theme's menu) always come first."),
+                          self.dropdown([_("By name"), _("Recently used first")],
                                         theme_auto.SORT_CHOICES.index(theme_auto.sort_order()),
                                         lambda i: self.save_setting(sort=theme_auto.SORT_CHOICES[i])))
-        self.settings_row(box, "Also hide in Omarchy's pickers",
-                          "Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
-                          "omarchy-menu.jsonc and a theme-set hook; off removes them again.",
+        self.setting_line(box, _("Also hide in Omarchy's pickers"),
+                          _("Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
+                          "omarchy-menu.jsonc and a theme-set hook; off removes them again."),
                           self.switch(theme_core.sync_enabled(), self.set_omarchy_sync))
 
         plan = theme_auto.schedule()
-        self.settings_heading(box, "Day and night")
-        self.settings_row(box, "Switch themes by time of day",
-                          "At the times below. A theme you pick by hand stays until the next switch.",
+        self.settings_heading(box, _("Day and night").upper())
+        self.setting_line(box, _("Switch themes by time of day"),
+                          _("At the times below. A theme you pick by hand stays until the next switch."),
                           self.switch(plan["enabled"], self.set_schedule_enabled))
         times = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
-        for key, at_key, label in (("day", "day_at", "Day theme"), ("night", "night_at", "Night theme")):
+        for key, at_key, label in (("day", "day_at", _("Day theme")), ("night", "night_at", _("Night theme"))):
             line = Gtk.Box(spacing=6)
-            line.append(self.dropdown(["Choose…", *names],
+            line.append(self.dropdown([_("Choose…"), *names],
                                       slugs.index(plan[key]) + 1 if plan[key] in slugs else 0,
                                       lambda i, k=key: i and self.save_schedule(**{k: slugs[i - 1]})))
             at = plan[at_key] if plan[at_key] in times else times[0]
-            line.append(self.dropdown([f"from {t}" for t in times], times.index(at),
+            line.append(self.dropdown([_("from {0}").format(t) for t in times], times.index(at),
                                       lambda i, k=at_key: self.save_schedule(**{k: times[i]})))
-            self.settings_row(box, label, "", line)
+            self.setting_line(box, label, "", line)
 
-        self.settings_heading(box, "Wallpapers")
-        self.settings_row(box, "A wallpaper for each workspace",
-                          "Choose workspaces in a wallpaper's ☰ menu → Show on workspace. Workspaces "
-                          "without one keep the theme's background.",
+        self.settings_heading(box, _("Wallpapers").upper(),
+                              _("Scroll on the bar icon for the next or previous wallpaper; right-click it for your "
+                                "favorite themes."))
+        self.setting_line(box, _("A wallpaper for each workspace"),
+                          _("Choose workspaces in a wallpaper's ☰ menu → Show on workspace. Workspaces "
+                          "without one keep the theme's background."),
                           self.switch(theme_auto.workspace_wallpapers_enabled(),
                                       lambda on: self.save_setting(workspace_wallpapers=on)))
-        labels = ["Never", "Every 5 minutes", "Every 10 minutes", "Every 15 minutes", "Every 30 minutes",
-                  "Every hour", "Every 2 hours"]
-        self.settings_row(box, "Change the wallpaper",
-                          "Goes through the current theme's visible wallpapers.",
+        labels = [_("Never"), _("Every 5 minutes"), _("Every 10 minutes"), _("Every 15 minutes"), _("Every 30 minutes"),
+                  _("Every hour"), _("Every 2 hours")]
+        self.setting_line(box, _("Change the wallpaper"),
+                          _("Goes through the current theme's visible wallpapers."),
                           self.dropdown(labels, theme_auto.SLIDESHOW_CHOICES.index(theme_auto.slideshow_minutes()),
                                         lambda i: self.save_setting(
                                             slideshow_minutes=theme_auto.SLIDESHOW_CHOICES[i])))
-        hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
-        hint.add_css_class("tm-hint")
-        hint.set_label("Scroll on the bar icon for the next or previous wallpaper; right-click it for your "
-                       "favorite themes.")
-        box.append(hint)
 
-        self.settings_heading(box, "Keyboard shortcuts")
+        self.settings_heading(box, _("Keyboard shortcuts").upper(),
+                              _("Give a theme its own key in its ⋮ menu → Shortcut…. Keys live in "
+                                "~/.config/hypr/theme-manager-shortcuts.lua; removing the last one removes that file "
+                                "and its line in hyprland.lua again."))
         state = shortcuts.load_state()
         for action in shortcuts.ACTIONS:
             self.shortcut_setting_row(box, action, state.get(action))
@@ -952,28 +1017,22 @@ class ThemeManager(Gtk.Application):
                             key=lambda a: shortcuts.action_label(a).casefold())
         for action in theme_keys:
             self.shortcut_setting_row(box, action, state[action])
-        hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
-        hint.add_css_class("tm-hint")
-        hint.set_label("Give a theme its own key in its ⋮ menu → Shortcut…. Keys live in "
-                       "~/.config/hypr/theme-manager-shortcuts.lua; removing the last one removes that file "
-                       "and its line in hyprland.lua again.")
-        box.append(hint)
         self.settings_ready = True
 
     def shortcut_setting_row(self, box, action: str, combo):
         line = Gtk.Box(spacing=6)
         if combo:
             line.append(self.keycaps(combo))
-        button = Gtk.Button(label="Change…" if combo else "Set…")
+        button = Gtk.Button(label=_("Change…") if combo else _("Set…"))
         button.add_css_class("tm-paste")
         button.add_css_class("sc-small")
         button.connect("clicked", lambda *_: self.open_shortcut_page(action))
         line.append(button)
         slug = shortcuts.theme_of(action)
-        note = "" if combo else "No key yet"
+        note = "" if combo else _("No key yet")
         if combo and slug and slug in self.hidden:
-            note = "Hidden theme: the key still works and unhides it"
-        self.settings_row(box, shortcuts.action_label(action), note, line)
+            note = _("Hidden theme: the key still works and unhides it")
+        self.setting_line(box, shortcuts.action_label(action), note, line)
 
     # --- shortcut page (like Launch & Bind) --------------------------------------------------
 
@@ -998,9 +1057,9 @@ class ThemeManager(Gtk.Application):
         back.add_css_class("tm-header-btn")
         back_box = Gtk.Box(spacing=6)
         back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label="Back"))
+        back_box.append(Gtk.Label(label=_("Back")))
         back.set_child(back_box)
-        back.set_tooltip_text("Back (Esc)")
+        back.set_tooltip_text(_("Back (Esc)"))
         back.connect("clicked", lambda *_: self.close_shortcut_page())
         header.append(back)
         self.sc_title = Gtk.Label(xalign=0, hexpand=True)
@@ -1023,11 +1082,11 @@ class ThemeManager(Gtk.Application):
             box.append(label)
             return label
 
-        section("Current key")
+        section(_("Current key"))
         self.sc_current = Gtk.Box(spacing=8)
         box.append(self.sc_current)
-        section("Choose a key")
-        hint = Gtk.Label(label="Hold the modifiers and press a key, or toggle modifiers and click a key below.",
+        section(_("Choose a key"))
+        hint = Gtk.Label(label=_("Hold the modifiers and press a key, or toggle modifiers and click a key below."),
                          xalign=0, wrap=True, max_width_chars=1)
         hint.add_css_class("tm-hint")
         box.append(hint)
@@ -1044,7 +1103,7 @@ class ThemeManager(Gtk.Application):
         self.sc_key_box = Gtk.Box(hexpand=True)
         self.sc_key_box.add_css_class("sc-key")
         key_row.append(self.sc_key_box)
-        self.sc_apply = Gtk.Button(label="Assign")
+        self.sc_apply = Gtk.Button(label=_("Assign"))
         self.sc_apply.add_css_class("tm-paste")
         self.sc_apply.add_css_class("suggested")
         self.sc_apply.connect("clicked", lambda *_: self.apply_shortcut())
@@ -1053,10 +1112,10 @@ class ThemeManager(Gtk.Application):
         self.sc_status = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
         self.sc_status.add_css_class("sc-status")
         box.append(self.sc_status)
-        self.sc_letters_title = section("Keys")
+        self.sc_letters_title = section(_("Keys"))
         legend = Gtk.Box(spacing=10)
-        for text, css in (("● free", "sc-free-key"), ("● taken (can be rebound)", "sc-yours-key"),
-                          ("● Omarchy default", "sc-omarchy-key")):
+        for text, css in ((_("● free"), "sc-free-key"), (_("● taken (can be rebound)"), "sc-yours-key"),
+                          (_("● Omarchy default"), "sc-omarchy-key")):
             item = Gtk.Label(label=text)
             item.add_css_class("sc-legend")
             item.add_css_class(css)
@@ -1066,7 +1125,7 @@ class ThemeManager(Gtk.Application):
                                       column_spacing=4, row_spacing=4, min_children_per_line=7,
                                       max_children_per_line=13)
         box.append(self.sc_letters)
-        section("Other keys")
+        section(_("Other keys"))
         self.sc_others = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                                      column_spacing=4, row_spacing=4, min_children_per_line=4,
                                      max_children_per_line=9)
@@ -1082,7 +1141,7 @@ class ThemeManager(Gtk.Application):
         self.sc_action = action
         self.sc_state = shortcuts.load_state()
         self.sc_bindings = shortcuts.Bindings(self.sc_state)
-        self.sc_title.set_label(f"Shortcut — {shortcuts.action_label(action)}")
+        self.sc_title.set_label(_("Shortcut — {0}").format(shortcuts.action_label(action)))
         self.render_shortcut_current()
         current = self.sc_state.get(action)
         self.set_shortcut_combo(current["mods"] if current else shortcuts.DEFAULT_MODS, None)
@@ -1123,22 +1182,22 @@ class ThemeManager(Gtk.Application):
             child = box.get_first_child()
         combo = self.sc_state.get(self.sc_action)
         if combo is None:
-            none = Gtk.Label(label="None yet — choose one below.", xalign=0)
+            none = Gtk.Label(label=_("None yet — choose one below."), xalign=0)
             none.add_css_class("tm-hint")
             box.append(none)
             return
         box.append(self.keycaps(combo, large=True))
         if combo.get("replaces"):
-            note = Gtk.Label(label=f"overrides “{combo['replaces']}”", xalign=0, hexpand=True)
+            note = Gtk.Label(label=_("overrides “{0}”").format(combo['replaces']), xalign=0, hexpand=True)
             note.add_css_class("tm-hint")
             note.set_ellipsize(Pango.EllipsizeMode.END)
             note.set_max_width_chars(1)
             box.append(note)
         else:
             box.append(Gtk.Box(hexpand=True))
-        remove = Gtk.Button(label="Remove")
+        remove = Gtk.Button(label=_("Remove"))
         remove.add_css_class("tm-paste")
-        remove.set_tooltip_text("Give the key back" + (f" to “{combo['replaces']}”" if combo.get("replaces") else ""))
+        remove.set_tooltip_text(_("Give the key back to “{0}”").format(combo['replaces']) if combo.get("replaces") else _("Give the key back"))
         remove.connect("clicked", lambda *_: self.remove_shortcut())
         box.append(remove)
 
@@ -1171,26 +1230,26 @@ class ThemeManager(Gtk.Application):
         level, who = self.sc_bindings.classify(combo, self.sc_action) if combo else (None, "")
         for css in ("sc-free", "sc-warn", "sc-omarchy"):
             self.sc_status.remove_css_class(css)
-        label, enabled = "Assign", combo is not None
+        label, enabled = _("Assign"), combo is not None
         if combo is None:
-            text = "Press a key." if mods else "Choose modifiers (Super, Shift, Ctrl, Alt), then a key."
+            text = _("Press a key.") if mods else _("Choose modifiers (Super, Shift, Ctrl, Alt), then a key.")
         elif not mods:
-            text, enabled = "A shortcut needs at least one modifier.", False
+            text, enabled = _("A shortcut needs at least one modifier."), False
         elif level == shortcuts.FREE:
-            text = f"{shortcuts.combo_label(combo)} is free."
+            text = _("{0} is free.").format(shortcuts.combo_label(combo))
             self.sc_status.add_css_class("sc-free")
         elif level == shortcuts.SAME:
-            text, enabled = f"{shortcuts.combo_label(combo)} already does this.", False
+            text, enabled = _("{0} already does this.").format(shortcuts.combo_label(combo)), False
         elif level == shortcuts.OURS:
-            text, label = f"{shortcuts.combo_label(combo)} is the key for “{who}”: it moves here.", "Move here"
+            text, label = _("{0} is the key for “{1}”: it moves here.").format(shortcuts.combo_label(combo), who), _("Move here")
             self.sc_status.add_css_class("sc-warn")
         elif level == shortcuts.CUSTOM:
-            text, label = (f"{shortcuts.combo_label(combo)} is your binding “{who}”. Rebinding turns it off "
-                           "while this shortcut exists."), "Rebind"
+            text, label = _("{0} is your binding “{1}”. Rebinding turns it off while this shortcut exists.").format(
+                shortcuts.combo_label(combo), who), _("Rebind")
             self.sc_status.add_css_class("sc-warn")
         else:
-            text, label = (f"{shortcuts.combo_label(combo)} is Omarchy's “{who}”. Rebinding turns it off "
-                           "while this shortcut exists."), "Rebind"
+            text, label = _("{0} is Omarchy's “{1}”. Rebinding turns it off while this shortcut exists.").format(
+                shortcuts.combo_label(combo), who), _("Rebind")
             self.sc_status.add_css_class("sc-omarchy")
         self.sc_status.set_label(text)
         self.sc_apply.set_label(label)
@@ -1211,17 +1270,17 @@ class ThemeManager(Gtk.Application):
                     level, who = self.sc_bindings.classify(combo, self.sc_action)
                     chip.add_css_class(KEY_STYLES.get(level, "sc-free-key"))
                     name = shortcuts.combo_label(combo)
-                    chip.set_tooltip_text(f"{name} — free" if level == shortcuts.FREE else
-                                          f"{name} — already this shortcut" if level == shortcuts.SAME else
-                                          f"{name} — “{who}”; click to rebind")
+                    chip.set_tooltip_text(_("{0} — free").format(name) if level == shortcuts.FREE else
+                                          _("{0} — already this shortcut").format(name) if level == shortcuts.SAME else
+                                          _("{0} — “{1}”; click to rebind").format(name, who))
                 else:
-                    chip.set_tooltip_text("Choose modifiers first")
+                    chip.set_tooltip_text(_("Choose modifiers first"))
                 if self.sc_key and key.casefold() == self.sc_key.casefold():
                     chip.add_css_class("sc-key-picked")
                 chip.connect("clicked", lambda *_, k=key: self.pick_shortcut_key(k))
                 grid.append(chip)
         self.sc_letters_title.set_label(
-            "Keys with " + " + ".join(shortcuts.MOD_LABELS[m] for m in mods) if mods else "Keys")
+            _("Keys with {0}").format(" + ".join(shortcuts.MOD_LABELS[m] for m in mods)) if mods else _("Keys"))
 
     def pick_shortcut_key(self, key):
         same = self.sc_key is not None and key.casefold() == self.sc_key.casefold()
@@ -1258,7 +1317,7 @@ class ThemeManager(Gtk.Application):
             pass
         name = Gdk.keyval_name(base) or ""
         if shortcuts.make_combo([], name) is None:
-            self.sc_status.set_label("That key cannot be used for a shortcut.")
+            self.sc_status.set_label(_("That key cannot be used for a shortcut."))
             return True
         held = {"SUPER": Gdk.ModifierType.SUPER_MASK, "SHIFT": Gdk.ModifierType.SHIFT_MASK,
                 "CTRL": Gdk.ModifierType.CONTROL_MASK, "ALT": Gdk.ModifierType.ALT_MASK}
@@ -1281,11 +1340,11 @@ class ThemeManager(Gtk.Application):
 
     def remove_shortcut(self):
         state = {a: c for a, c in self.sc_state.items() if a != self.sc_action}
-        self.save_shortcuts(state, f"{shortcuts.action_label(self.sc_action)}: no key")
+        self.save_shortcuts(state, _("{0}: no key").format(shortcuts.action_label(self.sc_action)))
 
     def save_shortcuts(self, state, done_text):
         self.sc_apply.set_sensitive(False)
-        self.sc_status.set_label("Saving and reloading Hyprland…")
+        self.sc_status.set_label(_("Saving and reloading Hyprland…"))
         # Hyprland reloads its config: leave the capture submap first.
         self.leave_shortcut_capture()
 
@@ -1294,10 +1353,10 @@ class ThemeManager(Gtk.Application):
                 return
             shortcuts.enter_capture()
             if error is not None:
-                self.sc_status.set_label(f"Hyprland refused the change, nothing was changed: {error}")
+                self.sc_status.set_label(_("Hyprland refused the change, nothing was changed: {0}").format(error))
                 self.update_shortcut_status()
                 return
-            theme_core.notify("Shortcut saved", done_text)
+            theme_core.notify(_("Shortcut saved"), done_text)
             self.sc_state = shortcuts.load_state()
             self.sc_bindings = shortcuts.Bindings(self.sc_state)
             self.render_shortcut_current()
@@ -1315,7 +1374,7 @@ class ThemeManager(Gtk.Application):
         try:
             theme_auto.update_settings(**values)
         except OSError as error:
-            theme_core.notify("Could not save the setting", str(error))
+            theme_core.notify(_("Could not save the setting"), str(error))
         if "sort" in values:
             self.refresh_themes()
 
@@ -1323,12 +1382,12 @@ class ThemeManager(Gtk.Application):
         try:
             theme_auto.save_schedule(**values)
         except OSError as error:
-            theme_core.notify("Could not save the setting", str(error))
+            theme_core.notify(_("Could not save the setting"), str(error))
 
     def set_schedule_enabled(self, on: bool):
         plan = theme_auto.schedule()
         if on and not (plan["day"] and plan["night"]):
-            theme_core.notify("Choose a day and a night theme", "Switching starts once both are set.")
+            theme_core.notify(_("Choose a day and a night theme"), _("Switching starts once both are set."))
         self.save_schedule(enabled=on)
 
     # --- theme editor ------------------------------------------------------------------------
@@ -1342,9 +1401,9 @@ class ThemeManager(Gtk.Application):
         back.add_css_class("tm-header-btn")
         back_box = Gtk.Box(spacing=6)
         back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label="Back"))
+        back_box.append(Gtk.Label(label=_("Back")))
         back.set_child(back_box)
-        back.set_tooltip_text("Back to themes without saving (Esc)")
+        back.set_tooltip_text(_("Back to themes without saving (Esc)"))
         back.connect("clicked", lambda *_: self.close_editor())
         header.append(back)
         self.ed_title = Gtk.Label(xalign=0, hexpand=True)
@@ -1389,7 +1448,7 @@ class ThemeManager(Gtk.Application):
             palette = theme_custom.palette_from_image(wallpaper.path) if wallpaper else \
                 theme_custom.load_palette(base)
         except (OSError, ValueError) as error:
-            theme_core.notify("Could not read the colors", str(error))
+            theme_core.notify(_("Could not read the colors"), str(error))
             return
         self.active_theme = None
         self.stop_preview()
@@ -1398,11 +1457,11 @@ class ThemeManager(Gtk.Application):
                    "entries": {}, "wallpapers": wallpaper is None, "fonts": theme_custom.list_fonts(),
                    "wallpaper": wallpaper, "system_font": theme_custom.current_font()}
         name = theme_core.plain_text(base.name)
-        self.ed_title.set_label(f"Edit {name}" if edit else
-                                f"New theme from {theme_core.plain_text(wallpaper.name)}" if wallpaper else
-                                f"New theme from {name}")
-        self.ed_save.set_label("Save" if edit else "Create")
-        self.ed_save_apply.set_label("Save and apply" if edit else "Create and apply")
+        self.ed_title.set_label(_("Edit {0}").format(name) if edit else
+                                _("New theme from {0}").format(theme_core.plain_text(wallpaper.name)) if wallpaper else
+                                _("New theme from {0}").format(name))
+        self.ed_save.set_label(_("Save") if edit else _("Create"))
+        self.ed_save_apply.set_label(_("Save and apply") if edit else _("Create and apply"))
         self.ed_hint.set_label("")
         self.fill_editor()
         self.stack.set_visible_child_name("editor")
@@ -1435,8 +1494,8 @@ class ThemeManager(Gtk.Application):
             self.guard_text_field(self.ed_name)
             self.ed_name.connect("activate", lambda *_: self.save_editor(apply=False))
             self.ed_name.set_size_request(180, -1)
-            self.ed_name.set_tooltip_text("Renaming keeps its wallpapers, favorites and other settings")
-            self.settings_row(box, "Name", "", self.ed_name).add_css_class("tm-setting-compact")
+            self.ed_name.set_tooltip_text(_("Renaming keeps its wallpapers, favorites and other settings"))
+            self.settings_row(box, _("Name"), "", self.ed_name).add_css_class("tm-setting-compact")
         else:
             if ed["wallpaper"] is not None:
                 suggestion = theme_custom.unique_name(theme_custom.name_from_file(ed["wallpaper"].name)
@@ -1448,20 +1507,20 @@ class ThemeManager(Gtk.Application):
             self.guard_text_field(self.ed_name)
             self.ed_name.connect("activate", lambda *_: self.save_editor(apply=False))
             self.ed_name.set_size_request(180, -1)
-            self.ed_name.set_tooltip_text("Shown in Omarchy's theme picker")
-            self.settings_row(box, "Name", "", self.ed_name).add_css_class("tm-setting-compact")
+            self.ed_name.set_tooltip_text(_("Shown in Omarchy's theme picker"))
+            self.settings_row(box, _("Name"), "", self.ed_name).add_css_class("tm-setting-compact")
 
         self.build_sample()
 
         # Name and font as compact rows (explanations in tooltips), so the
         # colors still start on the first screen at the default size.
         fonts = ed["fonts"]
-        labels = ["Keep the current font", *fonts]
+        labels = [_("Keep the current font"), *fonts]
         selected_font = fonts.index(ed["font"]) + 1 if ed["font"] in fonts else 0
         font_drop = self.dropdown(labels, selected_font, self.set_editor_font)
-        font_drop.set_tooltip_text("Omarchy's monospace font (terminals, bar, menus). It is switched when this "
-                                   "theme is applied, and back to your own font with other themes.")
-        self.settings_row(box, "Font", "", font_drop).add_css_class("tm-setting-compact")
+        font_drop.set_tooltip_text(_("Omarchy's monospace font (terminals, bar, menus). It is switched when this "
+                                   "theme is applied, and back to your own font with other themes."))
+        self.settings_row(box, _("Font"), "", font_drop).add_css_class("tm-setting-compact")
 
         if not ed["edit"]:
             # Which wallpapers the new theme gets: a compact row up here too.
@@ -1469,24 +1528,24 @@ class ThemeManager(Gtk.Application):
             base = theme_core.plain_text(ed["base"].name)
             if ed["wallpaper"] is not None:
                 walls = self.switch(False, self.set_editor_wallpapers)
-                walls.set_tooltip_text(f"{theme_core.plain_text(ed['wallpaper'].name)} is always included; "
-                                       f"on: also {base}'s other {count - 1}. Change them later on the new "
-                                       "theme's wallpaper page.")
-                self.settings_row(box, f"Also {base}'s wallpapers", "", walls).add_css_class("tm-setting-compact")
+                walls.set_tooltip_text(_("{0} is always included; on: also {1}'s other {2}. Change them later on the "
+                                         "new theme's wallpaper page.").format(
+                    theme_core.plain_text(ed['wallpaper'].name), base, count - 1))
+                self.settings_row(box, _("Also {0}'s wallpapers").format(base), "", walls).add_css_class("tm-setting-compact")
             else:
                 walls = self.switch(True, self.set_editor_wallpapers)
-                walls.set_tooltip_text(f"Copies of {base}'s {count} visible wallpapers. Add, hide or delete "
-                                       "them later on the new theme's wallpaper page.")
-                self.settings_row(box, f"Take over its wallpapers ({count})", "", walls).add_css_class("tm-setting-compact")
+                walls.set_tooltip_text(_("Copies of {0}'s {1} visible wallpapers. Add, hide or delete them later on "
+                                         "the new theme's wallpaper page.").format(base, count))
+                self.settings_row(box, _("Take over its wallpapers ({0})").format(count), "", walls).add_css_class("tm-setting-compact")
 
-        self.settings_heading(box, "Colors")
+        self.settings_heading(box, _("Colors"))
         for key in theme_custom.MAIN_KEYS + theme_custom.PALETTE_KEYS:
             box.append(self.color_row(key))
-        more = Gtk.Expander(label="More colors: shades and bright variants")
+        more = Gtk.Expander(label=_("More colors: shades and bright variants"))
         more.add_css_class("tm-setting-heading")
         more_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         more_box.set_margin_top(6)
-        hint = Gtk.Label(label="These follow the colors above until you change them here.",
+        hint = Gtk.Label(label=_("These follow the colors above until you change them here."),
                          xalign=0, wrap=True, max_width_chars=1)
         hint.add_css_class("tm-hint")
         more_box.append(hint)
@@ -1555,14 +1614,14 @@ class ThemeManager(Gtk.Application):
         title.add_css_class("s-small")
         window.append(title)
         lines = []
-        for _ in self.SAMPLE_LINES:
+        for _n in self.SAMPLE_LINES:
             line = Gtk.Label(xalign=0)
             line.add_css_class("s-text")
             line.set_ellipsize(Pango.EllipsizeMode.END)
             line.set_max_width_chars(1)   # long lines must not widen the card
             window.append(line)
             lines.append(line)
-        selected = Gtk.Label(label="selected line", xalign=0)
+        selected = Gtk.Label(label=_("selected line"), xalign=0)
         selected.add_css_class("s-sel")
         window.append(selected)
         prompt = Gtk.Label(xalign=0)
@@ -1597,7 +1656,7 @@ class ThemeManager(Gtk.Application):
         swatch.add_css_class("tm-swatch")
         swatch.add_css_class(f"tm-sw-{key}")
         swatch.set_size_request(34, 26)
-        swatch.set_tooltip_text("Pick a color")
+        swatch.set_tooltip_text(_("Pick a color"))
         swatch.connect("clicked", lambda button: self.show_color_picker(button, key))
         row.append(swatch)
         name = Gtk.Label(label=theme_custom.label(key), xalign=0, hexpand=True)
@@ -1634,7 +1693,7 @@ class ThemeManager(Gtk.Application):
                 self.set_editor_color(key, value)
             chooser.connect("color-activated", use)
             box.append(chooser)
-            done = Gtk.Button(label=f"Use for {theme_custom.label(key).lower()}")
+            done = Gtk.Button(label=_("Use for {0}").format(theme_custom.label(key).lower()))
             done.add_css_class("tm-paste")
             done.connect("clicked", use)
             box.append(done)
@@ -1650,7 +1709,7 @@ class ThemeManager(Gtk.Application):
         try:
             ed["palette"].set(key, value, ed["edited"])
         except (ValueError, KeyError):
-            self.ed_hint.set_label(f"“{value}” is not a color: use #rrggbb, e.g. #3a6ea5.")
+            self.ed_hint.set_label(_("“{0}” is not a color: use #rrggbb, e.g. #3a6ea5.").format(value))
             ed["entries"][key].set_text(ed["palette"].get(key))
             return
         if key not in theme_custom.MAIN_KEYS and key not in theme_custom.PALETTE_KEYS:
@@ -1738,7 +1797,7 @@ class ThemeManager(Gtk.Application):
             def work():
                 return theme_custom.create_theme(base, name, palette, font, wallpapers,
                                                  extra_wallpapers=extra).name
-        self.ed_hint.set_label("Saving…")
+        self.ed_hint.set_label(_("Saving…"))
         self.ed_save.set_sensitive(False)
         self.ed_save_apply.set_sensitive(False)
         self._async(work, lambda slug, error: self.after_save_editor(slug, error, apply))
@@ -1747,11 +1806,11 @@ class ThemeManager(Gtk.Application):
         self.ed_save.set_sensitive(True)
         self.ed_save_apply.set_sensitive(True)
         if error is not None:
-            self.ed_hint.set_label(f"Could not save: {error}")
+            self.ed_hint.set_label(_("Could not save: {0}").format(error))
             return
         edit = self.ed["edit"] if self.ed else False
         was_current = bool(self.ed and self.ed.get("was_current"))
-        theme_core.notify("Theme saved" if edit else "Theme created", theme_core.display_name(slug))
+        theme_core.notify(_("Theme saved") if edit else _("Theme created"), theme_core.display_name(slug))
         if theme_core.sync_enabled():
             self._async(lambda: theme_core.refresh_switcher_cache(SWITCHER_WRAPPER), lambda *_: None)
         self.close_editor(keep=slug)
@@ -1769,8 +1828,8 @@ class ThemeManager(Gtk.Application):
         theme = self.active_theme
         if theme is None:
             return
-        dialog = Gtk.FileDialog(title=f"Add wallpapers to {theme_core.plain_text(theme.name)}", modal=False)
-        images = Gtk.FileFilter(name="Images")
+        dialog = Gtk.FileDialog(title=_("Add wallpapers to {0}").format(theme_core.plain_text(theme.name)), modal=False)
+        images = Gtk.FileFilter(name=_("Images"))
         for ext in sorted(theme_core.IMAGE_EXTS | theme_core.HEIF_EXTS):
             images.add_suffix(ext.lstrip("."))
         filters = Gio.ListStore.new(Gtk.FileFilter)
@@ -1823,8 +1882,8 @@ class ThemeManager(Gtk.Application):
     def prune_shortcuts(self):
         def done(themes, error):
             if error is None and themes:
-                theme_core.notify("Shortcut removed", "The key of " + ", ".join(
-                    theme_core.display_name(t) for t in themes) + " is free again.")
+                theme_core.notify(_("Shortcut removed"), _("The key of {0} is free again.").format(", ".join(
+                    theme_core.display_name(t) for t in themes)))
         self._async(shortcuts.prune_missing, done)
 
     def undo_delete(self):
@@ -1837,9 +1896,9 @@ class ThemeManager(Gtk.Application):
             try:
                 theme_core.restore_from_trash(receipt)
             except OSError as error:
-                theme_core.notify("Could not undo", str(error))
+                theme_core.notify(_("Could not undo"), str(error))
                 continue
-            theme_core.notify("Restored", receipt.original.name)
+            theme_core.notify(_("Restored"), receipt.original.name)
         if theme_core.sync_enabled():
             self._async(lambda: theme_core.refresh_switcher_cache(SWITCHER_WRAPPER), lambda *_: None)
         self.refresh_shortcuts()
@@ -1877,13 +1936,13 @@ class ThemeManager(Gtk.Application):
     def preview_web(self, item, seconds: int = 0):
         """Web results are previewed with the full image, fetched first."""
         self.preview = f"web:{item.id}"
-        self.web_hint.set_label(self.web_hint_text(f"Loading a preview of {item.file_name}…"))
+        self.web_hint.set_label(self.web_hint_text(_("Loading a preview of {0}…").format(item.file_name)))
 
         def show(path, _error):
             self.web_hint.set_label(self.web_hint_text(""))
             if path is None:
                 self.preview = None
-                theme_core.notify("No preview", f"{item.file_name} could not be loaded")
+                theme_core.notify(_("No preview"), _("{0} could not be loaded").format(item.file_name))
             elif self.preview == f"web:{item.id}":   # Space still held
                 self.start_preview(path, seconds)
         self._async(lambda: wallpaper_search.fetch_preview(item), show)
@@ -1913,6 +1972,14 @@ class ThemeManager(Gtk.Application):
         bg_hex = colors.get("background", "#1e1e2e")
         fg_hex = colors.get("foreground", "#cdd6f4")
         muted_hex = colors.get("muted", "#888894")
+        # The settings labels' grey in the QML plugins: Qt.darker(foreground, 1.45),
+        # i.e. the HSV value divided by 1.45.
+        try:
+            r, g, b = (int(fg_hex.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4))
+            hue, sat, val = colorsys.rgb_to_hsv(r, g, b)
+            dim_hex = "#%02x%02x%02x" % tuple(round(c * 255) for c in colorsys.hsv_to_rgb(hue, sat, val / 1.45))
+        except (ValueError, IndexError):
+            dim_hex = muted_hex
         red_hex = colors.get("red", "#f04452")
         accent_hex = colors.get("accent", "#89b4fa")
         green_hex = colors.get("green", "#66c98b")
@@ -1933,6 +2000,22 @@ class ThemeManager(Gtk.Application):
         .tm-confirm {{ font-size: 18px; font-weight: 600; }}
         .tm-hint {{ color: {muted_hex}; font-size: 14px; }}
         .tm-header-btn {{ padding: 4px; min-width: 0; min-height: 0; margin-right: 4px; }}
+        .tm-card button.tm-gear-btn {{ border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px;
+            padding: 1px 6px; margin-right: 0; }}
+        .tm-gear {{ font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace; font-size: 13px; }}
+        .tm-card button.tm-back-bordered {{ border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px;
+            padding: 4px 10px; }}
+        .tm-section-title {{ font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
+        separator.tm-settings-rule {{ background-color: alpha({fg_hex}, 0.12); background-image: none;
+            min-height: 1px; margin: 0; }}
+        .tm-card label.tm-line-label {{ font-size: 11px; color: {dim_hex}; }}
+        .tm-line dropdown > button {{ min-height: 0; padding: 2px 8px; border: 1px solid alpha({fg_hex}, 0.35);
+            border-radius: {radius}px; background: transparent; }}
+        .tm-line dropdown label {{ font-size: 11px; }}
+        .tm-line switch {{ min-height: 16px; min-width: 36px; }}
+        .tm-line switch slider {{ min-width: 14px; min-height: 14px; margin: 1px; }}
+        .tm-line button.sc-small {{ font-size: 11px; min-height: 0; padding: 2px 8px;
+            border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px; background: transparent; }}
         .tm-list {{ background: transparent; }}
         .tm-list flowboxchild {{ border-radius: {radius}px; padding: 6px 2px 6px 6px; min-height: 92px;
             outline: none; }}
@@ -2002,6 +2085,8 @@ class ThemeManager(Gtk.Application):
         .tm-setting-compact entry, .tm-setting-compact dropdown button {{ min-height: 0; padding-top: 2px;
             padding-bottom: 2px; }}
         .tm-setting-heading {{ font-size: 13px; font-weight: 700; color: {accent_hex}; margin-top: 6px; }}
+        .tm-settings-page label.tm-setting-heading {{ font-size: 11px; letter-spacing: 1px; color: {fg_hex};
+            margin-top: 8px; }}
         .tm-settings switch:checked {{ background: {accent_hex}; }}
         .tm-settings dropdown button {{ padding: 4px 8px; }}
         .tm-settings dropdown label {{ font-size: 13px; }}
@@ -2067,8 +2152,8 @@ class ThemeManager(Gtk.Application):
         selected = None
         query = self.filter_query.casefold().strip()
         self.update_title()
-        self.no_match.set_label(f"No theme matches “{self.filter_query}”. Backspace or Esc clears the filter."
-                                if query else "No themes.")
+        self.no_match.set_label(_("No theme matches “{0}”. Backspace or Esc clears the filter.").format(self.filter_query)
+                                if query else _("No themes."))
         hidden_out = 0
         self.favorites = theme_auto.load_favorites()
         self.theme_keys = {shortcuts.theme_of(a): c for a, c in shortcuts.load_state().items()
@@ -2090,10 +2175,10 @@ class ThemeManager(Gtk.Application):
                 selected = row
         self.hidden_hint.set_visible(bool(hidden_out and not query))
         if hidden_out and not query:
-            text = (f"{hidden_out} hidden theme{'s' if hidden_out != 1 else ''} not shown. "
-                    "The eye button in the header shows them.")
+            text = (ngettext("{0} hidden theme not shown.", "{0} hidden themes not shown.", hidden_out).format(hidden_out)
+                    + " " + _("The eye button in the header shows them."))
             if not theme_core.sync_enabled():
-                text += " To hide them in Omarchy's own theme picker too, turn it on in Settings (⚙)."
+                text += " " + _("To hide them in Omarchy's own theme picker too, turn it on in Settings (⚙).")
             self.hidden_hint.set_label(text)
         self.no_match.set_visible(self.rows.get_first_child() is None)
         selected = selected or self.rows.get_first_child()
@@ -2115,7 +2200,7 @@ class ThemeManager(Gtk.Application):
         try:
             theme_auto.set_favorite(theme.slug, on)
         except (OSError, ValueError) as error:
-            theme_core.notify("Could not change favorites", str(error))
+            theme_core.notify(_("Could not change favorites"), str(error))
         self.refresh_themes(keep=theme.slug)
         self.focus_selected_theme()
 
@@ -2123,11 +2208,11 @@ class ThemeManager(Gtk.Application):
         self.save_schedule(**{key: theme.slug})
         plan = theme_auto.schedule()
         if not plan["enabled"]:
-            theme_core.notify(f"{theme_core.plain_text(theme.name)} is the {key} theme",
-                              "Switch on “Switch themes by time of day” in Settings (⚙).")
+            theme_core.notify((_("{0} is the day theme") if key == "day" else _("{0} is the night theme")).format(
+                theme_core.plain_text(theme.name)), _("Switch on “Switch themes by time of day” in Settings (⚙)."))
         else:
-            theme_core.notify(f"{theme_core.plain_text(theme.name)} is the {key} theme",
-                              f"From {plan[key + '_at']}.")
+            theme_core.notify((_("{0} is the day theme") if key == "day" else _("{0} is the night theme")).format(
+                theme_core.plain_text(theme.name)), _("From {0}.").format(plan[key + '_at']))
 
     def set_omarchy_sync(self, on: bool):
         def apply():
@@ -2135,16 +2220,16 @@ class ThemeManager(Gtk.Application):
             if on:
                 theme_core.prune_switcher_previews(theme_core.load_hidden())
         self._async(apply, lambda _r, error: theme_core.notify(
-            "Could not change the Omarchy sync", str(error)) if error else theme_core.notify(
-            "Omarchy sync " + ("on" if on else "off"),
-            "Hidden themes and wallpapers now also leave Omarchy's pickers." if on else
-            "Hiding now applies to Theme Manager only; Omarchy's pickers show everything."))
+            _("Could not change the Omarchy sync"), str(error)) if error else theme_core.notify(
+            _("Omarchy sync on") if on else _("Omarchy sync off"),
+            _("Hidden themes and wallpapers now also leave Omarchy's pickers.") if on else
+            _("Hiding now applies to Theme Manager only; Omarchy's pickers show everything.")))
         self.refresh_themes()
 
     def update_title(self):
         label = "Theme Manager"
         if self.show_hidden:
-            label += " (Showing Hidden)"
+            label += " (" + _("Showing hidden") + ")"
         if self.filter_query:
             label += f" — {self.filter_query}"
         self.title_label.set_label(label)
@@ -2188,7 +2273,7 @@ class ThemeManager(Gtk.Application):
         if theme.slug in self.favorites:
             star = Gtk.Label(label="★")
             star.add_css_class("tm-star")
-            star.set_tooltip_text("Favorite: listed first and in the bar icon's right-click menu")
+            star.set_tooltip_text(_("Favorite: listed first and in the bar icon's right-click menu"))
             title.append(star)
         title.append(name)
         text.append(title)
@@ -2200,22 +2285,22 @@ class ThemeManager(Gtk.Application):
             badge = Gtk.Box()
             badge.add_css_class("tm-badge")
             badge.add_css_class("current")
-            badge.append(Gtk.Label(label="current"))
+            badge.append(Gtk.Label(label=_("current")))
             badges.append(badge)
         if theme.scope == "system":
             badge = Gtk.Box()
             badge.add_css_class("tm-badge")
-            badge.append(Gtk.Label(label="system"))
+            badge.append(Gtk.Label(label=_("system")))
             badges.append(badge)
         if is_hidden:
             badge = Gtk.Box()
             badge.add_css_class("tm-badge")
             badge.add_css_class("hidden-badge")
-            badge.append(Gtk.Label(label="hidden"))
+            badge.append(Gtk.Label(label=_("hidden")))
             badges.append(badge)
         key = self.theme_keys.get(theme.slug)
         if key:
-            row.set_tooltip_text(f"{shortcuts.combo_label(key)} applies this theme")
+            row.set_tooltip_text(_("{0} applies this theme").format(shortcuts.combo_label(key)))
             keyhint = Gtk.Label(label=shortcuts.combo_label(key).replace(" + ", "+"), xalign=0)
             keyhint.add_css_class("tm-keyhint")
             keyhint.set_ellipsize(Pango.EllipsizeMode.END)
@@ -2226,7 +2311,7 @@ class ThemeManager(Gtk.Application):
         actions.add_css_class("flat")
         actions.add_css_class("tm-menu-btn")
         actions.set_valign(Gtk.Align.CENTER)
-        actions.set_tooltip_text("Theme actions (Right)")
+        actions.set_tooltip_text(_("Theme actions (Right)"))
         actions.connect("clicked", lambda button, target=theme: self.show_actions(button, target))
         line.append(actions)
         row.actions_button = actions
@@ -2254,7 +2339,7 @@ class ThemeManager(Gtk.Application):
         actions.set_halign(Gtk.Align.END)
         actions.set_valign(Gtk.Align.START)
         actions.set_focusable(False)
-        actions.set_tooltip_text("Theme actions (Menu key)")
+        actions.set_tooltip_text(_("Theme actions (Menu key)"))
         actions.connect("clicked", lambda button, target=theme: self.show_actions(button, target))
         frame.add_overlay(actions)
         badges = Gtk.Box(spacing=4)
@@ -2269,7 +2354,7 @@ class ThemeManager(Gtk.Application):
                 badge.add_css_class("tm-tile-badge")
                 if kind:
                     badge.add_css_class(kind)
-                badge.append(Gtk.Label(label=text))
+                badge.append(Gtk.Label(label=_(text)))
                 badges.append(badge)
         frame.add_overlay(badges)
         tile.append(frame)
@@ -2285,7 +2370,7 @@ class ThemeManager(Gtk.Application):
         name.add_css_class("tm-tile-name")
         key = self.theme_keys.get(theme.slug)
         if key:
-            child_tip = f"{shortcuts.combo_label(key)} applies this theme"
+            child_tip = _("{0} applies this theme").format(shortcuts.combo_label(key))
             name.set_tooltip_text(child_tip)
         name.set_ellipsize(Pango.EllipsizeMode.END)
         name.set_max_width_chars(1)
@@ -2428,58 +2513,58 @@ class ThemeManager(Gtk.Application):
             self.menu_separator(box)
 
         if theme.current:
-            item("Current theme", lambda: None, "object-select-symbolic", sensitive=False)
+            item(_("Current theme"), lambda: None, "object-select-symbolic", sensitive=False)
         else:
-            item("Apply theme", lambda: self.apply_theme_action(theme), "media-playback-start-symbolic")
-        item("Wallpapers", lambda: self.open_wallpapers_for(theme), "image-x-generic-symbolic",
+            item(_("Apply theme"), lambda: self.apply_theme_action(theme), "media-playback-start-symbolic")
+        item(_("Wallpapers"), lambda: self.open_wallpapers_for(theme), "image-x-generic-symbolic",
              end_icon="go-next-symbolic")
-        item("New theme from this…", lambda: self.open_editor(theme), "list-add-symbolic",
-             tooltip="Your own copy with other colors, a font and these wallpapers")
+        item(_("New theme from this…"), lambda: self.open_editor(theme), "list-add-symbolic",
+             tooltip=_("Your own copy with other colors, a font and these wallpapers"))
         if theme_custom.is_custom(theme):
-            item("Edit theme…", lambda: self.open_editor(theme, edit=True), "document-edit-symbolic",
-                 tooltip="Name, colors and font")
+            item(_("Edit theme…"), lambda: self.open_editor(theme, edit=True), "document-edit-symbolic",
+                 tooltip=_("Name, colors and font"))
         key = shortcuts.load_state().get(shortcuts.APPLY + theme.slug)
         hidden = theme.slug in self.hidden
-        label = f"Shortcut: {shortcuts.combo_label(key)}…" if key else "Shortcut…"
+        label = _("Shortcut: {0}…").format(shortcuts.combo_label(key)) if key else _("Shortcut…")
         if key and hidden:
-            label = f"Shortcut: {shortcuts.combo_label(key)} (works while hidden)…"
+            label = _("Shortcut: {0} (works while hidden)…").format(shortcuts.combo_label(key))
         item(label, lambda: self.open_shortcut_page(shortcuts.APPLY + theme.slug), "input-keyboard-symbolic",
-             tooltip="A key that applies this theme from anywhere"
-             + (". It also works while the theme is hidden, and applying it unhides it." if hidden else ""))
+             tooltip=_("A key that applies this theme from anywhere")
+             + (". " + _("It also works while the theme is hidden, and applying it unhides it.") if hidden else ""))
         if theme.slug in self.favorites:
-            item("Remove from favorites", lambda: self.set_favorite(theme, False), "starred-symbolic")
+            item(_("Remove from favorites"), lambda: self.set_favorite(theme, False), "starred-symbolic")
         else:
-            item("Add to favorites", lambda: self.set_favorite(theme, True), "non-starred-symbolic",
-                 tooltip="Listed first, and in the bar icon's right-click menu")
+            item(_("Add to favorites"), lambda: self.set_favorite(theme, True), "non-starred-symbolic",
+                 tooltip=_("Listed first, and in the bar icon's right-click menu"))
         plan = theme_auto.schedule()
-        for key, label in (("day", "day"), ("night", "night")):
+        for key, label in (("day", _("This is the day theme")), ("night", _("This is the night theme"))):
             if plan[key] == theme.slug:
-                item(f"This is the {label} theme", lambda: None, "object-select-symbolic",
+                item(label, lambda: None, "object-select-symbolic",
                      sensitive=False)
                 break
         else:
-            item("Use as day theme", lambda: self.set_schedule_theme("day", theme), "weather-clear-symbolic",
-                 tooltip="Applied at the day time set in Settings (⚙)")
-            item("Use as night theme", lambda: self.set_schedule_theme("night", theme),
-                 "weather-clear-night-symbolic", tooltip="Applied at the night time set in Settings (⚙)")
+            item(_("Use as day theme"), lambda: self.set_schedule_theme("day", theme), "weather-clear-symbolic",
+                 tooltip=_("Applied at the day time set in Settings (⚙)"))
+            item(_("Use as night theme"), lambda: self.set_schedule_theme("night", theme),
+                 "weather-clear-night-symbolic", tooltip=_("Applied at the night time set in Settings (⚙)"))
         separator()
         if theme.slug in self.hidden:
-            item("Unhide from list", lambda: self.set_theme_hidden(theme, False), "view-reveal-symbolic")
+            item(_("Unhide from list"), lambda: self.set_theme_hidden(theme, False), "view-reveal-symbolic")
         else:
-            item("Hide from list", lambda: self.set_theme_hidden(theme, True), "view-conceal-symbolic",
+            item(_("Hide from list"), lambda: self.set_theme_hidden(theme, True), "view-conceal-symbolic",
                  sensitive=not theme.current,
-                 tooltip="This is the active theme: apply another theme first" if theme.current else None)
+                 tooltip=_("This is the active theme: apply another theme first") if theme.current else None)
         separator()
         if theme.scope == "user" and theme.current:
-            item("Delete theme…", lambda: None, "user-trash-symbolic", sensitive=False,
-                 tooltip="This is the active theme: apply another theme first")
+            item(_("Delete theme…"), lambda: None, "user-trash-symbolic", sensitive=False,
+                 tooltip=_("This is the active theme: apply another theme first"))
         elif theme.scope == "user":
-            item("Delete theme…", lambda: self.confirm_delete_theme(theme), "user-trash-symbolic",
+            item(_("Delete theme…"), lambda: self.confirm_delete_theme(theme), "user-trash-symbolic",
                  destructive=True)
         else:
-            button = item("System theme (read-only)", lambda: None, "changes-prevent-symbolic",
+            button = item(_("System theme (read-only)"), lambda: None, "changes-prevent-symbolic",
                           sensitive=False)
-            button.set_tooltip_text("System themes are owned by root and cannot be deleted; hide them instead")
+            button.set_tooltip_text(_("System themes are owned by root and cannot be deleted; hide them instead"))
         return box
 
     @staticmethod
@@ -2533,14 +2618,14 @@ class ThemeManager(Gtk.Application):
 
     # --- list actions ----------------------------------------------------------------
 
-    def toggle_show_hidden(self, *_):
+    def toggle_show_hidden(self, *_args):
         self.show_hidden = not self.show_hidden
         if self.show_hidden:
             self.hidden_button.set_icon_name("view-conceal-symbolic")
-            self.hidden_button.set_tooltip_text("Hide hidden themes and wallpapers")
+            self.hidden_button.set_tooltip_text(_("Hide hidden themes and wallpapers"))
         else:
             self.hidden_button.set_icon_name("view-reveal-symbolic")
-            self.hidden_button.set_tooltip_text("Show hidden themes and wallpapers")
+            self.hidden_button.set_tooltip_text(_("Show hidden themes and wallpapers"))
         self.refresh_themes()
         self.refresh_wallpapers()
 
@@ -2571,13 +2656,13 @@ class ThemeManager(Gtk.Application):
             return
         self.active_theme = theme
         self.wp_filter = ""
-        self.wp_title.set_label(f"{theme_core.plain_text(theme.name)} — wallpapers")
+        self.wp_title.set_label(_("{0} — wallpapers").format(theme_core.plain_text(theme.name)))
         system = theme.scope == "system"
         self.paste_button.set_tooltip_text(
-            "Add the image copied to the clipboard (from the web or the file manager)"
-            + (" — stored in your per-theme folder" if system else ""))
-        self.drop_note = ("Stored in your wallpaper folder for this theme, next to its own wallpapers."
-                          if system else "Stored in the theme's user wallpaper folder.")
+            _("Add the image copied to the clipboard (from the web or the file manager)")
+            + (" — " + _("stored in your per-theme folder") if system else ""))
+        self.drop_note = (_("Stored in your wallpaper folder for this theme, next to its own wallpapers.")
+                          if system else _("Stored in the theme's user wallpaper folder."))
         self.refresh_wallpapers()
         self.stack.set_visible_child_name("wallpapers")
 
@@ -2596,7 +2681,7 @@ class ThemeManager(Gtk.Application):
         if theme is None:
             return
         self.browser = theme_catalog.default_browser()
-        self.ws_title.set_label(f"{theme_core.plain_text(theme.name)} — search wallpapers")
+        self.ws_title.set_label(_("{0} — search wallpapers").format(theme_core.plain_text(theme.name)))
         self.stack.set_visible_child_name("websearch")
         if not self.web_query:
             self.web_hint.set_label(self.web_hint_text())
@@ -2608,10 +2693,10 @@ class ThemeManager(Gtk.Application):
         self.refresh_wallpapers()
 
     def web_hint_text(self, status: str = "") -> str:
-        text = status or ("Type what you are looking for and press Enter. Results come from "
-                          f"{wallpaper_search.SOURCE}: safe for work, landscape, at least 1920×1080.")
+        text = status or _("Type what you are looking for and press Enter. Results come from {0}: safe for work, "
+                           "landscape, at least 1920×1080.").format(wallpaper_search.SOURCE)
         if self.browser is None:
-            text += " No default web browser is set, so wallpaper pages can't be opened."
+            text += " " + _("No default web browser is set, so wallpaper pages can't be opened.")
         return text
 
     def run_web_search(self):
@@ -2643,7 +2728,7 @@ class ThemeManager(Gtk.Application):
             return  # answer to an older search
         self.web_loading = False
         if error is not None or result is None:
-            self.web_hint.set_label(self.web_hint_text(f"Search failed: {error}"))
+            self.web_hint.set_label(self.web_hint_text(_("Search failed: {0}").format(error)))
             return
         results, last_page = result
         self.web_page_no, self.web_last_page = page, last_page
@@ -2653,10 +2738,10 @@ class ThemeManager(Gtk.Application):
             self.web_grid.append(self.build_web_tile(item, added))
         shown = len(self.children_of(self.web_grid))
         if not shown:
-            status = f"Nothing found for “{self.web_query}”. Try other words."
+            status = _("Nothing found for “{0}”. Try other words.").format(self.web_query)
         else:
-            more = " Scroll down for more." if page < last_page else ""
-            status = f"{shown} wallpapers for “{self.web_query}”.{more} Enter on a tile adds it."
+            more = " " + _("Scroll down for more.") if page < last_page else ""
+            status = _("{0} wallpapers for “{1}”.").format(shown, self.web_query) + more + " " + _("Enter on a tile adds it.")
         self.web_hint.set_label(self.web_hint_text(status))
         self.load_web_thumbs([r for r in results if r.id in self.web_pictures], generation)
 
@@ -2683,7 +2768,7 @@ class ThemeManager(Gtk.Application):
         actions.set_halign(Gtk.Align.END)
         actions.set_valign(Gtk.Align.START)
         actions.set_focusable(False)
-        actions.set_tooltip_text("Wallpaper actions (Enter)")
+        actions.set_tooltip_text(_("Wallpaper actions (Enter)"))
         actions.connect("clicked", lambda button, i=item: self.show_web_menu(button, i))
         frame.add_overlay(actions)
         if added:
@@ -2692,7 +2777,7 @@ class ThemeManager(Gtk.Application):
             badge.add_css_class("tm-tile-badge")
             badge.set_halign(Gtk.Align.START)
             badge.set_valign(Gtk.Align.END)
-            badge.append(Gtk.Label(label="added"))
+            badge.append(Gtk.Label(label=_("added")))
             frame.add_overlay(badge)
         tile.append(frame)
         caption = Gtk.Label(label=item.resolution.replace("x", " × "), xalign=0.5)
@@ -2741,22 +2826,22 @@ class ThemeManager(Gtk.Application):
             return self.menu_item(box, popover, label, handler, icon_name, **kwargs)
 
         if theme is not None and wallpaper_search.already_added(None, theme.slug, item):
-            entry("Already added", lambda: None, "object-select-symbolic", sensitive=False)
+            entry(_("Already added"), lambda: None, "object-select-symbolic", sensitive=False)
         elif theme is not None:
-            entry(f"Add to {theme_core.plain_text(theme.name)}", lambda: self.add_web_wallpaper(item, False),
-                  "list-add-symbolic", tooltip=f"Saved in ~/.config/omarchy/backgrounds/{theme.slug}/")
+            entry(_("Add to {0}").format(theme_core.plain_text(theme.name)), lambda: self.add_web_wallpaper(item, False),
+                  "list-add-symbolic", tooltip=_("Saved in {0}").format(f"~/.config/omarchy/backgrounds/{theme.slug}/"))
             if theme.current:
-                entry("Add and set as background", lambda: self.add_web_wallpaper(item, True),
+                entry(_("Add and set as background"), lambda: self.add_web_wallpaper(item, True),
                       "preferences-desktop-wallpaper-symbolic")
-        entry("Preview on desktop", lambda: self.preview_web(item, PREVIEW_SECONDS), "view-reveal-symbolic",
-              tooltip=f"Loads the full image and shows it for {PREVIEW_SECONDS} seconds; or hold Space on the tile")
+        entry(_("Preview on desktop"), lambda: self.preview_web(item, PREVIEW_SECONDS), "view-reveal-symbolic",
+              tooltip=_("Loads the full image and shows it for {0} seconds; or hold Space on the tile").format(PREVIEW_SECONDS))
         self.menu_separator(box)
         if self.browser is not None:
-            entry(f"Open on {wallpaper_search.SOURCE}", lambda: wallpaper_search.open_page(item),
+            entry(_("Open on {0}").format(wallpaper_search.SOURCE), lambda: wallpaper_search.open_page(item),
                   "web-browser-symbolic", tooltip=item.page)
         else:
-            entry("Open page (no browser)", lambda: None, "web-browser-symbolic", sensitive=False,
-                  tooltip="No default web browser is set")
+            entry(_("Open page (no browser)"), lambda: None, "web-browser-symbolic", sensitive=False,
+                  tooltip=_("No default web browser is set"))
         return box
 
     def add_web_wallpaper(self, item, set_background: bool):
@@ -2769,11 +2854,11 @@ class ThemeManager(Gtk.Application):
 
     def after_web_add(self, theme, item, path, error, set_background: bool):
         if error is not None:
-            theme_core.notify("Could not add wallpaper", f"{item.file_name}: {error}")
-            self.web_hint.set_label(self.web_hint_text(f"Could not add {item.file_name}: {error}"))
+            theme_core.notify(_("Could not add wallpaper"), f"{item.file_name}: {error}")
+            self.web_hint.set_label(self.web_hint_text(_("Could not add {0}: {1}").format(item.file_name, error)))
             return
-        theme_core.notify("Wallpaper added", f"{path.name} → {theme_core.plain_text(theme.name)}")
-        self.web_hint.set_label(self.web_hint_text(f"Added {path.name} to {theme_core.plain_text(theme.name)}."))
+        theme_core.notify(_("Wallpaper added"), f"{path.name} → {theme_core.plain_text(theme.name)}")
+        self.web_hint.set_label(self.web_hint_text(_("Added {0} to {1}.").format(path.name, theme_core.plain_text(theme.name))))
         for child in self.children_of(self.web_grid):
             if getattr(child, "tm_web", None) == item:
                 index = child.get_index()
@@ -2806,18 +2891,17 @@ class ThemeManager(Gtk.Application):
         self.load_catalog(force=False)
 
     def load_catalog(self, force: bool):
-        self.import_hint.set_label("Loading themes from omarchy.org…")
+        self.import_hint.set_label(_("Loading themes from omarchy.org…"))
         self._async(lambda: theme_catalog.load_catalog(force=force),
                     lambda result, error: self.fill_catalog(*result) if result else
-                    self.import_hint.set_label(f"Could not load the theme list: {error}"))
+                    self.import_hint.set_label(_("Could not load the theme list: {0}").format(error)))
 
     def import_hint_text(self, count: int) -> str:
-        text = f"{count} themes from omarchy.org. Enter opens a theme's menu: install, " \
-               "install and apply, or open its page."
+        text = _("{0} themes from omarchy.org. Enter opens a theme's menu: install, install and apply, or open "
+                 "its page.").format(count)
         if self.browser is None:
-            text += " No default web browser is set, so theme pages can't be opened. " \
-                    "Install one with Menu → Install → Web Browser, or set one with " \
-                    "xdg-settings set default-web-browser <app>.desktop."
+            text += " " + _("No default web browser is set, so theme pages can't be opened. Install one with Menu → "
+                            "Install → Web Browser, or set one with xdg-settings set default-web-browser <app>.desktop.")
         return text
 
     def fill_catalog(self, themes, _fetched_at):
@@ -2853,7 +2937,7 @@ class ThemeManager(Gtk.Application):
         actions.set_halign(Gtk.Align.END)
         actions.set_valign(Gtk.Align.START)
         actions.set_focusable(False)
-        actions.set_tooltip_text("Theme actions (Enter)")
+        actions.set_tooltip_text(_("Theme actions (Enter)"))
         actions.connect("clicked", lambda button, e=entry: self.show_catalog_menu(button, e))
         frame.add_overlay(actions)
         if installed:
@@ -2862,7 +2946,7 @@ class ThemeManager(Gtk.Application):
             badge.add_css_class("tm-tile-badge")
             badge.set_halign(Gtk.Align.START)
             badge.set_valign(Gtk.Align.END)
-            badge.append(Gtk.Label(label="installed"))
+            badge.append(Gtk.Label(label=_("installed")))
             frame.add_overlay(badge)
         tile.append(frame)
         caption = Gtk.Label(label=entry.name, xalign=0.5)
@@ -2918,26 +3002,26 @@ class ThemeManager(Gtk.Application):
             return self.menu_item(box, popover, label, handler, icon_name, **kwargs)
 
         if installed:
-            item("Installed", lambda: None, "object-select-symbolic", sensitive=False)
-            item("Apply theme", lambda: self.apply_theme_action(
+            item(_("Installed"), lambda: None, "object-select-symbolic", sensitive=False)
+            item(_("Apply theme"), lambda: self.apply_theme_action(
                 next(t for t in theme_core.discover_themes() if t.slug == entry.slug)),
                 "media-playback-start-symbolic")
         else:
-            item("Install", lambda: self.install_catalog(entry, apply=False), "folder-download-symbolic",
-                 tooltip=f"git clone into ~/.config/omarchy/themes/{entry.slug}")
-            item("Install and apply", lambda: self.install_catalog(entry, apply=True),
+            item(_("Install"), lambda: self.install_catalog(entry, apply=False), "folder-download-symbolic",
+                 tooltip=_("git clone into {0}").format(f"~/.config/omarchy/themes/{entry.slug}"))
+            item(_("Install and apply"), lambda: self.install_catalog(entry, apply=True),
                  "media-playback-start-symbolic")
         self.menu_separator(box)
         if self.browser is not None:
-            item("Open theme page", lambda: theme_catalog.open_in_browser(entry.repo), "web-browser-symbolic",
+            item(_("Open theme page"), lambda: theme_catalog.open_in_browser(entry.repo), "web-browser-symbolic",
                  tooltip=entry.repo)
         else:
-            item("Open theme page (no browser)", lambda: None, "web-browser-symbolic", sensitive=False,
-                 tooltip="No default web browser is set")
+            item(_("Open theme page (no browser)"), lambda: None, "web-browser-symbolic", sensitive=False,
+                 tooltip=_("No default web browser is set"))
         return box
 
     def install_catalog(self, entry, apply: bool):
-        self.import_hint.set_label(f"Installing {entry.name}…")
+        self.import_hint.set_label(_("Installing {0}…").format(entry.name))
 
         def install():
             path = theme_catalog.install(entry)
@@ -2949,10 +3033,10 @@ class ThemeManager(Gtk.Application):
 
     def after_install(self, entry, apply: bool, error):
         if error is not None:
-            theme_core.notify("Could not install theme", f"{entry.name}: {error}")
+            theme_core.notify(_("Could not install theme"), f"{entry.name}: {error}")
             self.import_hint.set_label(self.import_hint_text(len(self.catalog)))
             return
-        theme_core.notify("Theme installed", entry.name)
+        theme_core.notify(_("Theme installed"), entry.name)
         if apply:
             theme = next((t for t in theme_core.discover_themes() if t.slug == entry.slug), None)
             if theme is not None:
@@ -2986,16 +3070,16 @@ class ThemeManager(Gtk.Application):
 
     def after_apply(self, theme: theme_core.ThemeInfo, ok: bool, error: Exception | None):
         if ok:
-            theme_core.notify("Theme applied", theme.name)
+            theme_core.notify(_("Theme applied"), theme.name)
             try:
                 theme_auto.record_recent(theme.slug)
             except OSError:
                 pass
             self._async(lambda: theme_custom.apply_theme_font(theme.slug),
-                        lambda font, _e: font and theme_core.notify("Font", f"Now using {font}"))
+                        lambda font, _e: font and theme_core.notify(_("Font"), _("Now using {0}").format(font)))
         else:
-            theme_core.notify("Could not apply theme",
-                              f"{theme.name}: {error or 'omarchy theme set failed'}")
+            theme_core.notify(_("Could not apply theme"),
+                              f"{theme.name}: {error or _('omarchy theme set failed')}")
         # The popup stays open: take on the new theme's colors and mark it current.
         self.current_slug = theme_core.current_theme()
         if self.theme.reload():
@@ -3057,14 +3141,14 @@ class ThemeManager(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def confirm_delete_theme(self, theme: theme_core.ThemeInfo):
-        message = f"Delete theme “{theme_core.plain_text(theme.name)}”?"
+        message = _("Delete theme “{0}”?").format(theme_core.plain_text(theme.name))
         notes = []
         if (theme_core.default_roots().system_themes / theme.slug).is_dir():
-            notes.append("Only your copy is removed; the system version stays.")
-        notes.append("Wallpapers you added to it are kept.")
+            notes.append(_("Only your copy is removed; the system version stays."))
+        notes.append(_("Wallpapers you added to it are kept."))
         if theme_core.default_roots().trash is not None:
-            notes.append("The theme goes to the trash: Undo brings it back.")
-        self.ask_confirm(message + "\n\n" + "\n".join(notes), "Delete theme",
+            notes.append(_("The theme goes to the trash: Undo brings it back."))
+        self.ask_confirm(message + "\n\n" + "\n".join(notes), _("Delete theme"),
                          lambda: self.perform_delete_theme(theme))
 
     def perform_delete_theme(self, theme: theme_core.ThemeInfo):
@@ -3084,13 +3168,13 @@ class ThemeManager(Gtk.Application):
     def after_delete_theme(self, theme: theme_core.ThemeInfo, error: Exception | None,
                            receipts: list = ()):
         if error is None:
-            theme_core.notify("Theme removed", theme.name)
+            theme_core.notify(_("Theme removed"), theme.name)
             if receipts:
-                self.offer_undo(f"“{theme_core.plain_text(theme.name)}” moved to the trash", list(receipts))
+                self.offer_undo(_("“{0}” moved to the trash").format(theme_core.plain_text(theme.name)), list(receipts))
             else:
                 self.prune_shortcuts()   # no undo: its key goes right away
         else:
-            theme_core.notify("Could not delete theme", f"{theme.name}: {error}")
+            theme_core.notify(_("Could not delete theme"), f"{theme.name}: {error}")
         self.refresh_themes(keep=self.neighbor_slug(theme.slug) if error is None else theme.slug)
         self.focus_selected_theme()
 
@@ -3128,7 +3212,7 @@ class ThemeManager(Gtk.Application):
         wallpapers = [w for w in theme_core.list_backgrounds(None, theme)
                       if (self.show_hidden or not w.hidden) and query in w.name.casefold()]
         if query and not wallpapers:
-            self.wp_grid.append(self._empty_tile(f"No wallpaper matches “{self.wp_filter}”"))
+            self.wp_grid.append(self._empty_tile(_("No wallpaper matches “{0}”").format(self.wp_filter)))
             return
         self.add_tile = None
         if not query:
@@ -3152,21 +3236,21 @@ class ThemeManager(Gtk.Application):
         icon.set_vexpand(True)
         icon.set_valign(Gtk.Align.END)
         inner.append(icon)
-        hint = Gtk.Label(label=("No wallpapers yet. " if empty else "") + "Drop images here, paste with "
-                         "Ctrl+V or click to choose", wrap=True, max_width_chars=1,
+        hint = Gtk.Label(label=(_("No wallpapers yet.") + " " if empty else "") + _("Drop images here, paste with "
+                         "Ctrl+V or click to choose"), wrap=True, max_width_chars=1,
                          justify=Gtk.Justification.CENTER)
         hint.add_css_class("tm-tile-label")
         hint.set_vexpand(True)
         hint.set_valign(Gtk.Align.START)
         inner.append(hint)
         tile.append(inner)
-        caption = Gtk.Label(label="Add wallpapers…", xalign=0.5)
+        caption = Gtk.Label(label=_("Add wallpapers…"), xalign=0.5)
         caption.add_css_class("tm-tile-label")
         tile.append(caption)
         child = Gtk.FlowBoxChild()
         child.set_child(tile)
-        child.set_tooltip_text("Choose image files (Enter), drag them anywhere onto this page, or paste "
-                               "an image or file with Ctrl+V. HEIC photos are converted. " + self.drop_note)
+        child.set_tooltip_text(_("Choose image files (Enter), drag them anywhere onto this page, or paste "
+                               "an image or file with Ctrl+V. HEIC photos are converted. ") + self.drop_note)
         child.tm_add = True
         self.add_tile = tile
         return child
@@ -3175,7 +3259,7 @@ class ThemeManager(Gtk.Application):
         theme = self.active_theme
         if theme is None:
             return
-        label = f"{theme_core.plain_text(theme.name)} — wallpapers"
+        label = _("{0} — wallpapers").format(theme_core.plain_text(theme.name))
         if self.wp_filter:
             label += f" — {self.wp_filter}"
         self.wp_title.set_label(label)
@@ -3191,7 +3275,7 @@ class ThemeManager(Gtk.Application):
         icon = Gtk.Image.new_from_icon_name("image-missing")
         icon.set_pixel_size(40)
         box.append(icon)
-        empty = Gtk.Label(label=text or "No wallpapers yet — drop or paste one",
+        empty = Gtk.Label(label=text or _("No wallpapers yet — drop or paste one"),
                           wrap=True, max_width_chars=18, justify=Gtk.Justification.CENTER)
         empty.add_css_class("tm-tile-label")
         box.append(empty)
@@ -3219,7 +3303,7 @@ class ThemeManager(Gtk.Application):
         actions.set_halign(Gtk.Align.END)
         actions.set_valign(Gtk.Align.START)
         actions.set_focusable(False)  # the tile itself takes the keyboard focus
-        actions.set_tooltip_text("Wallpaper actions (Enter)")
+        actions.set_tooltip_text(_("Wallpaper actions (Enter)"))
         actions.connect("clicked", lambda button, w=wallpaper: self.show_wallpaper_menu(button, w))
         frame.add_overlay(actions)
         if wallpaper.hidden:
@@ -3228,7 +3312,7 @@ class ThemeManager(Gtk.Application):
             badge.add_css_class("tm-tile-badge")
             badge.set_halign(Gtk.Align.START)
             badge.set_valign(Gtk.Align.END)
-            badge.append(Gtk.Label(label="hidden"))
+            badge.append(Gtk.Label(label=_("hidden")))
             frame.add_overlay(badge)
         if workspaces:
             badge = Gtk.Box()
@@ -3237,8 +3321,8 @@ class ThemeManager(Gtk.Application):
             badge.add_css_class("workspace")
             badge.set_halign(Gtk.Align.START)
             badge.set_valign(Gtk.Align.START)
-            badge.append(Gtk.Label(label="ws " + " · ".join(map(str, workspaces))))
-            badge.set_tooltip_text("Shown on workspace " + ", ".join(map(str, workspaces)))
+            badge.append(Gtk.Label(label=_("ws {0}").format(" · ".join(map(str, workspaces)))))
+            badge.set_tooltip_text(_("Shown on workspace {0}").format(", ".join(map(str, workspaces))))
             frame.add_overlay(badge)
         tile.append(frame)
 
@@ -3265,34 +3349,34 @@ class ThemeManager(Gtk.Application):
             return self.menu_item(box, popover, label, handler, icon_name, **kwargs)
 
         if theme is not None and theme.current and not wallpaper.hidden:
-            item("Set as background", lambda: self.set_background(wallpaper),
+            item(_("Set as background"), lambda: self.set_background(wallpaper),
                  "preferences-desktop-wallpaper-symbolic")
         if not wallpaper.hidden:
-            item("Preview on desktop", lambda: self.start_preview(wallpaper.path, PREVIEW_SECONDS),
+            item(_("Preview on desktop"), lambda: self.start_preview(wallpaper.path, PREVIEW_SECONDS),
                  "view-reveal-symbolic",
-                 tooltip=f"Shows it for {PREVIEW_SECONDS} seconds; or hold Space on the tile")
+                 tooltip=_("Shows it for {0} seconds; or hold Space on the tile").format(PREVIEW_SECONDS))
         if theme is not None and not wallpaper.hidden:
-            item("New theme from this wallpaper…", lambda: self.open_editor(theme, wallpaper=wallpaper),
+            item(_("New theme from this wallpaper…"), lambda: self.open_editor(theme, wallpaper=wallpaper),
                  "applications-graphics-symbolic",
-                 tooltip="A theme in this picture's colors, with this wallpaper")
+                 tooltip=_("A theme in this picture's colors, with this wallpaper"))
             on = theme_auto.workspaces_of(theme.slug, wallpaper.name)
-            item("Show on workspace…" if not on else "On workspace " + ", ".join(map(str, on)) + "…",
+            item(_("Show on workspace…") if not on else _("On workspace {0}…").format(", ".join(map(str, on))),
                  lambda: self.show_workspace_menu(wallpaper), "view-grid-symbolic", end_icon="go-next-symbolic",
-                 tooltip="This wallpaper appears whenever you switch to that workspace"
-                 + ("" if theme.current else " (while this theme is applied)"))
+                 tooltip=_("This wallpaper appears whenever you switch to that workspace")
+                 + ("" if theme.current else " (" + _("while this theme is applied") + ")"))
         self.menu_separator(box)
         if wallpaper.hidden:
-            item("Unhide", lambda: self.set_wallpaper_hidden(wallpaper, False), "view-reveal-symbolic",
-                 tooltip="Show it again here and in Omarchy's background picker")
+            item(_("Unhide"), lambda: self.set_wallpaper_hidden(wallpaper, False), "view-reveal-symbolic",
+                 tooltip=_("Show it again here and in Omarchy's background picker"))
         else:
-            item("Hide", lambda: self.set_wallpaper_hidden(wallpaper, True), "view-conceal-symbolic",
-                 tooltip="Keep it out of Omarchy's background picker and rotation; the file stays")
+            item(_("Hide"), lambda: self.set_wallpaper_hidden(wallpaper, True), "view-conceal-symbolic",
+                 tooltip=_("Keep it out of Omarchy's background picker and rotation; the file stays"))
         self.menu_separator(box)
         if wallpaper.deletable:
-            item("Delete…", lambda: self.confirm_delete_wallpaper(wallpaper), "user-trash-symbolic",
+            item(_("Delete…"), lambda: self.confirm_delete_wallpaper(wallpaper), "user-trash-symbolic",
                  destructive=True)
         else:
-            item("Can't delete: hide instead", lambda: None, "changes-prevent-symbolic",
+            item(_("Can't delete: hide instead"), lambda: None, "changes-prevent-symbolic",
                  sensitive=False, tooltip=wallpaper.locked_reason)
         return box
 
@@ -3318,21 +3402,21 @@ class ThemeManager(Gtk.Application):
                 button.set_child(Gtk.Label(label=f"✓ {ws}"))
             elif other:
                 button.add_css_class("tm-ws-other")
-            button.set_tooltip_text(f"Workspace {ws}: " + ("shows this wallpaper (click to clear)" if mine else
-                                    f"shows {mapping[ws]} (click to use this one)" if other else
-                                    "use this wallpaper"))
+            button.set_tooltip_text(_("Workspace {0}:").format(ws) + " " + (_("shows this wallpaper (click to clear)") if mine else
+                                    _("shows {0} (click to use this one)").format(mapping[ws]) if other else
+                                    _("use this wallpaper")))
             self.focus_follows_pointer(button)
             button.connect("clicked", lambda _b, w=ws, m=mine: (
                 popover.popdown(), self.assign_workspace(wallpaper, w, not m)))
             grid.attach(button, (ws - 1) % 5, (ws - 1) // 5, 1, 1)
-        title = Gtk.Label(label="Show on workspace", xalign=0)
+        title = Gtk.Label(label=_("Show on workspace"), xalign=0)
         title.add_css_class("tm-hint")
         title.set_margin_start(8)
         box.append(title)
         box.append(grid)
         if any(n == wallpaper.name for n in mapping.values()):
             self.menu_separator(box)
-            self.menu_item(box, popover, "Not on any workspace",
+            self.menu_item(box, popover, _("Not on any workspace"),
                            lambda: self.clear_workspaces(wallpaper), "edit-clear-symbolic")
         return box
 
@@ -3344,10 +3428,10 @@ class ThemeManager(Gtk.Application):
             theme_auto.set_workspace_wallpaper(theme.slug, workspace, wallpaper.name if on else None)
             if on and not theme_auto.workspace_wallpapers_enabled():
                 theme_auto.update_settings(workspace_wallpapers=True)
-                theme_core.notify("Wallpapers per workspace are on",
-                                  "Switch it off again in Settings (⚙).")
+                theme_core.notify(_("Wallpapers per workspace are on"),
+                                  _("Switch it off again in Settings (⚙)."))
         except (OSError, ValueError) as error:
-            theme_core.notify("Could not change the workspace wallpaper", str(error))
+            theme_core.notify(_("Could not change the workspace wallpaper"), str(error))
         self.after_workspace_change(theme)
 
     def clear_workspaces(self, wallpaper: theme_core.WallpaperInfo):
@@ -3377,7 +3461,7 @@ class ThemeManager(Gtk.Application):
             if theme.current and theme_core.sync_enabled():
                 theme_core.sync_current_theme()
         except (ValueError, OSError) as error:
-            theme_core.notify("Could not " + ("hide" if hide else "unhide") + " wallpaper",
+            theme_core.notify(_("Could not hide wallpaper") if hide else _("Could not unhide wallpaper"),
                               f"{wallpaper.name}: {error}")
         self.refresh_wallpapers()
 
@@ -3393,11 +3477,11 @@ class ThemeManager(Gtk.Application):
 
     def confirm_delete_wallpaper(self, wallpaper: theme_core.WallpaperInfo):
         theme = self.active_theme
-        note = "\n\nIt goes to the trash: Undo brings it back." \
+        note = "\n\n" + _("It goes to the trash: Undo brings it back.") \
             if theme_core.default_roots().trash is not None else ""
-        self.ask_confirm(f"Delete wallpaper “{theme_core.plain_text(wallpaper.name)}” from "
-                         f"“{theme_core.plain_text(theme.name) if theme else ''}”?{note}",
-                         "Delete wallpaper",
+        self.ask_confirm(_("Delete wallpaper “{0}” from “{1}”?").format(
+                             theme_core.plain_text(wallpaper.name), theme_core.plain_text(theme.name) if theme else "") + note,
+                         _("Delete wallpaper"),
                          lambda: self.perform_delete_wallpaper(wallpaper))
 
     def ask_confirm(self, message: str, button_label: str, on_confirm):
@@ -3430,10 +3514,10 @@ class ThemeManager(Gtk.Application):
             # Also moves the desktop off a deleted background.
             theme_core.sync_current_theme(hidden_override=None if theme_core.sync_enabled() else {})
         if error is None:
-            theme_core.notify("Wallpaper deleted", wallpaper.name)
-            self.offer_undo(f"“{theme_core.plain_text(wallpaper.name)}” moved to the trash", list(receipts))
+            theme_core.notify(_("Wallpaper deleted"), wallpaper.name)
+            self.offer_undo(_("“{0}” moved to the trash").format(theme_core.plain_text(wallpaper.name)), list(receipts))
         else:
-            theme_core.notify("Could not delete wallpaper",
+            theme_core.notify(_("Could not delete wallpaper"),
                               f"{wallpaper.name}: {error}")
         self.refresh_wallpapers()
 
@@ -3450,7 +3534,7 @@ class ThemeManager(Gtk.Application):
     def after_paste(self, theme: theme_core.ThemeInfo, found, error: Exception | None):
         self.paste_button.set_sensitive(True)
         if error is not None:
-            theme_core.notify("Could not read the clipboard", str(error))
+            theme_core.notify(_("Could not read the clipboard"), str(error))
             return
         if found is None:
             # No image bytes: maybe image files copied in the file manager.
@@ -3462,17 +3546,17 @@ class ThemeManager(Gtk.Application):
         try:
             dest = theme_core.add_background_bytes(None, theme.slug, data,
                                                    name=f"pasted-image{ext}")
-            theme_core.notify("Wallpaper added",
+            theme_core.notify(_("Wallpaper added"),
                               f"{dest.name} → {theme_core.plain_text(theme.name)}")
         except (ValueError, OSError) as add_error:
-            theme_core.notify("Could not add wallpaper", str(add_error))
+            theme_core.notify(_("Could not add wallpaper"), str(add_error))
             return
         self.refresh_wallpapers()
 
     def after_paste_files(self, paths, error: Exception | None):
         if error is not None or not paths:
-            theme_core.notify("No image in the clipboard",
-                              "Copy an image first (in the browser or the file manager).")
+            theme_core.notify(_("No image in the clipboard"),
+                              _("Copy an image first (in the browser or the file manager)."))
             return
         self.add_files(paths)
 
@@ -3507,7 +3591,7 @@ class ThemeManager(Gtk.Application):
                     stream, _mime = drop.read_finish(result)
                 except GLib.Error:
                     done(False)
-                    theme_core.notify("Nothing added", "The image could not be read.")
+                    theme_core.notify(_("Nothing added"), _("The image could not be read."))
                     return
                 name = theme_core.offered_file_name(mime) or "dropped-image"
                 self.read_stream(stream, theme_core.MAX_BACKGROUND_BYTES,
@@ -3523,13 +3607,13 @@ class ThemeManager(Gtk.Application):
                 stream, _mime = drop.read_finish(result)
             except GLib.Error:
                 done(False)
-                theme_core.notify("Nothing added", "The drop could not be read.")
+                theme_core.notify(_("Nothing added"), _("The drop could not be read."))
                 return
 
             def got_data(data):
                 done(data is not None)
                 if data is None:
-                    theme_core.notify("Nothing added", "The dropped file list was too long or too slow.")
+                    theme_core.notify(_("Nothing added"), _("The dropped file list was too long or too slow."))
                     return
                 self.drop_value(data.decode("utf-8", "replace"))
             self.read_stream(stream, MAX_DROP_LIST_BYTES, got_data, timeout_s=DROP_LIST_TIMEOUT)
@@ -3585,14 +3669,14 @@ class ThemeManager(Gtk.Application):
         if theme is None:
             return
         if data is None:
-            theme_core.notify("Nothing added", "The image could not be read (or is over 50 MiB).")
+            theme_core.notify(_("Nothing added"), _("The image could not be read (or is over 50 MiB)."))
             return
         try:
             dest = theme_core.add_background_data(None, theme.slug, data, name=name)
         except (ValueError, OSError) as error:
-            theme_core.notify("Could not add wallpaper", str(error))
+            theme_core.notify(_("Could not add wallpaper"), str(error))
             return
-        theme_core.notify("Wallpaper added", f"{dest.name} → {theme_core.plain_text(theme.name)}")
+        theme_core.notify(_("Wallpaper added"), f"{dest.name} → {theme_core.plain_text(theme.name)}")
         self.refresh_wallpapers()
 
     def drop_value(self, value) -> bool:
@@ -3601,7 +3685,7 @@ class ThemeManager(Gtk.Application):
             return False
         paths = dropped_paths(value) if value is not None else []
         if not paths:
-            theme_core.notify("Nothing added", "Drop local image files (JPG, PNG, WebP, GIF, BMP, HEIC).")
+            theme_core.notify(_("Nothing added"), _("Drop local image files (JPG, PNG, WebP, GIF, BMP, HEIC)."))
             return False
         return self.add_files(paths)
 
@@ -3627,10 +3711,10 @@ class ThemeManager(Gtk.Application):
     def after_drop(self, result, error: Exception | None):
         added, errors = result if result is not None else ([], [str(error)])
         if added:
-            theme_core.notify(f"Wallpaper{'s' if len(added) > 1 else ''} added",
+            theme_core.notify(ngettext("Wallpaper added", "Wallpapers added", len(added)),
                               ", ".join(added[:5]) + ("…" if len(added) > 5 else ""))
         if errors:
-            theme_core.notify("Some files were skipped",
+            theme_core.notify(_("Some files were skipped"),
                               "; ".join(errors[:3]) + ("…" if len(errors) > 3 else ""))
         self.refresh_wallpapers()
 
@@ -3896,6 +3980,9 @@ class ThemeManager(Gtk.Application):
         self.move_to(self.position)
         self.window.present()
         self.select_row(self.rows.get_selected_row())
+        # Restarted after a language change: back on the settings page.
+        if os.environ.pop("THEME_MANAGER_PAGE", "") == "settings":
+            GLib.idle_add(self.open_settings)
 
     # --- moving the popup -----------------------------------------------------
 

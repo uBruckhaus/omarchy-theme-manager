@@ -29,6 +29,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import theme_core
+from i18n import _
 
 SITE = "https://omarchy.org"
 CATALOG_URL = SITE + "/themes/"
@@ -118,7 +119,7 @@ def load_catalog(force: bool = False) -> tuple[list[CatalogTheme], float]:
         return themes, now
     if cached:
         return cached, fetched_at
-    raise OSError("could not load the theme list from omarchy.org")
+    raise OSError(_("could not load the theme list from omarchy.org"))
 
 
 def preview_path(theme: CatalogTheme) -> Path:
@@ -148,17 +149,17 @@ def install(theme: CatalogTheme, roots: theme_core.Roots | None = None) -> Path:
     roots = roots or theme_core.default_roots()
     slug = slug_for_repo(theme.repo)
     if slug is None or slug != theme.slug:
-        raise ValueError(f"not a GitHub theme repository: {theme.repo}")
+        raise ValueError(_("not a GitHub theme repository: {0}").format(theme.repo))
     dest = roots.user_themes / slug
     if dest.exists() or dest.is_symlink():
-        raise FileExistsError(f"a theme named “{slug}” is already installed")
-    _, ok = theme_core.read_bounded_output(["omarchy-git-url-check", theme.repo],
+        raise FileExistsError(_("a theme named “{0}” is already installed").format(slug))
+    _out, ok = theme_core.read_bounded_output(["omarchy-git-url-check", theme.repo],
                                            max_bytes=65536, timeout=10.0)
     if not ok:
-        raise ValueError(f"Omarchy refuses this repository URL: {theme.repo}")
+        raise ValueError(_("Omarchy refuses this repository URL: {0}").format(theme.repo))
     roots.user_themes.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"}
-    _, ok = theme_core.read_bounded_output(
+    _out, ok = theme_core.read_bounded_output(
         ["git", "clone", "--depth", "1", "--quiet", "--", theme.repo, str(dest)],
         max_bytes=theme_core.MAX_COMMAND_OUTPUT_BYTES, timeout=CLONE_TIMEOUT, env=env)
     if not ok:
@@ -166,7 +167,7 @@ def install(theme: CatalogTheme, roots: theme_core.Roots | None = None) -> Path:
         if dest.is_dir() and not dest.is_symlink() and \
                 dest.resolve().is_relative_to(roots.user_themes.resolve()):
             shutil.rmtree(dest, ignore_errors=True)
-        raise OSError(f"git clone failed for {theme.repo}")
+        raise OSError(_("git clone failed for {0}").format(theme.repo))
     return dest
 
 

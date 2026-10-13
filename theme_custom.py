@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import theme_core
+from i18n import _, N_
 
 MARKER = "theme-manager.json"
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -47,11 +48,11 @@ SHADE_KEYS = ("dark_background", "darker_background", "lighter_background",
 BRIGHT_KEYS = tuple(f"bright_{k}" for k in ("red", "yellow", "green", "cyan", "blue", "magenta"))
 KNOWN_KEYS = MAIN_KEYS + SHADE_KEYS + PALETTE_KEYS + BRIGHT_KEYS
 LABELS = {
-    "background": "Background", "foreground": "Text", "accent": "Accent",
-    "selection": "Selection", "muted": "Muted text",
-    "dark_background": "Background, darker", "darker_background": "Background, darkest",
-    "lighter_background": "Background, lighter", "dark_foreground": "Text, dim",
-    "light_foreground": "Text, soft", "bright_foreground": "Text, bright",
+    "background": N_("Background"), "foreground": N_("Text"), "accent": N_("Accent"),
+    "selection": N_("Selection"), "muted": N_("Muted text"),
+    "dark_background": N_("Background, darker"), "darker_background": N_("Background, darkest"),
+    "lighter_background": N_("Background, lighter"), "dark_foreground": N_("Text, dim"),
+    "light_foreground": N_("Text, soft"), "bright_foreground": N_("Text, bright"),
 }
 DEFAULTS = {
     "background": "#1e1e2e", "foreground": "#cdd6f4", "accent": "#89b4fa", "selection": "#45475a",
@@ -61,7 +62,7 @@ DEFAULTS = {
 
 
 def label(key: str) -> str:
-    return LABELS.get(key) or key.replace("bright_", "bright ").replace("_", " ").capitalize()
+    return _(LABELS[key]) if key in LABELS else key.replace("bright_", "bright ").replace("_", " ").capitalize()
 
 
 # --- colors ---------------------------------------------------------------------
@@ -148,7 +149,7 @@ def parse_colors(text: str) -> Palette:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        raise ValueError(f"colors.toml is not valid TOML: {error}") from error
+        raise ValueError(_("colors.toml is not valid TOML: {0}").format(error)) from error
     colors, extras = {}, {}
     for key, value in data.items():
         if not isinstance(value, str) or not re.match(r"^[a-z][a-z0-9_]{0,40}$", key) or key == "mode":
@@ -181,7 +182,7 @@ def load_palette(theme) -> Palette:
     path = Path(theme.path) / "colors.toml"
     try:
         if path.stat().st_size > MAX_COLORS_BYTES:
-            raise ValueError("colors.toml is too large")
+            raise ValueError(_("colors.toml is too large"))
         return parse_colors(path.read_text("utf-8", "replace"))
     except FileNotFoundError:
         return parse_colors("")
@@ -209,14 +210,14 @@ def image_pixels(path, size: int = 64) -> list[tuple[float, float, float]]:
     """The picture scaled down to about size×size, as RGB triples 0..1.
     The header is checked first, like everywhere else."""
     if theme_core.image_size_problem(path):
-        raise ValueError("the image is too large to read")
+        raise ValueError(_("the image is too large to read"))
     import gi
     gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import GdkPixbuf, GLib
     try:
         image = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), size, size, True)
     except GLib.Error as error:
-        raise ValueError(f"cannot read the image: {error.message}") from error
+        raise ValueError(_("cannot read the image: {0}").format(error.message)) from error
     data = image.get_pixels()
     channels, stride = image.get_n_channels(), image.get_rowstride()
     pixels = []
@@ -228,7 +229,7 @@ def image_pixels(path, size: int = 64) -> list[tuple[float, float, float]]:
                 continue   # transparent
             pixels.append((data[i] / 255, data[i + 1] / 255, data[i + 2] / 255))
     if not pixels:
-        raise ValueError("the image has no visible pixels")
+        raise ValueError(_("the image has no visible pixels"))
     return pixels
 
 
@@ -349,7 +350,7 @@ def slug_for(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)[:MAX_NAME].strip("-")
     if not slug:
-        raise ValueError("give the theme a name (letters or digits)")
+        raise ValueError(_("give the theme a name (letters or digits)"))
     return slug
 
 
@@ -503,9 +504,9 @@ def create_theme(base, name: str, palette: Palette, font: str | None,
     roots = roots or theme_core.default_roots()
     slug = theme_core._validate_slug(slug_for(name))
     if font is not None and not FONT_RE.match(font):
-        raise ValueError("bad font name")
+        raise ValueError(_("bad font name"))
     if any(t.slug == slug for t in theme_core.discover_themes(roots)):
-        raise FileExistsError(f"a theme called {theme_core.display_name(slug)} already exists")
+        raise FileExistsError(_("a theme called {0} already exists").format(theme_core.display_name(slug)))
     roots.user_themes.mkdir(parents=True, exist_ok=True)
     directory = roots.user_themes / slug
     directory.mkdir(mode=0o755)   # fails if it appeared in between: never write into a foreign folder
@@ -529,9 +530,9 @@ def update_theme(theme, palette: Palette, font: str | None) -> None:
     """Save new colors and font into a custom theme made by Theme Manager."""
     marker = marker_of(theme)
     if marker is None or theme_core.theme_from_git(Path(theme.path)):
-        raise PermissionError("only themes made with Theme Manager can be edited here")
+        raise PermissionError(_("only themes made with Theme Manager can be edited here"))
     if font is not None and not FONT_RE.match(font):
-        raise ValueError("bad font name")
+        raise ValueError(_("bad font name"))
     directory = Path(theme.path)
     base = marker.get("base") if isinstance(marker.get("base"), str) else "?"
     theme_core._atomic_write(directory / "colors.toml",
@@ -548,19 +549,19 @@ def rename_theme(theme, new_name: str, roots: theme_core.Roots | None = None) ->
     import theme_auto   # (theme_auto imports this module)
     roots = roots or theme_core.default_roots()
     if not is_custom(theme):
-        raise PermissionError("only themes made with Theme Manager can be renamed here")
+        raise PermissionError(_("only themes made with Theme Manager can be renamed here"))
     old = theme_core._validate_slug(theme.slug)
     new = theme_core._validate_slug(slug_for(new_name))
     if new == old:
         return old
     if any(t.slug == new for t in theme_core.discover_themes(roots)):
-        raise FileExistsError(f"a theme called {theme_core.display_name(new)} already exists")
+        raise FileExistsError(_("a theme called {0} already exists").format(theme_core.display_name(new)))
     source = roots.user_themes / old
     if source.is_symlink() or not source.is_dir():
-        raise PermissionError("not a theme folder of yours")
+        raise PermissionError(_("not a theme folder of yours"))
     old_walls, new_walls = roots.user_backgrounds / old, roots.user_backgrounds / new
     if new_walls.exists() or new_walls.is_symlink():
-        raise FileExistsError(f"{new_walls} already exists")
+        raise FileExistsError(_("{0} already exists").format(new_walls))
     os.rename(source, roots.user_themes / new)
     if old_walls.is_dir() and not old_walls.is_symlink():
         os.rename(old_walls, new_walls)

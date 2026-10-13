@@ -26,6 +26,9 @@ sys.path.insert(0, str(PLUGIN_DIR))
 
 import theme_core  # noqa: E402
 import theme_popup  # noqa: E402
+import i18n  # noqa: E402
+
+i18n._lang = "en"  # the assertions below read English texts
 
 from images import gif, jpeg, png
 

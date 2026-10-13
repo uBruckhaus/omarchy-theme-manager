@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import theme_core
+from i18n import _
 
 API = "https://wallhaven.cc/api/v1/search"
 SOURCE = "wallhaven.cc"
@@ -111,7 +112,7 @@ def search(query: str, page: int = 1) -> tuple[list[WebWallpaper], int]:
         return [], 0
     raw = theme_core.fetch_https(search_url(query, page), MAX_API_BYTES)
     if raw is None:
-        raise OSError("wallhaven.cc did not answer")
+        raise OSError(_("wallhaven.cc did not answer"))
     return parse_results(raw)
 
 
@@ -188,14 +189,14 @@ def already_added(roots: theme_core.Roots | None, slug: str, result: WebWallpape
 def download(roots: theme_core.Roots | None, slug: str, result: WebWallpaper) -> Path:
     """Download the full image into the theme's user wallpaper folder."""
     if not FULL_RE.match(result.full):
-        raise ValueError("unexpected image address")
+        raise ValueError(_("unexpected image address"))
     if already_added(roots, slug, result):
-        raise FileExistsError(f"{result.file_name} is already in this theme")
+        raise FileExistsError(_("{0} is already in this theme").format(result.file_name))
     if result.file_size > theme_core.MAX_BACKGROUND_BYTES:
-        raise ValueError("image too large (max 50 MiB)")
+        raise ValueError(_("image too large (max 50 MiB)"))
     data = theme_core.fetch_https(result.full, theme_core.MAX_BACKGROUND_BYTES, timeout=60.0)
     if not data or not theme_core.is_image_data(data):
-        raise OSError("the image could not be downloaded")
+        raise OSError(_("the image could not be downloaded"))
     return theme_core.add_background_bytes(roots, slug, data, name=result.file_name)
 
 

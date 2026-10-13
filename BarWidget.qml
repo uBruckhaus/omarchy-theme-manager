@@ -4,6 +4,7 @@ import Quickshell.Io
 import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
+import "I18n.js" as I18n
 
 BarWidget {
   id: root
@@ -17,6 +18,11 @@ BarWidget {
   // What settings.json switches on (all off by default).
   property bool workspaceWallpapers: false
   property bool timed: false
+  // Interface language: the one picked in Theme Manager's settings, else the system's.
+  property string languageSetting: "auto"
+  readonly property string systemLang: I18n.systemLanguage(Quickshell.env("LC_ALL"), Quickshell.env("LC_MESSAGES"), Quickshell.env("LANG"))
+  readonly property string lang: I18n.resolve(languageSetting, systemLang)
+  function t(key, args) { return I18n.tr(lang, key, args) }
   // The bar exists once per monitor: only the first monitor's widget
   // follows workspaces and runs the timer (the helper is idempotent anyway).
   readonly property bool primary: !root.QsWindow.window || !root.QsWindow.window.screen
@@ -40,6 +46,7 @@ BarWidget {
     workspaceWallpapers = data.workspace_wallpapers === true
     timed = (typeof data.slideshow_minutes === "number" && data.slideshow_minutes > 0)
       || (!!data.schedule && data.schedule.enabled === true)
+    languageSetting = typeof data.language === "string" ? data.language : "auto"
   }
 
   // One helper run at a time; while one runs, only the latest request waits.
@@ -118,7 +125,7 @@ BarWidget {
     // uses for Style → Theme. Nerd Fonts carry it; FontAwesome-5 code points
     // such as U+F53F are missing from the bar font and render as tofu.
     text: "\u{F0E0C}"
-    tooltipText: "Theme Manager · scroll: wallpaper · right-click: favorites"
+    tooltipText: root.t("tip")
 
     onPressed: function(mouseButton) {
       if (!root.bar) return
@@ -153,7 +160,7 @@ BarWidget {
 
       Text {
         textFormat: Text.PlainText
-        text: root.menuSource === "favorites" ? "Favorite themes" : "Recently used themes"
+        text: root.menuSource === "favorites" ? root.t("favorites") : root.t("recent")
         color: Color.popups.text
         font.family: Style.font.family
         font.pixelSize: Style.font.body
@@ -165,7 +172,7 @@ BarWidget {
         visible: root.menuThemes.length === 0
         width: parent.width
         wrapMode: Text.WordWrap
-        text: "No favorites yet: add some with ★ in a theme's menu in Theme Manager."
+        text: root.t("noFavorites")
         color: Qt.darker(Color.popups.text, 1.4)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -195,7 +202,7 @@ BarWidget {
         width: menuColumn.width
         leftAlign: true
         iconText: ""
-        text: "Next wallpaper"
+        text: root.t("nextWallpaper")
         foreground: Color.popups.text
         fontSize: Style.font.bodySmall
         iconSize: Style.font.bodySmall
@@ -206,7 +213,7 @@ BarWidget {
         width: menuColumn.width
         leftAlign: true
         iconText: ""
-        text: "Open Theme Manager"
+        text: root.t("open")
         foreground: Color.popups.text
         fontSize: Style.font.bodySmall
         iconSize: Style.font.bodySmall

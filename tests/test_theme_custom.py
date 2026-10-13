@@ -11,6 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import theme_core
 import theme_custom
+import i18n  # noqa: E402
+
+i18n._lang = "en"  # the assertions below read English texts
 from images import png
 
 REAL_SET_FONT = theme_custom.set_font
