@@ -49,6 +49,17 @@ MAX_FIELD_CHARS = 200                     # longest text a search field holds
 # loaders allocate the full canvas (every frame for animations) up front.
 MAX_IMAGE_SIDE = 16384
 MAX_IMAGE_PIXELS = 64_000_000             # width × height × frames, ~256 MiB RGBA
+# PNG metadata: Qt's PNG reader (the shell's background renderer) inflates and
+# keeps every text chunk before it allocates pixels, so repeated compressed
+# chunks are a memory bomb that the pixel cap does not see. zlib expands at
+# most ~1032:1, so 32 KiB of compressed metadata stays under ~33 MiB.
+PNG_MAX_TEXT_CHUNKS = 32
+PNG_MAX_COMPRESSED_METADATA = 32 * 1024   # zTXt + compressed iTXt + iCCP, in file bytes
+PNG_MAX_CHUNKS = 1_000_000                # walk budget; chunks are skipped by length
+# Kept when an imported PNG is stored: pixels, palette and colour handling only.
+PNG_KEEP_CHUNKS = {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM",
+                   b"sRGB", b"iCCP", b"sBIT", b"bKGD", b"pHYs"}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PREVIEW_NAMES = ("preview.png", "preview.jpg", "preview.jpeg",
                  "preview.webp", "preview.gif", "preview.bmp")
 
@@ -610,11 +621,40 @@ def _copy_bounded(source: Path, dest: Path) -> None:
 
 def _require_sane_size(dest: Path) -> None:
     """Remove a just-stored image whose header declares a canvas too large to
-    decode safely, and say why."""
+    decode safely, and say why. A PNG first loses its text and other
+    metadata chunks (rewritten in place, on our own copy)."""
+    try:
+        with open(dest, "rb") as handle:
+            if handle.read(8) == PNG_SIGNATURE:
+                handle.seek(0)
+                data = handle.read(MAX_BACKGROUND_BYTES + 1)
+                if len(data) > MAX_BACKGROUND_BYTES:
+                    raise ValueError("image too large (max 50 MiB)")
+                clean = strip_png_metadata(data)
+                if clean != data:
+                    _replace_bytes(dest, clean)
+    except (OSError, ValueError):
+        dest.unlink(missing_ok=True)
+        raise
     problem = image_size_problem(dest)
     if problem:
         dest.unlink(missing_ok=True)
         raise ValueError(problem)
+
+
+def _replace_bytes(dest: Path, data: bytes) -> None:
+    """Atomically replace our own stored file with `data`."""
+    fd, tmp = tempfile.mkstemp(prefix=".tm-", dir=dest.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def add_background_file(roots: Roots | None, slug: str, source: str | Path) -> Path:
@@ -685,6 +725,8 @@ def add_background_bytes(roots: Roots | None, slug: str, data: bytes,
     name = _sanitize_name(name)
     if not _is_image_name(name):
         raise ValueError(f"not an image: {name}")
+    if data[:8] == PNG_SIGNATURE:
+        data = strip_png_metadata(data)
     check_image_size(data)
     dest = _unique_dest(roots, slug, name)
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
@@ -882,7 +924,10 @@ def _leave_hidden_background(roots: Roots, slug: str, staged: Path, set_backgrou
 
 
 def set_desktop_background(path: Path) -> bool:
-    """Through Omarchy's own command (argv, no shell)."""
+    """Through Omarchy's own command (argv, no shell). The shell decodes the
+    image, so it gets the same checks as a preview."""
+    if image_size_problem(path):
+        return False
     _, ok = read_bounded_output(["omarchy-theme-bg-set", str(path)], max_bytes=65536, timeout=10.0)
     return ok
 
@@ -1451,18 +1496,102 @@ def _heif_item_data(handle, meta: bytes, boxes: dict, items: list[int]) -> dict[
     return out
 
 
+def _png_chunks(data: bytes):
+    """``(type, start, end)`` of each PNG chunk (end includes the CRC), up to
+    and including IEND. Raises ValueError for a damaged chunk list."""
+    pos, count = 8, 0
+    while True:
+        count += 1
+        if count > PNG_MAX_CHUNKS or pos + 8 > len(data):
+            raise ValueError("damaged PNG")
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        kind = bytes(data[pos + 4:pos + 8])
+        end = pos + 12 + length
+        if length > 0x7FFFFFFF or end > len(data):
+            raise ValueError("damaged PNG")
+        yield kind, pos, end
+        if kind == b"IEND":
+            return
+        pos = end
+
+
+def _png_metadata_problem(handle) -> str | None:
+    """Why a PNG's metadata chunks must not reach a decoder, or None. Walks
+    chunk headers by length (seeking past the data); reads only the two
+    bytes that say whether an iTXt chunk is compressed."""
+    handle.seek(8)
+    texts = compressed = chunks = 0
+    while True:
+        chunks += 1
+        if chunks > PNG_MAX_CHUNKS:
+            return "PNG has too many chunks"
+        head = handle.read(8)
+        if len(head) < 8:
+            return "damaged PNG"
+        length, kind = int.from_bytes(head[:4], "big"), head[4:]
+        if length > 0x7FFFFFFF:
+            return "damaged PNG"
+        start = handle.tell()
+        if kind in (b"tEXt", b"zTXt", b"iTXt"):
+            texts += 1
+            if kind == b"zTXt":
+                compressed += length
+            elif kind == b"iTXt":
+                keyword = handle.read(min(length, 81))
+                nul = keyword.find(b"\x00")
+                if nul >= 0 and nul + 1 < len(keyword) and keyword[nul + 1] == 1:
+                    compressed += length
+        elif kind == b"iCCP":
+            compressed += length
+        if texts > PNG_MAX_TEXT_CHUNKS:
+            return "PNG has too many text chunks"
+        if compressed > PNG_MAX_COMPRESSED_METADATA:
+            return "PNG has too much compressed metadata"
+        if kind == b"IEND":
+            return None
+        handle.seek(start + length + 4)
+
+
+def strip_png_metadata(data: bytes) -> bytes:
+    """The PNG with only pixel, palette and colour chunks (`PNG_KEEP_CHUNKS`,
+    at most one small iCCP); text, EXIF and unknown chunks are dropped, as is
+    anything after IEND. Pixels are copied byte for byte, never decoded."""
+    data = bytes(data)
+    if data[:8] != PNG_SIGNATURE:
+        raise ValueError("not a PNG")
+    out = [PNG_SIGNATURE]
+    have_iccp = False
+    for kind, start, end in _png_chunks(data):
+        if kind not in PNG_KEEP_CHUNKS:
+            continue
+        if kind == b"iCCP":
+            if have_iccp or end - start - 12 > PNG_MAX_COMPRESSED_METADATA:
+                continue
+            have_iccp = True
+        out.append(data[start:end])
+    return b"".join(out)
+
+
 def image_size_problem(source) -> str | None:
     """Why an image must not be decoded, or None if its header declares a
-    sane size. ``source`` is a path or image bytes. Only the header and
-    block lengths are read, so this is cheap even for a crafted file."""
+    sane size (and, for a PNG, its metadata chunks are within budget).
+    ``source`` is a path or image bytes. Only headers and block lengths are
+    read, so this is cheap even for a crafted file."""
     try:
         if isinstance(source, (bytes, bytearray, memoryview)):
-            size = _image_header_size(io.BytesIO(bytes(source)))
+            handle = io.BytesIO(bytes(source))
+            size = _image_header_size(handle)
+            meta = _png_metadata_problem(handle) if size and bytes(source[:8]) == PNG_SIGNATURE else None
         else:
             with open(source, "rb") as handle:
                 size = _image_header_size(handle)
+                handle.seek(0)
+                png = handle.read(8) == PNG_SIGNATURE
+                meta = _png_metadata_problem(handle) if size and png else None
     except (OSError, ValueError):
         return "unreadable image"
+    if meta:
+        return meta
     if size is None:
         return "not a supported image (JPG, PNG, WebP, GIF, BMP)"
     width, height, frames = size

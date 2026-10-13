@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import theme_core
-from images import bmp, gif, heif, jpeg, png, webp
+from images import bmp, gif, heif, itxt, jpeg, png, png_chunk, webp, ztxt
 
 
 def make_roots(tmp: Path) -> theme_core.Roots:
@@ -229,6 +229,62 @@ class WallpaperTests(unittest.TestCase):
             theme_core.add_background_data(self.roots, "nord", gif(1920, 1080, frames=40))
         nord = self.roots.user_backgrounds / "nord"
         self.assertFalse(nord.exists() and any(nord.iterdir()))
+
+    def test_png_metadata_bombs_are_refused(self):
+        # 200 zTXt chunks of 8 MiB each: ~1.6 GiB inflated, ~1.6 MiB on disk.
+        one = ztxt(8 * 1024 * 1024)
+        bombs = {
+            "repeated zTXt": png(64, 64, one * 200),
+            "compressed iTXt": png(64, 64, itxt(b"A" * (8 << 20), compressed=True) * 200),
+            "huge iCCP": png(64, 64, png_chunk(b"iCCP", b"icc\x00\x00" + __import__("os").urandom(40000))),
+            "many tEXt": png(64, 64, png_chunk(b"tEXt", b"k\x00v") * 40),
+        }
+        for label, data in bombs.items():
+            with self.subTest(label):
+                self.assertIsNotNone(theme_core.image_size_problem(data))
+                path = Path(self.tmp.name) / "bomb.png"
+                path.write_bytes(data)
+                self.assertIsNotNone(theme_core.image_size_problem(path))
+                self.assertFalse(theme_core.show_background(path))
+                self.assertFalse(theme_core.set_desktop_background(path))
+        # Ordinary metadata (a few small text chunks, small profile) is fine.
+        normal = png(64, 64, png_chunk(b"tEXt", b"Software\x00GIMP") + ztxt(4096)
+                     + itxt(b"<x:xmpmeta/>" * 200))
+        self.assertIsNone(theme_core.image_size_problem(normal))
+
+    def test_damaged_png_chunk_lists_are_refused(self):
+        good = png(8, 8)
+        for data in (good[:-6], good[:33] + b"\xff\xff\xff\xffIDAT", good[:-12]):
+            with self.subTest(data=data[-12:]):
+                self.assertIsNotNone(theme_core.image_size_problem(data))
+
+    def test_imported_pngs_are_stored_without_metadata(self):
+        import zlib
+        data = png(8, 8, ztxt(1024) + itxt(b"<x/>") + png_chunk(b"tEXt", b"k\x00v")
+                   + png_chunk(b"eXIf", b"MM\x00*") + png_chunk(b"zzZz", b"unknown")
+                   + png_chunk(b"pHYs", b"\x00\x00\x0b\x13\x00\x00\x0b\x13\x01")) + b"trailing junk"
+        src = Path(self.tmp.name) / "photo.png"
+        src.write_bytes(data)
+        stored = [theme_core.add_background_file(self.roots, "nord", src),
+                  theme_core.add_background_bytes(self.roots, "nord", data, name="pasted.png"),
+                  theme_core.add_background_data(self.roots, "nord", data, name="dragged")]
+        for path in stored:
+            with self.subTest(path=path.name):
+                out = path.read_bytes()
+                kinds = [kind for kind, _s, _e in theme_core._png_chunks(out)]
+                self.assertEqual(kinds, [b"IHDR", b"pHYs", b"IDAT", b"IEND"])
+                self.assertTrue(out.endswith(png_chunk(b"IEND", b"")))
+                # pixels are copied untouched
+                idat = next(out[s + 8:e - 4] for k, s, e in theme_core._png_chunks(out) if k == b"IDAT")
+                self.assertEqual(len(zlib.decompress(idat)), 8 * (1 + 8 * 3))
+                self.assertEqual(oct(path.stat().st_mode & 0o777), "0o644")
+        # a PNG whose chunk list is damaged is not stored at all
+        bad = Path(self.tmp.name) / "bad.png"
+        bad.write_bytes(data[:60])
+        before = set((self.roots.user_backgrounds / "nord").iterdir())
+        with self.assertRaises(ValueError):
+            theme_core.add_background_file(self.roots, "nord", bad)
+        self.assertEqual(set((self.roots.user_backgrounds / "nord").iterdir()), before)
 
     def test_clipboard_text_is_bounded_and_flattened(self):
         calls = []
