@@ -173,5 +173,56 @@ class WriteTests(ShortcutTestCase):
             sc.action_command("next-wallpaper")
 
 
+class PermissionTests(ShortcutTestCase):
+    """A private hyprland.lua must stay private, and nothing we write next to
+    it may be readable by others either."""
+    def mode(self, name):
+        return oct((self.hypr / name).stat().st_mode & 0o777)
+
+    def test_private_config_stays_private(self):
+        (self.hypr / "hyprland.lua").chmod(0o600)
+        sc.save_and_apply({"open": sc.make_combo(["SUPER", "CTRL"], "T")})
+        self.assertEqual(self.mode("hyprland.lua"), "0o600")
+        self.assertEqual(self.mode("hyprland.lua.before-theme-manager-shortcuts"), "0o600")
+        self.assertEqual(self.mode("theme-manager-shortcuts.lua"), "0o600")
+        sc.save_and_apply({})
+        self.assertEqual(self.mode("hyprland.lua"), "0o600")
+
+    def test_old_wide_backup_is_tightened(self):
+        (self.hypr / "hyprland.lua").chmod(0o600)
+        backup = self.hypr / "hyprland.lua.before-theme-manager-shortcuts"
+        backup.write_text("old")
+        backup.chmod(0o644)
+        sc.save_and_apply({"open": sc.make_combo(["SUPER", "CTRL"], "T")})
+        self.assertEqual(self.mode(backup.name), "0o600")
+        self.assertEqual(backup.read_text(), "old")
+
+    def test_rollback_keeps_private_mode(self):
+        (self.hypr / "hyprland.lua").chmod(0o600)
+        sc.save_and_apply({"open": sc.make_combo(["SUPER", "CTRL"], "T")})
+        calls = iter(["", "error: bad bind", ""])
+        self.patch(sc, "config_errors", lambda: next(calls))
+        with self.assertRaises(RuntimeError):
+            sc.save_and_apply({"open": sc.make_combo(["SUPER", "CTRL"], "Y")})
+        self.assertEqual(self.mode("hyprland.lua"), "0o600")
+        self.assertEqual(self.mode("theme-manager-shortcuts.lua"), "0o600")
+
+    def test_symlinked_private_config(self):
+        real = Path(self.tmp.name) / "dotfiles-hyprland.lua"
+        (self.hypr / "hyprland.lua").rename(real)
+        real.chmod(0o600)
+        (self.hypr / "hyprland.lua").symlink_to(real)
+        sc.save_and_apply({"open": sc.make_combo(["SUPER", "CTRL"], "T")})
+        self.assertEqual(self.mode("hyprland.lua"), "0o600")
+        self.assertEqual(self.mode("hyprland.lua.before-theme-manager-shortcuts"), "0o600")
+        self.assertEqual(self.mode("theme-manager-shortcuts.lua"), "0o600")
+
+    def test_normal_config_keeps_0644(self):
+        (self.hypr / "hyprland.lua").chmod(0o644)
+        sc.save_and_apply({"open": sc.make_combo(["SUPER", "CTRL"], "T")})
+        self.assertEqual(self.mode("hyprland.lua"), "0o644")
+        self.assertEqual(self.mode("theme-manager-shortcuts.lua"), "0o644")
+
+
 if __name__ == "__main__":
     unittest.main()

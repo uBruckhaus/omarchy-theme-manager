@@ -981,5 +981,34 @@ class OptInSyncTests(unittest.TestCase):
         self.assertTrue(foreign.exists())
 
 
+class AtomicWriteModeTests(unittest.TestCase):
+    """Rewriting a file never makes it readable to more people than before."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "file"
+
+    def mode(self):
+        return oct(self.path.stat().st_mode & 0o777)
+
+    def test_explicit_wide_mode_does_not_loosen_private_file(self):
+        self.path.write_text("secret")
+        self.path.chmod(0o600)
+        theme_core._atomic_write(self.path, "x", mode=0o644)
+        self.assertEqual(self.mode(), "0o600")
+        theme_core._atomic_write_bytes(self.path, b"x", mode=0o644)
+        self.assertEqual(self.mode(), "0o600")
+
+    def test_new_file_gets_requested_mode(self):
+        theme_core._atomic_write(self.path, "x", mode=0o644)
+        self.assertEqual(self.mode(), "0o644")
+
+    def test_tightening_still_works(self):
+        self.path.write_text("x")
+        self.path.chmod(0o644)
+        theme_core._atomic_write(self.path, "y", mode=0o600)
+        self.assertEqual(self.mode(), "0o600")
+
+
 if __name__ == "__main__":
     unittest.main()

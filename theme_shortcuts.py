@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from pathlib import Path
 
 import theme_core
@@ -332,8 +333,37 @@ def render_lua(state: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _config_mode() -> int:
+    """The permissions of the user's hyprland.lua (0644 if it can't be read):
+    our backup and generated file never expose more than the config itself."""
+    try:
+        return hypr_main().stat().st_mode & 0o777
+    except OSError:
+        return 0o644
+
+
+def _tighten(path: Path) -> None:
+    """Drop permission bits a file has beyond hyprland.lua's (own regular files only)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+            wanted = st.st_mode & _config_mode() & 0o777
+            if wanted != st.st_mode & 0o777:
+                os.fchmod(fd, wanted)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _atomic_write(path: Path, text: str) -> None:
-    theme_core._atomic_write(path, text, mode=0o644)
+    # Existing files keep their mode (theme_core never loosens it); new ones
+    # (the backup, our Lua file) get hyprland.lua's mode.
+    theme_core._atomic_write(path, text, mode=_config_mode())
 
 
 def ensure_required() -> None:
@@ -347,6 +377,8 @@ def ensure_required() -> None:
     backup = main.with_name("hyprland.lua.before-theme-manager-shortcuts")
     if not backup.exists():
         _atomic_write(backup, text)
+    else:
+        _tighten(backup)   # 1.4.0 wrote it 0644 even next to a private config
     suffix = "" if text.endswith("\n") else "\n"
     _atomic_write(main, text + suffix + "\n" + REQUIRE_MARKER + "\n" + REQUIRE_LINE + "\n")
 

@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import re
 import shutil
 import socket
@@ -535,7 +536,20 @@ def preload_switcher(wrapper: str | Path) -> None:
         pass
 
 
+def _keep_private(path: Path, mode: int) -> int:
+    """Never loosen an existing file's permissions: a rewrite gets at most the
+    bits the file already had (an owner-private 0600 file stays 0600)."""
+    try:
+        st = os.stat(path)   # a symlinked config counts with its target's mode
+    except OSError:
+        return mode
+    if not stat.S_ISREG(st.st_mode):
+        return mode
+    return mode & st.st_mode & 0o777
+
+
 def _atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644) -> None:
+    mode = _keep_private(path, mode)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -556,6 +570,7 @@ def _atomic_write(path: Path, text: str, mode: int | None = None) -> None:
             mode = path.stat().st_mode & 0o777
         except OSError:
             mode = 0o644
+    mode = _keep_private(path, mode)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w") as handle:
