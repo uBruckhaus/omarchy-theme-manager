@@ -51,6 +51,7 @@ import theme_catalog
 import theme_core
 import theme_custom
 import theme_shortcuts as shortcuts
+from layer_watch import LayerWatch
 import wallpaper_search
 from palette import ThemePalette
 import pidfile
@@ -249,6 +250,8 @@ class ThemeManager(Gtk.Application):
         self.theme_list = []       # latest discover_themes() result
         self.actions_popover = None
         self.cursor_watch = 0      # GLib source id while the keyboard is held on open
+        # Omarchy's menus (Super + Space, …) open underneath this popup: close for them.
+        self.layer_watch = LayerWatch("theme-manager", self.on_menu_opened)
         self.position = theme_core.window_position()   # None: centered
         self.move_start = ((0, 0), None)
         self.moving = False
@@ -3979,6 +3982,7 @@ class ThemeManager(Gtk.Application):
         self.grab_keyboard()
         self.move_to(self.position)
         self.window.present()
+        self.layer_watch.start()
         self.select_row(self.rows.get_selected_row())
         # Restarted after a language change: back on the settings page.
         if os.environ.pop("THEME_MANAGER_PAGE", "") == "settings":
@@ -4088,7 +4092,13 @@ class ThemeManager(Gtk.Application):
             self.cursor_watch = 0
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
 
+    def on_menu_opened(self, _name):
+        """Another menu wants the keyboard: get out of its way at once."""
+        if self.window is not None and self.window.is_visible():
+            self.close()
+
     def close(self):
+        self.layer_watch.stop()
         self.stop_preview()
         if self.stack.get_visible_child_name() == "shortcut":
             self.close_shortcut_page()
