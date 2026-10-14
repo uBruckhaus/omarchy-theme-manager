@@ -580,6 +580,39 @@ class ViewLayerTest(unittest.TestCase):
         settings = theme_popup.Gtk.Settings.get_default()
         self.assertFalse(settings.get_property("gtk-enable-primary-paste"))
 
+    def test_color_chooser_fields_never_use_gtks_unbounded_paste(self):
+        """The hex field and spin buttons GTK puts inside its color chooser
+        get the same bounded paste and no drop target of their own."""
+        Gtk = theme_popup.Gtk
+        chooser = Gtk.ColorChooserWidget(use_alpha=False)
+        texts = []
+        stack = [chooser]
+        while stack:
+            widget = stack.pop()
+            if isinstance(widget, Gtk.Text):
+                texts.append(widget)
+            child = widget.get_first_child()
+            while child is not None:
+                stack.append(child)
+                child = child.get_next_sibling()
+        self.assertTrue(texts, "GTK's color editor should contain a hex field")
+        self.assertEqual(self.app.guard_text_fields_in(chooser), len(texts))
+        orig = theme_core.clipboard_text
+        reads = []
+        theme_core.clipboard_text = lambda **kw: reads.append(1) or "#3a6ea5"
+        try:
+            for text in texts:
+                self.assertEqual(text.get_max_length(), theme_core.MAX_FIELD_CHARS)
+                controllers = text.observe_controllers()
+                kinds = {type(controllers.get_item(i)).__name__ for i in range(controllers.get_n_items())}
+                self.assertFalse(kinds & {"DropTarget", "DropTargetAsync"})
+                text.set_text("")
+                text.emit("paste-clipboard")
+                self.assertTrue(self.pump_until(lambda: text.get_text() == "#3a6ea5"))
+        finally:
+            theme_core.clipboard_text = orig
+        self.assertEqual(len(reads), len(texts))
+
     def test_oversized_clipboard_text_is_refused(self):
         orig = theme_core.clipboard_text
         theme_core.clipboard_text = lambda **kw: None

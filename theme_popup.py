@@ -300,8 +300,9 @@ class ThemeManager(Gtk.Application):
     def guard_text_field(self, entry):
         """Route every way text can enter a search field from another client
         through bounded reads. GTK's own paste, middle-click paste and text
-        drops buffer the whole offer in memory with no limit or deadline."""
-        text = entry.get_delegate()
+        drops buffer the whole offer in memory with no limit or deadline.
+        `entry` is a Gtk.Entry/SearchEntry/SpinButton or a bare Gtk.Text."""
+        text = entry.get_delegate() or entry
         text.set_max_length(theme_core.MAX_FIELD_CHARS)
         # Ctrl+V, Shift+Insert and the context menu's Paste all emit this.
         text.connect("paste-clipboard", self.on_field_paste, entry)
@@ -318,6 +319,23 @@ class ThemeManager(Gtk.Application):
             controller = controllers.get_item(i)
             if isinstance(controller, (Gtk.DropTarget, Gtk.DropTargetAsync)):
                 text.remove_controller(controller)
+
+    def guard_text_fields_in(self, root):
+        """guard_text_field for every text field inside a widget GTK builds
+        itself (the color chooser's hex field and its H/S/V spin buttons)."""
+        guarded = 0
+        stack = [root]
+        while stack:
+            widget = stack.pop()
+            if isinstance(widget, Gtk.Text):
+                self.guard_text_field(widget)
+                guarded += 1
+                continue
+            child = widget.get_first_child()
+            while child is not None:
+                stack.append(child)
+                child = child.get_next_sibling()
+        return guarded
 
     def on_field_paste(self, text, entry):
         text.stop_emission_by_name("paste-clipboard")
@@ -400,17 +418,33 @@ class ThemeManager(Gtk.Application):
         header = Gtk.Box(spacing=8)
         title = Gtk.Label(label="Theme Manager")
         title.set_ellipsize(Pango.EllipsizeMode.END)
-        title.set_max_width_chars(1)
+        title.set_max_width_chars(30)   # a long filter query must not widen the card
         self.title_label = title
         title.add_css_class("tm-title")
-        title.set_hexpand(True)
-        title.set_xalign(0)   # fill the header (START would shrink it to its 1-char natural width)
+        title.set_xalign(0)
         header.append(title)
+        # Small, centred between the title and the header buttons: what a
+        # double-click on the header does at this size. No natural width of
+        # its own (the full text would widen the card): it takes the room
+        # left and ends in "…".
+        mouse_hint = Gtk.Label(xalign=0.5)
+        mouse_hint.add_css_class("tm-header-hint")
+        mouse_hint.set_ellipsize(Pango.EllipsizeMode.END)
+        mouse_hint.set_max_width_chars(1)
+        mouse_hint.set_hexpand(True)
+        mouse_hint.set_margin_start(6)
+        mouse_hint.set_margin_end(6)
+        header.append(mouse_hint)
+        self.mouse_hint = mouse_hint
         # Dragging the title bar moves the popup (a layer surface: placed by
-        # margins; Hyprland keeps Super + drag for itself). Double-click the
-        # title to center it again.
+        # margins; Hyprland keeps Super + drag for itself). Double-click:
+        # see on_header_double_click.
         header.set_cursor_from_name("grab")
-        title.set_tooltip_text(_("Drag to move · double-click: default size, centered"))
+        title.set_tooltip_text(_("Drag to move"))
+        right_clicks = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        right_clicks.connect("pressed", lambda _g, count, _x, _y: count == 2
+                             and self.on_header_double_click(Gdk.BUTTON_SECONDARY))
+        header.add_controller(right_clicks)
         mover = Gtk.GestureDrag()
         mover.connect("drag-begin", self.on_move_begin)
         mover.connect("drag-update", self.on_move_update)
@@ -778,6 +812,7 @@ class ThemeManager(Gtk.Application):
         if self.window is not None:
             # A layer surface does not shrink by itself once content gets smaller.
             self.window.set_default_size(1, 1)
+        self.update_mouse_hint()
         if save:
             default = (self.card_w, self.list_h) == (CARD_WIDTH, LIST_HEIGHT)
             try:
@@ -1685,6 +1720,9 @@ class ThemeManager(Gtk.Application):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 chooser = Gtk.ColorChooserWidget(use_alpha=False)
+            # Its custom-color editor has its own hex field (and spin
+            # buttons): paste and drops there go through the bounded reads too.
+            self.guard_text_fields_in(chooser)
             color = Gdk.RGBA()
             color.parse(self.ed["palette"].get(key))
             chooser.set_rgba(color)
@@ -2074,6 +2112,7 @@ class ThemeManager(Gtk.Application):
         .tm-menu-item.destructive:focus {{ background: {red_hex}; }}
         .tm-menu-item.destructive:focus label, .tm-menu-item.destructive:focus image {{ color: #ffffff; }}
         .tm-menu-item:disabled {{ opacity: 0.5; }}
+        .tm-header-hint {{ font-size: 10px; color: {dim_hex}; }}
         .tm-grip {{ color: {muted_hex}; margin: 3px; opacity: 0.7; }}
         .tm-grip:hover {{ color: {accent_hex}; opacity: 1; }}
         .tm-undo {{ background: {sel_hex}; color: {sel_fg}; border: 1px solid {accent_hex};
@@ -4034,16 +4073,48 @@ class ThemeManager(Gtk.Application):
         if now - getattr(self, "last_header_press", 0.0) < 0.4:
             self.last_header_press = 0.0
             self.moving = False
-            self.reset_window()
+            self.on_header_double_click(Gdk.BUTTON_PRIMARY)
             return
         self.last_header_press = now
         self.moving = True
         self.move_start = (self.current_position(), theme_core.cursor_position())
 
     def reset_window(self):
-        """Default size, centered (double-click on the title bar)."""
+        """Default size, centered."""
         self.resize_to(CARD_WIDTH, LIST_HEIGHT, save=True)
         self.move_to(None, save=True)
+
+    def maximize_window(self):
+        """As large as the monitor allows, centered."""
+        self.resize_to(*self.size_limits(), save=True)
+        self.move_to(None, save=True)
+
+    def size_state(self) -> str:
+        """"default", "max" or "between"."""
+        if (self.card_w, self.list_h) == (CARD_WIDTH, LIST_HEIGHT):
+            return "default"
+        max_w, max_h = self.size_limits()
+        if (self.card_w, self.list_h) == (max(CARD_WIDTH, max_w), max(theme_core.MIN_WINDOW_SIZE[1], max_h)):
+            return "max"
+        return "between"
+
+    def on_header_double_click(self, button):
+        """At the default size either button maximizes, at the largest either
+        one goes back; in between left = default size, right = maximize."""
+        size = self.size_state()
+        if size == "max" or (size == "between" and button == Gdk.BUTTON_PRIMARY):
+            self.reset_window()
+        else:
+            self.maximize_window()
+
+    def update_mouse_hint(self):
+        if getattr(self, "mouse_hint", None) is None or self.window is None:
+            return
+        size = self.size_state()
+        self.mouse_hint.set_label(_("Double-click: maximize") if size == "default" else
+                                  _("Double-click: default size") if size == "max" else
+                                  _("Double-click: default size · right double-click: maximize"))
+        self.mouse_hint.set_tooltip_text(self.mouse_hint.get_label())
 
     def on_move_update(self, gesture, dx, dy):
         if not self.moving:
