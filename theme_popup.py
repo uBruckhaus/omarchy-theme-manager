@@ -11,7 +11,6 @@ All file work goes through theme_core, which enforces the trust rules.
 import colorsys
 import os
 import queue
-import re
 import signal
 import sys
 import threading
@@ -46,6 +45,7 @@ else:
 
 import atexit
 
+import corners
 import theme_auto
 import theme_catalog
 import theme_core
@@ -98,14 +98,11 @@ def cleanup_pid():
         pass
 
 
-def hyprland_rounding() -> int:
-    """Follow Hyprland's window rounding like the Omarchy shell does."""
+def hyprland_rounding() -> int | None:
+    """The windows' rounding (theme or looknfeel.lua), or None if unknown."""
     out, _ok = theme_core.read_bounded_output(["hyprctl", "getoption", "decoration:rounding", "-j"],
                                              max_bytes=4096, timeout=2.0)
-    try:
-        return max(0, min(64, int(re.search(r'"value":\s*([0-9]+)', out.decode("utf-8", "replace")).group(1))))
-    except (ValueError, AttributeError):
-        return 12
+    return corners.parse_rounding(out.decode("utf-8", "replace"))
 
 
 def monitor_height() -> int:
@@ -957,6 +954,16 @@ class ThemeManager(Gtk.Application):
         self.settings_box.add_css_class("tm-settings-page")
         scroller.set_child(self.settings_box)
         page.append(scroller)
+        reset = Gtk.Button(label=_("Reset to defaults"))
+        reset.add_css_class("sc-small")
+        reset.set_halign(Gtk.Align.START)
+        reset.set_valign(Gtk.Align.END)
+        reset.set_tooltip_text(_("System language, corners like the windows, sorted by name, hidden themes also "
+                                 "hidden in Omarchy's pickers, no day and night switching, a wallpaper for each "
+                                 "workspace, the wallpaper never changes. Shortcuts, favorites, hidden themes and "
+                                 "the chosen day and night themes stay."))
+        reset.connect("clicked", lambda *_a: self.reset_settings())
+        page.append(reset)  # Under the scrolling options: always in the bottom left corner.
         self.settings_ready = False
         return page
 
@@ -976,6 +983,8 @@ class ThemeManager(Gtk.Application):
     def open_settings(self):
         self.active_theme = None
         self.stop_preview()
+        if hyprland_rounding() != getattr(self, "window_rounding", None):
+            self.apply_theme_css()  # A theme or looknfeel.lua changed the windows' rounding.
         self.fill_settings()
         self.stack.set_visible_child_name("settings")
 
@@ -1000,6 +1009,13 @@ class ThemeManager(Gtk.Application):
                                         + [name for _code, name in i18n.LANGUAGES],
                                         codes.index(setting) if setting in codes else 0,
                                         lambda i: self.set_language(codes[i])))
+
+        self.corner_choices = corners.CHOICES
+        self.corners_line = self.setting_line(
+            box, _("Corners"), self.corners_tip(),
+            self.dropdown(self.corner_labels(),
+                          self.corner_choices.index(corners.choice(theme_auto.settings().get("corners"))),
+                          lambda i: self.set_corners(self.corner_choices[i])))
 
         self.settings_heading(box, _("Themes").upper())
         self.setting_line(box, _("Sort the list"), _("Favorites (★ in a theme's menu) always come first."),
@@ -1415,6 +1431,40 @@ class ThemeManager(Gtk.Application):
             theme_core.notify(_("Could not save the setting"), str(error))
         if "sort" in values:
             self.refresh_themes()
+
+    def corner_labels(self) -> list[str]:
+        rounding = getattr(self, "window_rounding", None)
+        like = _("Like windows ({0} px)").format(rounding) if rounding is not None else _("Like windows")
+        return [like, _("Rounded"), _("Square")]
+
+    def corners_tip(self) -> str:
+        """Where the windows' rounding comes from: the theme, looknfeel.lua or Omarchy."""
+        source = corners.rounding_source()
+        if source == "user":
+            origin = _("Your windows' rounding is set in ~/.config/hypr/looknfeel.lua.")
+        elif source == "theme":
+            origin = _("Your windows' rounding is set by the current theme (its hyprland.lua).")
+        else:
+            origin = _("Your windows use Omarchy's default rounding (square); a theme or ~/.config/hypr/looknfeel.lua can change it.")
+        return _("Corners of the popup and its theme cards. “Like windows” follows Hyprland's window rounding.") + " " + origin
+
+    def set_corners(self, value: str):
+        self.save_setting(corners=corners.choice(value))
+        self.apply_theme_css()
+
+    def reset_settings(self):
+        """Back to the defaults (see the button's tooltip). A new language
+        restarts the popup (on this page), so it comes last."""
+        self.save_setting(sort="name", workspace_wallpapers=True, slideshow_minutes=0, corners="windows")
+        self.save_schedule(enabled=False, day_at=theme_auto.DEFAULT_SCHEDULE["day_at"],
+                           night_at=theme_auto.DEFAULT_SCHEDULE["night_at"])
+        if not theme_core.sync_enabled():
+            self.set_omarchy_sync(True)
+        self.apply_theme_css()
+        if i18n.language_setting() != "auto":
+            self.set_language("auto")
+            return
+        GLib.idle_add(self.fill_settings)  # Not from inside the button's own handler.
 
     def save_schedule(self, **values):
         try:
@@ -2008,7 +2058,10 @@ class ThemeManager(Gtk.Application):
             except (ValueError, IndexError):
                 return 0.5
 
-        radius = hyprland_rounding()
+        # Corners: Hyprland's window rounding like the Omarchy shell (the
+        # default), or rounded / square whatever the windows do.
+        self.window_rounding = hyprland_rounding()
+        radius = corners.radius(theme_auto.settings().get("corners"), self.window_rounding)
         sel_hex = colors.get("selection", "#45475a")
         bg_hex = colors.get("background", "#1e1e2e")
         fg_hex = colors.get("foreground", "#cdd6f4")
@@ -2069,11 +2122,11 @@ class ThemeManager(Gtk.Application):
         /* A light mat and hairline around previews so dark themes stand out
            from the (usually dark) card instead of melting into it. */
         .tm-preview {{ background: alpha({fg_hex}, 0.10); border: 1px solid alpha({fg_hex}, 0.28);
-            border-radius: {max(4, radius - 4)}px; padding: 3px;
+            border-radius: {max(4, radius - 4) if radius else 0}px; padding: 3px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45); }}
-        .tm-preview picture {{ border-radius: {max(2, radius - 6)}px; }}
+        .tm-preview picture {{ border-radius: {max(2, radius - 6) if radius else 0}px; }}
         .tm-list flowboxchild:hover .tm-preview {{ border-color: {accent_hex}; }}
-        .tm-badge {{ background: alpha({fg_hex}, 0.10); border-radius: {max(4, radius - 6)}px;
+        .tm-badge {{ background: alpha({fg_hex}, 0.10); border-radius: {max(4, radius - 6) if radius else 0}px;
             padding: 2px 10px; }}
         .tm-badge label {{ font-size: 12px; font-weight: 600; color: {muted_hex}; }}
         .tm-list flowboxchild:selected .tm-badge:not(.current) label {{ color: {sel_fg}; }}
@@ -2084,12 +2137,12 @@ class ThemeManager(Gtk.Application):
         .tm-grid {{ background: transparent; }}
         .tm-tile {{ background: alpha({fg_hex}, 0.08); border: 1px solid alpha({fg_hex}, 0.22);
             border-radius: {radius}px; padding: 4px; }}
-        .tm-tile picture {{ border-radius: {max(2, radius - 4)}px; }}
+        .tm-tile picture {{ border-radius: {max(2, radius - 4) if radius else 0}px; }}
         .tm-tile-label {{ font-size: 13px; color: {muted_hex}; }}
         .tm-tile-name {{ font-size: 14px; font-weight: 600; }}
         .tm-list flowboxchild .tm-tile {{ margin: 0; }}
         button.tm-tile-menu {{ padding: 3px; min-width: 0; min-height: 0; margin: 5px;
-            background: rgba(0, 0, 0, 0.6); color: #ffffff; border-radius: {max(4, radius - 4)}px; }}
+            background: rgba(0, 0, 0, 0.6); color: #ffffff; border-radius: {max(4, radius - 4) if radius else 0}px; }}
         button.tm-tile-menu:hover {{ background: {accent_hex}; color: {bg_hex}; }}
         .tm-tile-badge {{ margin: 6px; background: rgba(0, 0, 0, 0.6); }}
         .tm-tile-badge:not(.current):not(.workspace) label {{ color: #ffffff; }}
@@ -2141,7 +2194,7 @@ class ThemeManager(Gtk.Application):
         expander title {{ padding: 4px 0; }}
         .tm-star {{ color: {accent_hex}; font-size: 15px; }}
         .tm-keyhint {{ font-size: 12px; color: {muted_hex}; font-family: monospace; }}
-        .sc-cap {{ font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: {max(4, radius - 4)}px;
+        .sc-cap {{ font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: {max(4, radius - 4) if radius else 0}px;
             border: 1px solid alpha({fg_hex}, 0.35); background: alpha({fg_hex}, 0.08); }}
         .sc-cap-lg {{ font-size: 15px; padding: 3px 10px; }}
         .sc-key {{ padding: 4px 0; }}

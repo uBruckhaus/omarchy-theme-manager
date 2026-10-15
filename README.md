@@ -76,11 +76,16 @@ Keys are kept in `~/.config/omarchy/theme-manager/shortcuts.json` and written to
 | Setting | What it does | Default |
 | --- | --- | --- |
 | Language | Interface language: the system's, or one of the eight built-in ones | System |
+| Corners | The popup's and theme cards' corners: **Like windows** follows Hyprland's window rounding (set by the current theme's `hyprland.lua` or your `~/.config/hypr/looknfeel.lua`; the tooltip says which), **Rounded** (12 px) or **Square** | Like windows |
 | Sort the list | By name, or recently used first (favorites always come first) | By name |
 | Also hide in Omarchy's pickers | See *Syncing with Omarchy's pickers* below | Off |
 | Switch themes by time of day | Day theme from one time, night theme from another | Off |
 | A wallpaper for each workspace | Shows the wallpapers picked with **Show on workspace…** (switched on by the first pick) | Off |
 | Change the wallpaper | Slideshow through the current theme's visible wallpapers | Never |
+
+**Reset to defaults** (bottom left of the settings page) sets: system language, corners like the windows, sorted by name, Omarchy sync on, no day/night switching (07:00 / 19:00), a wallpaper for each workspace on, the wallpaper never changes. Shortcuts, favorites, hidden themes and the chosen day and night themes stay.
+
+Up to 1.5 the popup always had 12 px corners (it misread Hyprland's rounding); pick **Rounded** to keep that look.
 
 Workspace wallpapers, the slideshow and day/night switching are run by the bar widget, which is part of the Omarchy shell anyway: it calls `theme_auto.py` when you switch workspaces (only while workspace wallpapers are on) and once a minute (only while the slideshow or day/night switching is on). Nothing runs when they are off. Backgrounds are set with Omarchy's own `omarchy-theme-bg-set` and themes with `omarchy theme set`, so Omarchy's pickers stay in step.
 
@@ -123,6 +128,7 @@ rm -rf ~/.config/omarchy/theme-manager ~/.cache/theme-manager
 - Images are never decoded on trust: before any wallpaper, preview or thumbnail is shown or imported, its header is read (without decoding pixels) and anything over 16384 px per side or 64 megapixels in total (width × height × frames, for animated GIF/WebP) is refused, so a small, highly compressed file cannot declare a canvas that exhausts memory. Decoding runs on worker threads at thumbnail size, never on the UI thread.
 - PNG metadata is bounded too: a PNG with more than 32 text chunks or more than 32 KiB of compressed metadata (zTXt, compressed iTXt, iCCP) is refused everywhere it would be shown or handed to the desktop, because the shell's image reader inflates all text chunks before the pixels. Imported PNGs are stored with only pixel, palette and colour chunks; text, EXIF and unknown chunks are dropped (pixels are copied byte for byte, not re-encoded).
 - Text pasted into the two search fields, the theme name, the color fields, and the hex field and number fields inside GTK's color picker is read with `wl-paste` (at most 4 KiB, 2 s deadline, control characters flattened, 200 characters kept) instead of GTK's built-in paste, which would buffer whatever another app offers with no limit. Middle-click (primary selection) paste is turned off in the popup, and none of these fields takes text drops.
+- For **Corners** it reads `hyprctl getoption decoration:rounding` (bounded) and, for the tooltip only, looks for an uncommented `rounding = N` in the current theme's `hyprland.lua` and `~/.config/hypr/looknfeel.lua` (at most 256 KiB each, symlinks refused, never executed).
 - Remembers the popup position and size, and the settings, in `~/.config/omarchy/theme-manager/settings.json`; favorites, recently used themes and workspace wallpapers in `favorites.json`, `recent.json` and `workspace-wallpapers.json` next to it. Workspace wallpapers are stored by file name and only ever resolve to a visible wallpaper the theme already lists. Short-lived automation state (the background to return to, the last slideshow step) lives in `~/.cache/theme-manager/auto-state.json`.
 - Custom themes are written as a new folder in `~/.config/omarchy/themes/` (never into an existing one): `colors.toml` with only `#rrggbb` colors (and the base theme's other color values, kept as they were), `icons.theme` (one icon theme name, checked), copies of the visible wallpapers (bounded copies, oversized images skipped), a `preview.png` drawn with GdkPixbuf, and `theme-manager.json` (base theme, font). Nothing that runs code is copied: no `.lua`, no terminal or editor configs. Only themes with that note, and not from git, can be edited again. Fonts are listed with `omarchy-font-list`, read with `omarchy-font-current` and set with `omarchy-font-set`, and only a font from that list is ever passed on (it edits config files with sed). The font you had before is remembered as `own_font` in `settings.json`.
 - Deleting moves the theme or wallpaper into the freedesktop trash, `~/.local/share/Trash/` (`files/` and a `.trashinfo` in `info/`, created exclusively, mode 0600); Undo moves it back only if nothing has taken its place. Symlinks are just unlinked. If the trash is on another filesystem, the item is deleted as before.
@@ -149,5 +155,6 @@ rm -rf ~/.config/omarchy/theme-manager ~/.cache/theme-manager
 | `theme_shortcuts.py` | Keyboard shortcuts: who has a key, the generated Hyprland file, rollback |
 | `theme_auto.py` | Favorites, recently used, workspace wallpapers, slideshow, day/night; the bar widget's helper |
 | `palette.py` | Shared colour helpers |
+| `corners.py` | The Corners setting: Hyprland's window rounding and where it is set (shared with App Manager) |
 | `pidfile.py` | Private PID-file handling |
 | `tests/` | Unit tests (core logic + GTK view layer) |
