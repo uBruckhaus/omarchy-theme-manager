@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "I18n.js" as I18n
 
@@ -161,7 +162,7 @@ BarWidget {
       Text {
         textFormat: Text.PlainText
         text: root.menuSource === "favorites" ? root.t("favorites") : root.t("recent")
-        color: Color.popups.text
+        color: Commons.Color.popups.text
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         font.bold: true
@@ -173,7 +174,7 @@ BarWidget {
         width: parent.width
         wrapMode: Text.WordWrap
         text: root.t("noFavorites")
-        color: Qt.darker(Color.popups.text, 1.4)
+        color: Qt.darker(Commons.Color.popups.text, 1.4)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
       }
@@ -186,7 +187,7 @@ BarWidget {
           leftAlign: true
           iconText: modelData.current ? "\uf00c" : "\u{F0E0C}"
           text: modelData.name
-          foreground: modelData.current ? Color.accent : Color.popups.text
+          foreground: modelData.current ? Commons.Color.accent : Commons.Color.popups.text
           fontSize: Style.font.bodySmall
           iconSize: Style.font.bodySmall
           onClicked: {
@@ -203,7 +204,7 @@ BarWidget {
         leftAlign: true
         iconText: ""
         text: root.t("nextWallpaper")
-        foreground: Color.popups.text
+        foreground: Commons.Color.popups.text
         fontSize: Style.font.bodySmall
         iconSize: Style.font.bodySmall
         onClicked: root.run(["bg", "next"])
@@ -214,7 +215,7 @@ BarWidget {
         leftAlign: true
         iconText: ""
         text: root.t("open")
-        foreground: Color.popups.text
+        foreground: Commons.Color.popups.text
         fontSize: Style.font.bodySmall
         iconSize: Style.font.bodySmall
         onClicked: {
