@@ -353,5 +353,42 @@ class WallpaperPaletteTests(CustomTestCase):
         self.assertEqual([p.name for p in (folder / "backgrounds").iterdir()], ["b.png"])
 
 
+class PreviewTests(unittest.TestCase):
+    """make_preview crops before it scales, so a wallpaper of any shape costs one 1280×720 pixbuf."""
+
+    def test_cover_crop(self):
+        self.assertEqual(theme_custom.cover_crop(1920, 1080, 1280, 720), (0, 0, 1920, 1080))
+        self.assertEqual(theme_custom.cover_crop(2560, 1, 1280, 720), (1279, 0, 2, 1))
+        self.assertEqual(theme_custom.cover_crop(1, 2560, 1280, 720), (0, 1279, 1, 1))
+        self.assertEqual(theme_custom.cover_crop(2560, 720, 1280, 720), (640, 0, 1280, 720))
+        self.assertIsNone(theme_custom.cover_crop(0, 5, 1280, 720))
+
+    def test_extreme_wallpapers_stay_within_memory(self):
+        """The reviewer's case: a valid 2560×1 panorama (and a 1×2560 strip) under a 1 GiB data
+        limit. Scaling to cover before cropping needed a 1843200×720 pixbuf (several GiB)."""
+        import subprocess
+        here = Path(__file__).resolve().parents[1]
+        for width, height in ((2560, 1), (1, 2560)):
+            with tempfile.TemporaryDirectory() as tmp:
+                theme = Path(tmp)
+                (theme / "backgrounds").mkdir()
+                (theme / "backgrounds" / "wall.png").write_bytes(png(width, height))
+                (theme / "colors.toml").write_text(RISTRETTO)
+                script = (
+                    "import resource, sys; sys.path.insert(0, sys.argv[1]);"
+                    "resource.setrlimit(resource.RLIMIT_DATA, (1 << 30, 1 << 30));"
+                    "from pathlib import Path; import theme_custom;"
+                    "palette = theme_custom.parse_colors((Path(sys.argv[2]) / 'colors.toml').read_text());"
+                    "sys.exit(0 if theme_custom.make_preview(Path(sys.argv[2]), palette) else 3)"
+                )
+                result = subprocess.run(
+                    [sys.executable, "-c", script, str(here), str(theme)],
+                    capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                import struct
+                header = (theme / "preview.png").read_bytes()[16:24]
+                self.assertEqual(struct.unpack(">II", header), theme_custom.PREVIEW_SIZE)
+
+
 if __name__ == "__main__":
     unittest.main()

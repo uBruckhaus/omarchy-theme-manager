@@ -586,6 +586,17 @@ def rename_theme(theme, new_name: str, roots: theme_core.Roots | None = None) ->
 PREVIEW_SIZE = (1280, 720)
 
 
+def cover_crop(src_w: int, src_h: int, width: int, height: int) -> tuple[int, int, int, int] | None:
+    """(x, y, w, h) of the centred part of a src_w×src_h image that, scaled to width×height, covers
+    it with the aspect kept: the part is cropped before anything is scaled."""
+    if src_w < 1 or src_h < 1:
+        return None
+    scale = max(width / src_w, height / src_h)
+    w = max(1, min(src_w, round(width / scale)))
+    h = max(1, min(src_h, round(height / scale)))
+    return (src_w - w) // 2, (src_h - h) // 2, w, h
+
+
 def make_preview(directory: Path, palette: Palette) -> Path | None:
     """preview.png: the theme's first wallpaper with a window drawn in the
     theme's colors (background, title in the accent, text lines, the
@@ -614,12 +625,15 @@ def make_preview(directory: Path, palette: Palette) -> Path | None:
             image = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(wall), width * 2, height * 2, True)
         except GLib.Error:
             continue
-        scale = max(width / image.get_width(), height / image.get_height())
-        scaled = image.scale_simple(max(width, round(image.get_width() * scale)),
-                                    max(height, round(image.get_height() * scale)),
-                                    GdkPixbuf.InterpType.BILINEAR)
-        scaled.copy_area((scaled.get_width() - width) // 2, (scaled.get_height() - height) // 2,
-                         width, height, canvas, 0, 0)
+        crop = cover_crop(image.get_width(), image.get_height(), width, height)
+        if crop is None:
+            continue
+        # Crop first (a view into the decoded image, no copy), then scale only that part: the one new
+        # allocation is the width×height result, whatever the wallpaper's shape (a 2560×1 panorama
+        # scaled to cover before cropping would need a 1843200×720 pixbuf).
+        part = image.new_subpixbuf(*crop).scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+        if part is not None:
+            part.copy_area(0, 0, width, height, canvas, 0, 0)
 
     def box(x, y, w, h, color):
         canvas.new_subpixbuf(x, y, w, h).fill(rgba(color))
