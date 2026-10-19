@@ -19,7 +19,7 @@ import gi
 
 gi.require_version("GLib", "2.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
@@ -1260,6 +1260,32 @@ class ViewLayerTest(unittest.TestCase):
         before = theme_core.settings_file().read_text()
         self.app.fill_settings()
         self.assertEqual(theme_core.settings_file().read_text(), before)
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+
+    def test_information_page_lists_the_other_plugins(self):
+        Gdk = gi.repository.Gdk
+        self.app.open_info()
+        self.assertEqual(self.app.stack.get_visible_child_name(), "info")
+        self.assertFalse(self.app.info_button.get_visible())
+        self.assertFalse(self.app.settings_button.get_visible())
+        page = self.app.stack.get_child_by_name("info")
+        tips = []
+        stack = [page]
+        while stack:
+            widget = stack.pop()
+            if isinstance(widget, Gtk.Button) and widget.has_css_class("tm-more-card"):
+                tips.append(widget.get_tooltip_text())
+            child = widget.get_first_child()
+            while child is not None:
+                stack.append(child)
+                child = child.get_next_sibling()
+        self.assertEqual(len(tips), 11)
+        self.assertFalse(any("Theme Manager" in tip for tip in tips), "no card for itself")
+        self.app.on_key(None, Gdk.KEY_BackSpace, 0, 0)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.assertTrue(self.app.info_button.get_visible())
+        self.app.open_info()
         self.app.on_key(None, Gdk.KEY_Escape, 0, 0)
         self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
 

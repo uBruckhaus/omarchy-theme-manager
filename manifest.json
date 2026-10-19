@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.theme-manager",
   "name": "Theme Manager",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Every Omarchy theme in one place: apply, favorite, hide or delete with undo, and give any theme its own key. Make your own themes from any theme or wallpaper: pick colors and a font with a live preview. Manage wallpapers: drop, paste, choose or search the web, preview them on the desktop, give each workspace its own or let them rotate. Day and night themes, next wallpaper by scrolling the bar icon, favorites on right-click, themes from omarchy.org.",

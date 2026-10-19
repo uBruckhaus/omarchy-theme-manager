@@ -46,6 +46,7 @@ else:
 import atexit
 
 import corners
+import more_plugins
 import theme_auto
 import theme_catalog
 import theme_core
@@ -468,9 +469,21 @@ class ThemeManager(Gtk.Application):
         settings_button.add_css_class("tm-header-btn")
         settings_button.add_css_class("tm-gear-btn")
         settings_button.connect("clicked", lambda *_: self.open_settings())
+        # Information: the author's other plugins, left of the gear as in the other plugins.
+        info_button = Gtk.Button()
+        info_glyph = Gtk.Label(label=more_plugins.INFO_GLYPH)
+        info_glyph.add_css_class("tm-info")
+        info_button.set_child(info_glyph)
+        info_button.set_tooltip_text(_("Information"))
+        info_button.add_css_class("flat")
+        info_button.add_css_class("tm-header-btn")
+        info_button.add_css_class("tm-gear-btn")
+        info_button.connect("clicked", lambda *_: self.open_info())
         header.append(self.hidden_button)
+        header.append(info_button)
         header.append(settings_button)   # rightmost, like the other plugins
         self.settings_button = settings_button
+        self.info_button = info_button
         card.append(header)
 
         stack = Gtk.Stack()
@@ -723,6 +736,7 @@ class ThemeManager(Gtk.Application):
         self.confirm_return = "themes"
 
         stack.add_named(self.build_settings_page(), "settings")
+        stack.add_named(self.build_info_page(), "info")
         stack.add_named(self.build_editor_page(), "editor")
         stack.add_named(self.build_shortcut_page(), "shortcut")
 
@@ -760,9 +774,8 @@ class ThemeManager(Gtk.Application):
 
         self.window = window
         self.stack = stack
-        # Like the other plugins, the gear is gone while its page is open.
-        stack.connect("notify::visible-child-name",
-                      lambda st, _p: self.settings_button.set_visible(st.get_visible_child_name() != "settings"))
+        # Like the other plugins, the gear and (i) are gone while their pages are open.
+        stack.connect("notify::visible-child-name", lambda st, _p: self.update_page_buttons(st))
         self.resize_to(self.card_w, self.list_h)
         self.apply_theme_css()
         self.refresh_themes()
@@ -966,6 +979,47 @@ class ThemeManager(Gtk.Application):
         page.append(reset)  # Under the scrolling options: always in the bottom left corner.
         self.settings_ready = False
         return page
+
+    def update_page_buttons(self, stack):
+        on_page = stack.get_visible_child_name() in ("settings", "info")
+        self.settings_button.set_visible(not on_page)
+        self.info_button.set_visible(not on_page)
+
+    def build_info_page(self) -> Gtk.Widget:
+        """Information: the author's other marketplace plugins as cards."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.track_width(page)
+        header = Gtk.Box(spacing=8)
+        back = Gtk.Button()
+        back.add_css_class("flat")
+        back.add_css_class("tm-header-btn")
+        back_box = Gtk.Box(spacing=6)
+        back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
+        back_box.append(Gtk.Label(label=_("Back")))
+        back_box.append(Gtk.Label(label="· ⌫"))
+        back.set_child(back_box)
+        back.add_css_class("tm-back-bordered")
+        back.set_tooltip_text(_("Back to themes (Backspace, Esc)"))
+        back.connect("clicked", lambda *_: self.show_themes())
+        header.append(back)
+        title = Gtk.Label(label=_("Information").upper(), xalign=0, hexpand=True)
+        title.add_css_class("tm-section-title")
+        header.append(title)
+        page.append(header)
+        rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        rule.add_css_class("tm-settings-rule")
+        page.append(rule)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        scroller.set_child(more_plugins.build_cards("ubruckhaus.theme-manager", "tm", on_opened=self.close))
+        page.append(scroller)
+        return page
+
+    def open_info(self):
+        self.active_theme = None
+        self.stop_preview()
+        self.stack.set_visible_child_name("info")
 
     def set_language(self, code: str):
         if code == i18n.language_setting():
@@ -2227,6 +2281,7 @@ class ThemeManager(Gtk.Application):
             opacity: 0.6; min-height: 1px; margin: 3px 6px; }}
         """
         provider = Gtk.CssProvider()
+        css += more_plugins.css("tm", fg_hex, dim_hex, accent_hex, min(radius, 8))
         provider.load_from_data(css.encode("utf-8"))
         Gtk.StyleContext.add_provider_for_display(
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -3853,7 +3908,7 @@ class ThemeManager(Gtk.Application):
                 self.set_wp_filter("")
             elif page == "editor":
                 self.close_editor()
-            elif page in ("wallpapers", "import", "settings"):
+            elif page in ("wallpapers", "import", "settings", "info"):
                 self.show_themes()
             elif self.filter_query:
                 self.set_filter("")
@@ -3867,7 +3922,7 @@ class ThemeManager(Gtk.Application):
             return False  # Left/Right move between Cancel and Delete
         if page == "editor":
             return False   # typing goes to the name and color fields
-        if page == "settings":
+        if page in ("settings", "info"):
             if keyval == Gdk.KEY_BackSpace:
                 self.show_themes()
                 return True
