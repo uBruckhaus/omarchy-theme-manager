@@ -46,6 +46,7 @@ else:
 import atexit
 
 import corners
+import more_catalog
 import more_plugins
 import theme_auto
 import theme_catalog
@@ -1012,14 +1013,48 @@ class ThemeManager(Gtk.Application):
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
-        scroller.set_child(more_plugins.build_cards("ubruckhaus.theme-manager", "tm", on_opened=self.close))
+        # The author's plugins, from the marketplace (more_catalog): refreshed when the page opens.
+        self.info_scroller = scroller
+        self.info_shown = None
+        self.fill_info_cards(more_catalog.cached())
         page.append(scroller)
         return page
+
+    def fill_info_cards(self, plugins: list):
+        """The cards for this list (Theme Manager itself left out); the built-in list when there is none yet."""
+        cards = more_catalog.cards(plugins)
+        if cards == self.info_shown:
+            return
+        self.info_shown = cards
+        self.info_scroller.set_child(more_plugins.build_cards(more_catalog.OWN_ID, "tm", on_opened=self.close,
+                                                              plugins=cards))
+
+    def refresh_info_cards(self):
+        """The marketplace's list (at most hourly, only if it changed), on a thread."""
+        if getattr(self, "info_refreshing", False):
+            return
+        self.info_refreshing = True
+
+        def work():
+            plugins = None
+            try:
+                plugins = more_catalog.refresh()
+            finally:
+                # Always back on the main loop, so a failure never leaves the page refreshing.
+                GLib.idle_add(done, plugins)
+
+        def done(plugins):
+            self.info_refreshing = False
+            if plugins is not None:
+                self.fill_info_cards(plugins)
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
 
     def open_info(self):
         self.active_theme = None
         self.stop_preview()
         self.stack.set_visible_child_name("info")
+        self.refresh_info_cards()
 
     def set_language(self, code: str):
         if code == i18n.language_setting():

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -138,13 +139,26 @@ class InstallTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_clone_argv_checks_url_and_disables_prompts(self):
-        dest = theme_catalog.install(self.entry, self.roots)
+        with mock.patch.object(theme_catalog.shutil, "which", return_value="/usr/bin/omarchy-git-url-check"):
+            dest = theme_catalog.install(self.entry, self.roots)
         self.assertEqual(dest, self.roots.user_themes / "ash")
         self.assertEqual(self.calls[0][0], ["omarchy-git-url-check", self.entry.repo])
         argv, env = self.calls[1]
         self.assertEqual(argv[:2], ["git", "clone"])
         self.assertEqual(argv[-3:], ["--", self.entry.repo, str(dest)])
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_omarchy_4_0_0_without_the_url_check_still_installs(self):
+        with mock.patch.object(theme_catalog.shutil, "which", return_value=None):
+            dest = theme_catalog.install(self.entry, self.roots)
+        self.assertEqual(dest, self.roots.user_themes / "ash")
+        self.assertEqual([argv[0] for argv, _env in self.calls], ["git"])
+
+    def test_repo_with_a_trailing_newline_is_refused(self):
+        bad = theme_catalog.CatalogTheme("Ash", "https://github.com/a/omarchy-ash-theme\n", "ash", "ash.webp")
+        with self.assertRaises(ValueError):
+            theme_catalog.install(bad, self.roots)
+        self.assertEqual(self.calls, [])
 
     def test_never_replaces_an_installed_theme(self):
         (self.roots.user_themes / "ash").mkdir(parents=True)

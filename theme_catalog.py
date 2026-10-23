@@ -13,8 +13,9 @@ Trust rules (see theme_core):
   form `https://github.com/<owner>/<repo>` and a preview under
   `/assets/themes/`; names are shown as plain text.
 - Installing clones into `~/.config/omarchy/themes/<slug>` (argv, no shell,
-  no prompts) after Omarchy's own `omarchy-git-url-check`; an existing theme
-  is never replaced. `omarchy theme set` later stages only the files a theme
+  no prompts) only for a URL that fully matches `https://github.com/<owner>/<repo>`,
+  after Omarchy's own `omarchy-git-url-check` where it exists (4.0.1 and later);
+  an existing theme is never replaced. `omarchy theme set` later stages only the files a theme
   from git may contribute.
 """
 from __future__ import annotations
@@ -70,7 +71,7 @@ def https_get(url: str, max_bytes: int, timeout: float = 15.0) -> bytes | None:
 
 def slug_for_repo(repo: str) -> str | None:
     """The directory name `omarchy theme install` gives a repository."""
-    match = REPO_RE.match(repo)
+    match = REPO_RE.fullmatch(repo) if isinstance(repo, str) else None
     if not match:
         return None
     name = match.group(2).lower()
@@ -153,10 +154,13 @@ def install(theme: CatalogTheme, roots: theme_core.Roots | None = None) -> Path:
     dest = roots.user_themes / slug
     if dest.exists() or dest.is_symlink():
         raise FileExistsError(_("a theme named “{0}” is already installed").format(slug))
-    _out, ok = theme_core.read_bounded_output(["omarchy-git-url-check", theme.repo],
-                                           max_bytes=65536, timeout=10.0)
-    if not ok:
-        raise ValueError(_("Omarchy refuses this repository URL: {0}").format(theme.repo))
+    # The URL is a plain https://github.com/<owner>/<repo> (slug_for_repo), which cannot name a
+    # git transport helper. Omarchy's own check runs as well where it exists (4.0.1 and later).
+    if shutil.which("omarchy-git-url-check"):
+        _out, ok = theme_core.read_bounded_output(["omarchy-git-url-check", theme.repo],
+                                               max_bytes=65536, timeout=10.0)
+        if not ok:
+            raise ValueError(_("Omarchy refuses this repository URL: {0}").format(theme.repo))
     roots.user_themes.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"}
     _out, ok = theme_core.read_bounded_output(
