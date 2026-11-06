@@ -1280,8 +1280,9 @@ class ViewLayerTest(unittest.TestCase):
             while child is not None:
                 stack.append(child)
                 child = child.get_next_sibling()
-        self.assertEqual(len(tips), 11)
+        self.assertEqual(len(tips), 12)
         self.assertFalse(any("Theme Manager" in tip for tip in tips), "no card for itself")
+        self.assertTrue(any("Maprisma Launcher" in tip for tip in tips))
         self.app.on_key(None, Gdk.KEY_BackSpace, 0, 0)
         self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
         self.assertTrue(self.app.info_button.get_visible())

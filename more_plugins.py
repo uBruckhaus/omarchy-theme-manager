@@ -26,6 +26,7 @@ PLUGINS = [
     ("ubruckhaus.llm-usage", "LLM Monitor", "\U000F061A", N_("Which local AI model holds your GPU memory")),
     ("ubruckhaus.ai-agents-map", "AI Agents Map", "\U000F06A9", N_("Your AI agents, models and MCP servers on one map")),
     ("ubruckhaus.simple-launcher-for-fools", "App Manager", "\U0000F00A", N_("Your apps in groups, with shortcuts and a dock")),
+    ("ubruckhaus.maprisma-launcher", "Maprisma Launcher", "\U000F14DE", N_("Apps, shortcuts and updates, with AI package advice")),
     ("ubruckhaus.simple-tile", "Workspace Presets", "\U000F056E", N_("Window limits and layouts per workspace")),
     ("ubruckhaus.hue-lights", "Hue Lights", "\U000F0335", N_("Philips Hue rooms and lights from the bar")),
     ("ubruckhaus.video-trans", "Video Trans", "\U0000F20A", N_("Live translated captions for any video or call")),
