@@ -71,7 +71,7 @@ def save_apps_on(store, ws) -> bool:
 
 def autostart_on(store, ws) -> bool:
     layout = layout_for(store, ws)
-    return layout.get("autostart") is not False if layout else True
+    return layout.get("autostart") is True if layout else False      # only an explicit on (off for new ones)
 
 
 def effective_cap(store, ws) -> int:
@@ -422,7 +422,7 @@ def save_capture(store, ws, capture):
     _map(store, "workspaceLayouts")[str(ws)] = {
         "mode": "manual",
         "saveApps": existing.get("saveApps", True) is not False,
-        "autostart": existing.get("autostart", True) is not False,
+        "autostart": existing.get("autostart") is True,     # new App Presets: off until switched on
         "apps": capture.get("apps") or [],
         "windows": capture.get("windows") or [],
         "count": capture.get("count") or 0,

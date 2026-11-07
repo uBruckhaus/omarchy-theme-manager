@@ -503,15 +503,15 @@ class AppLaunchTests(unittest.TestCase):
                 3: {"autostart": True, "apps": [{"name": "App3", "class": "app3"}]},
             }
         }
-        approved = {str(ws): tile.app_fingerprint(settings["workspace_layouts"][ws]) for ws in (2, 3)}
+        approved = {str(ws): {"apps": settings["workspace_layouts"][ws]["apps"], "windows": []} for ws in (2, 3)}
         with patch.object(tile, "read_settings", return_value=settings), \
-                patch.object(tile, "load_approvals", return_value=approved), \
+                patch.object(tile, "load_snapshots", return_value=approved), \
                 patch.object(tile, "restore_workspace", return_value={"status": "ok"}) as restore:
             res = tile.autostart_all(dry_run=True)
             self.assertEqual(res["status"], "ok")
             self.assertEqual(len(res["workspaces"]), 2)
-            restore.assert_any_call(2, dry_run=True)
-            restore.assert_any_call(3, dry_run=True)
+            restore.assert_any_call(2, dry_run=True, layout=approved["2"])
+            restore.assert_any_call(3, dry_run=True, layout=approved["3"])
 
 
     def test_is_app_available_checks_command_and_desktop(self):
@@ -1122,9 +1122,9 @@ class MalformedShellJsonTests(unittest.TestCase):
         self.assertIs(tile.wp_entry({"bar": {"layout": {"right": [7, entry]}}}), entry)
 
 
-class AutostartApprovalTests(unittest.TestCase):
-    """Release review (High, found in Workspace Presets 0.7.0): a saved app list in the store alone
-    never starts apps at login; the approval file is shared with Workspace Presets."""
+class AutostartSnapshotTests(unittest.TestCase):
+    """Release review: the store (possibly the Workspace Presets shell.json entry) never decides what
+    starts at login; only a private copy of the layout the user confirmed does (shared with the plugin)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1135,32 +1135,46 @@ class AutostartApprovalTests(unittest.TestCase):
         lock = patch.object(tile, "runtime_lock")
         lock.start()
         self.addCleanup(lock.stop)
-        self.layout = {"autostart": True, "apps": [{"desktop_id": "foot", "desktop_path": "/usr/share/applications/foot.desktop"}]}
+        self.shown = {"autostart": True, "apps": [{"desktop_id": "foot", "desktop_path": "/usr/share/applications/foot.desktop"}],
+                      "windows": [{"class": "foot", "at": [0, 0], "size": [800, 600]}]}
 
     def run_autostart(self, layout):
         restored = []
         settings = {"workspace_layouts": {2: layout}, "workspace_modes": {2: "manual"}}
         with patch.object(tile, "read_settings", return_value=settings), \
                 patch.object(tile, "send_notification") as notify, \
-                patch.object(tile, "_restore_workspace", side_effect=lambda ws, **k: restored.append(ws) or {"failed": []}):
+                patch.object(tile, "_restore_workspace",
+                             side_effect=lambda ws, **k: restored.append((ws, k.get("layout"))) or {"failed": []}):
             result = tile._autostart_all(False)
         return restored, result, notify
 
-    def test_only_a_confirmed_unchanged_list_starts(self):
-        restored, result, notify = self.run_autostart(self.layout)
-        self.assertEqual((restored, result["unconfirmed"]), ([], [2]))
+    def test_only_the_confirmed_copy_starts(self):
+        restored, result, notify = self.run_autostart(self.shown)
+        self.assertEqual((restored, result["unconfirmed"]), ([], [2]))         # never confirmed: nothing starts
         notify.assert_called_once()
-        with patch.object(tile, "read_settings", return_value={"workspace_layouts": {2: self.layout}}):
-            self.assertFalse(tile.approve_autostart(2, True))                      # no snapshot: never
-            self.assertFalse(tile.approve_autostart(2, True, {"apps": [{"desktop_id": "evil"}]}))  # changed since
-            self.assertTrue(tile.approve_autostart(2, True, self.layout))
-        self.assertEqual(self.run_autostart(self.layout)[0], [2])
-        swapped = dict(self.layout, windows=[{"at": [0, 0], "size": [9, 9], "app": {"desktop_id": "evil"}}])
-        self.assertEqual(self.run_autostart(swapped)[0], [])                       # a window's own launcher counts
-        changed = dict(self.layout, apps=self.layout["apps"] + [{"desktop_id": "evil"}])
-        self.assertEqual(self.run_autostart(changed)[0], [])
-        self.assertEqual(tile.approvals_path().parent.name, "ubruckhaus.simple-tile")     # shared with the plugin
-        self.assertEqual(os.stat(tile.approvals_path()).st_mode & 0o077, 0)
+        self.assertTrue(tile.approve_autostart(2, True, self.shown))
+        forged = dict(self.shown, apps=[{"desktop_id": "evil"}] * 16,
+                      windows=[{"class": "evil", "at": [0, 0], "size": [9, 9], "app": {"desktop_id": "evil"}}] * 16)
+        restored, _result, _notify = self.run_autostart(forged)                  # the store changed afterwards
+        self.assertEqual(restored[0][0], 2)
+        self.assertEqual(restored[0][1]["apps"], self.shown["apps"])            # but the confirmed copy is used
+        self.assertEqual(len(restored[0][1]["windows"]), 1)
+        self.assertEqual(self.run_autostart(dict(self.shown, autostart=False))[0], [])   # switched off: nothing
+        self.assertFalse(tile.approve_autostart(2, False))
+        self.assertEqual(self.run_autostart(self.shown)[0], [])
+
+    def test_the_copy_file_is_private_and_never_holds_commands(self):
+        with_argv = dict(self.shown, apps=[{"desktop_id": "foot", "argv": ["sh", "-c", "x"]}])
+        tile.approve_autostart(2, True, with_argv)
+        path = tile.snapshots_path()
+        self.assertEqual(path.parent.name, "ubruckhaus.simple-tile")              # shared with the plugin
+        self.assertEqual(os.stat(path).st_mode & 0o077, 0)
+        self.assertNotIn("argv", tile.load_snapshots()["2"]["apps"][0])
+        os.chmod(path, 0o644)                                                     # readable by others: not trusted
+        self.assertEqual(tile.load_snapshots(), {})
+        os.chmod(path, 0o600)
+        os.chmod(path.parent, 0o755)
+        self.assertEqual(tile.load_snapshots(), {})
 
 if __name__ == "__main__":
     unittest.main()

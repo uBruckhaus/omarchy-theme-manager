@@ -1100,18 +1100,20 @@ def restore_geometry(ws_id, pairs):
                         raise RuntimeError("Saved tile positions could not be restored")
 
 
-def restore_workspace(ws_id, dry_run=False, conflict_action="ask"):
+def restore_workspace(ws_id, dry_run=False, conflict_action="ask", layout=None):
     with runtime_lock():
-        return _restore_workspace(ws_id, dry_run, conflict_action)
+        return _restore_workspace(ws_id, dry_run, conflict_action, layout)
 
 
-def _restore_workspace(ws_id, dry_run=False, conflict_action="ask"):
+def _restore_workspace(ws_id, dry_run=False, conflict_action="ask", layout=None):
+    """Restore a workspace: from the store (a click on Restore), or from `layout`
+    (autostart's confirmed private copy)."""
     if type(ws_id) is not int or ws_id <= 0:
         raise ValueError("invalid workspace id")
     if conflict_action not in ("ask", "move", "close", "keep"):
         raise ValueError("invalid conflict action: %s" % conflict_action)
-    layouts = read_settings().get("workspace_layouts", {})
-    layout = layouts.get(ws_id)
+    if layout is None:
+        layout = read_settings().get("workspace_layouts", {}).get(ws_id)
     if not layout:
         return {"status": "no_layout", "workspace": ws_id}
     apps = layout.get("apps", [])
@@ -1314,68 +1316,75 @@ def autostart_all(dry_run=False):
         return result
 
 
-# --- autostart approval (the same file and fingerprint as Workspace Presets 0.7.0) ----
+# --- autostart snapshots (the same file as Workspace Presets 0.7.0) ---------------
 # The store can be the Workspace Presets plugin's shell.json entry, which anything
-# that can write that file could edit; so a saved app list alone never starts apps
-# at login: the user confirms it (saving the App Preset or switching its autostart
-# on, here or in the plugin's panel), and a fingerprint of that list is kept in a
-# private file both plugins read.
+# that can write that file could edit; so it never decides what starts at login.
+# Switching autostart on in the Presets page (or saving an App Preset that has it
+# on) keeps a private copy of the layout the page showed; autostart restores only
+# from that copy (here when the plugin is not on the bar, else the plugin does,
+# from the same file), and only while the store still has autostart on.
 
-def approvals_path():
+SNAPSHOTS_MAX = 512 * 1024
+
+
+def snapshots_path():
     state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
     return Path(state) / "ubruckhaus.simple-tile" / "autostart.json"
 
 
-def _launcher_pair(record):
-    if not isinstance(record, dict):
+def snapshot_of(layout):
+    """What autostart keeps of a confirmed layout: at most MAX_SLOTS windows and
+    apps (cleaned), whether apps are saved; nothing else."""
+    if not isinstance(layout, dict):
         return None
-    ident, path = record.get("desktop_id"), record.get("desktop_path")
-    return (ident if isinstance(ident, str) else "", path if isinstance(path, str) else "")
-
-
-def launcher_keys(layout):
-    """Every launcher a restore of this layout can start from: the app list,
-    each saved window and the app record inside it, as sorted unique pairs."""
-    records = []
+    cleaned = _clean_layout(layout) or {}
+    out = {"apps": cleaned.get("apps", []), "windows": cleaned.get("windows", [])}
     for key in ("apps", "windows"):
-        items = layout.get(key) if isinstance(layout.get(key), list) else []
-        for item in items:
-            records.append(item)
-            if isinstance(item, dict):
-                records.append(item.get("app"))
-    return sorted({pair for pair in map(_launcher_pair, records) if pair and pair != ("", "")})
+        for item in out[key]:
+            item.pop("argv", None)          # never a command
+            if isinstance(item.get("app"), dict):
+                item["app"].pop("argv", None)
+    if isinstance(layout.get("saveApps"), bool):
+        out["saveApps"] = layout["saveApps"]
+    return json.loads(json.dumps(out))
 
 
-def app_fingerprint(layout):
-    return hashlib.sha256(json.dumps(launcher_keys(layout)).encode()).hexdigest()
+def _private(info, kind):
+    return kind(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
 
 
-def load_approvals():
+def load_snapshots():
+    """The confirmed snapshots, only from a private folder and file of this user
+    (no link, nothing others can read or write); else none."""
+    path = snapshots_path()
     try:
-        fd = os.open(approvals_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        if not _private(os.lstat(path.parent), stat.S_ISDIR):
+            return {}
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return {}
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 65536:
+        if not _private(info, stat.S_ISREG) or info.st_size > SNAPSHOTS_MAX:
             return {}
-        data = json.loads(os.read(fd, 65537))
+        data = json.loads(os.read(fd, SNAPSHOTS_MAX + 1))
     except (OSError, ValueError):
         return {}
     finally:
         os.close(fd)
-    return {k: v for k, v in data.items() if isinstance(k, str) and k.isdigit() and isinstance(v, str)} \
-        if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: snapshot_of(v) for k, v in data.items() if isinstance(k, str) and k.isdigit() and snapshot_of(v)}
 
 
-def save_approvals(data):
-    path = approvals_path()
+def save_snapshots(data):
+    path = snapshots_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     info = os.lstat(path.parent)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise RuntimeError("unsafe state directory")
     os.chmod(path.parent, 0o700)
-    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".autostart.", suffix=".tmp")
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".autostart.", suffix=".tmp")      # 0600
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(data, stream)
@@ -1385,45 +1394,38 @@ def save_approvals(data):
         raise
 
 
-def approve_autostart(ws_id, on, confirmed=None, locked=False):
-    """The user's confirmation in the Presets page: the launchers of the layout
-    the page itself saved (`confirmed`) may start at login, but only while the
-    store still holds exactly those (on); or no longer (off)."""
+def approve_autostart(ws_id, on, confirmed=None):
+    """The Presets page's confirmation: keep `confirmed` (the layout the page
+    showed) as what starts at login (on), or forget it (off). True if kept."""
     if type(ws_id) is not int or ws_id <= 0:
         raise ValueError("invalid workspace id")
-
-    def work():
-        approvals = load_approvals()
-        layout = read_settings().get("workspace_layouts", {}).get(ws_id)
-        if on and isinstance(layout, dict) and layout.get("autostart") is not False and \
-                isinstance(confirmed, dict) and launcher_keys(confirmed) == launcher_keys(layout):
-            approvals[str(ws_id)] = app_fingerprint(layout)
-        else:
-            approvals.pop(str(ws_id), None)
-        save_approvals(approvals)
-        return str(ws_id) in approvals
-    if locked:
-        return work()
     with runtime_lock():
-        return work()
+        snapshots = load_snapshots()
+        snapshot = snapshot_of(confirmed) if on else None
+        if snapshot and (snapshot["apps"] or snapshot["windows"]):
+            snapshots[str(ws_id)] = snapshot
+        else:
+            snapshots.pop(str(ws_id), None)
+        save_snapshots(snapshots)
+        return str(ws_id) in snapshots
 
 
 def _autostart_all(dry_run):
     started, unconfirmed = [], []
-    approvals = load_approvals()
+    snapshots = load_snapshots()
     settings = read_settings()
     modes = settings.get("workspace_modes", {})
     for ws_id, layout in sorted(settings.get("workspace_layouts", {}).items()):
         # Only an App Preset in use starts: one the workspace left (a layout
         # chosen, a reset) stays saved but quiet.
         in_use = modes.get(ws_id) == "manual"   # clean_presets writes it for every App Preset in use
-        if layout.get("autostart") is True and in_use and approvals.get(str(ws_id)) != app_fingerprint(layout):
-            unconfirmed.append(ws_id)        # never confirmed (or changed since): not started
+        if layout.get("autostart") is True and in_use and str(ws_id) not in snapshots:
+            unconfirmed.append(ws_id)        # never confirmed in the Presets page: not started
             continue
         if layout.get("autostart") is True and in_use:
-            # The batch already owns the runtime lock.
+            # The batch already owns the runtime lock. Restored from the confirmed copy only.
             restore = restore_workspace if dry_run else _restore_workspace
-            kwargs = {"dry_run": dry_run}
+            kwargs = {"dry_run": dry_run, "layout": snapshots[str(ws_id)]}
             if not dry_run:
                 kwargs["conflict_action"] = "move"
             started.append({"workspace": ws_id, "result": restore(ws_id, **kwargs)})
