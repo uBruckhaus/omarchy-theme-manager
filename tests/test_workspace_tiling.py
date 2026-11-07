@@ -503,7 +503,9 @@ class AppLaunchTests(unittest.TestCase):
                 3: {"autostart": True, "apps": [{"name": "App3", "class": "app3"}]},
             }
         }
+        approved = {str(ws): tile.app_fingerprint(settings["workspace_layouts"][ws]) for ws in (2, 3)}
         with patch.object(tile, "read_settings", return_value=settings), \
+                patch.object(tile, "load_approvals", return_value=approved), \
                 patch.object(tile, "restore_workspace", return_value={"status": "ok"}) as restore:
             res = tile.autostart_all(dry_run=True)
             self.assertEqual(res["status"], "ok")
@@ -1118,6 +1120,47 @@ class MalformedShellJsonTests(unittest.TestCase):
             self.assertIsNone(tile.wp_entry(config))
         entry = {"id": tile.WP_PLUGIN_ID}
         self.assertIs(tile.wp_entry({"bar": {"layout": {"right": [7, entry]}}}), entry)
+
+
+class AutostartApprovalTests(unittest.TestCase):
+    """Release review (High, found in Workspace Presets 0.7.0): a saved app list in the store alone
+    never starts apps at login; the approval file is shared with Workspace Presets."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = patch.dict(tile.os.environ, {"XDG_STATE_HOME": self.tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        lock = patch.object(tile, "runtime_lock")
+        lock.start()
+        self.addCleanup(lock.stop)
+        self.layout = {"autostart": True, "apps": [{"desktop_id": "foot", "desktop_path": "/usr/share/applications/foot.desktop"}]}
+
+    def run_autostart(self, layout):
+        restored = []
+        settings = {"workspace_layouts": {2: layout}, "workspace_modes": {2: "manual"}}
+        with patch.object(tile, "read_settings", return_value=settings), \
+                patch.object(tile, "send_notification") as notify, \
+                patch.object(tile, "_restore_workspace", side_effect=lambda ws, **k: restored.append(ws) or {"failed": []}):
+            result = tile._autostart_all(False)
+        return restored, result, notify
+
+    def test_only_a_confirmed_unchanged_list_starts(self):
+        restored, result, notify = self.run_autostart(self.layout)
+        self.assertEqual((restored, result["unconfirmed"]), ([], [2]))
+        notify.assert_called_once()
+        with patch.object(tile, "read_settings", return_value={"workspace_layouts": {2: self.layout}}):
+            self.assertFalse(tile.approve_autostart(2, True))                      # no snapshot: never
+            self.assertFalse(tile.approve_autostart(2, True, {"apps": [{"desktop_id": "evil"}]}))  # changed since
+            self.assertTrue(tile.approve_autostart(2, True, self.layout))
+        self.assertEqual(self.run_autostart(self.layout)[0], [2])
+        swapped = dict(self.layout, windows=[{"at": [0, 0], "size": [9, 9], "app": {"desktop_id": "evil"}}])
+        self.assertEqual(self.run_autostart(swapped)[0], [])                       # a window's own launcher counts
+        changed = dict(self.layout, apps=self.layout["apps"] + [{"desktop_id": "evil"}])
+        self.assertEqual(self.run_autostart(changed)[0], [])
+        self.assertEqual(tile.approvals_path().parent.name, "ubruckhaus.simple-tile")     # shared with the plugin
+        self.assertEqual(os.stat(tile.approvals_path()).st_mode & 0o077, 0)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1825,7 +1825,9 @@ class WorkspacesPageMixin:
                      state.save_apps_on(store, ws)),
                     ("autostart", _("Autostart on session startup"), _("Automatically launch saved apps on startup"),
                      state.autostart_on(store, ws))):
-                box.append(self.ws_toggle(title, hint, on, lambda k=key: self.ws_change(state.toggle_layout_flag, ws, k)))
+                box.append(self.ws_toggle(title, hint, on, lambda k=key, was=on: self.ws_change(
+                    state.toggle_layout_flag, ws, k,
+                    then=(lambda: self.ws_approve(ws, not was)) if k == "autostart" else None)))
         box.append(Gtk.Separator())
         box.append(self.ws_toggle(_("Auto-move on restore"), _("Move existing windows to next free workspace without asking"),
                                   store.get("autoMoveOnRestore") is True,
@@ -1955,10 +1957,18 @@ class WorkspacesPageMixin:
                 self.ws_render()
                 return
             self.ws_failed.pop(ws, None)
-            self.ws_change(state.save_capture, ws, capture)
+            self.ws_change(state.save_capture, ws, capture, then=lambda: self.ws_approve(ws, True))
             self.ws_message = _("Saved App Preset for Workspace {0} ({1} windows)").format(ws, capture.get("count") or 0)
             self.ws_render()
         self._async(lambda: tiling.capture_workspace(ws), done)
+
+    def ws_approve(self, ws, on):
+        """Saved here or switched on here by the user: the app list this page just
+        saved may start at login (Workspace Presets reads the same approval)."""
+        layouts = self.ws_store.get("workspaceLayouts") if isinstance(self.ws_store, dict) else None
+        seen = json.loads(json.dumps(layouts.get(str(ws)))) if isinstance(layouts, dict) and \
+            isinstance(layouts.get(str(ws)), dict) else None
+        self._async(lambda: tiling.approve_autostart(ws, on, seen), lambda *_args: None)
 
     def ws_restore(self, ws, action=None, use=False):
         if self.ws_busy:

@@ -1314,14 +1314,112 @@ def autostart_all(dry_run=False):
         return result
 
 
+# --- autostart approval (the same file and fingerprint as Workspace Presets 0.7.0) ----
+# The store can be the Workspace Presets plugin's shell.json entry, which anything
+# that can write that file could edit; so a saved app list alone never starts apps
+# at login: the user confirms it (saving the App Preset or switching its autostart
+# on, here or in the plugin's panel), and a fingerprint of that list is kept in a
+# private file both plugins read.
+
+def approvals_path():
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    return Path(state) / "ubruckhaus.simple-tile" / "autostart.json"
+
+
+def _launcher_pair(record):
+    if not isinstance(record, dict):
+        return None
+    ident, path = record.get("desktop_id"), record.get("desktop_path")
+    return (ident if isinstance(ident, str) else "", path if isinstance(path, str) else "")
+
+
+def launcher_keys(layout):
+    """Every launcher a restore of this layout can start from: the app list,
+    each saved window and the app record inside it, as sorted unique pairs."""
+    records = []
+    for key in ("apps", "windows"):
+        items = layout.get(key) if isinstance(layout.get(key), list) else []
+        for item in items:
+            records.append(item)
+            if isinstance(item, dict):
+                records.append(item.get("app"))
+    return sorted({pair for pair in map(_launcher_pair, records) if pair and pair != ("", "")})
+
+
+def app_fingerprint(layout):
+    return hashlib.sha256(json.dumps(launcher_keys(layout)).encode()).hexdigest()
+
+
+def load_approvals():
+    try:
+        fd = os.open(approvals_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return {}
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 65536:
+            return {}
+        data = json.loads(os.read(fd, 65537))
+    except (OSError, ValueError):
+        return {}
+    finally:
+        os.close(fd)
+    return {k: v for k, v in data.items() if isinstance(k, str) and k.isdigit() and isinstance(v, str)} \
+        if isinstance(data, dict) else {}
+
+
+def save_approvals(data):
+    path = approvals_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = os.lstat(path.parent)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise RuntimeError("unsafe state directory")
+    os.chmod(path.parent, 0o700)
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".autostart.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream)
+        os.replace(temp, path)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
+def approve_autostart(ws_id, on, confirmed=None, locked=False):
+    """The user's confirmation in the Presets page: the launchers of the layout
+    the page itself saved (`confirmed`) may start at login, but only while the
+    store still holds exactly those (on); or no longer (off)."""
+    if type(ws_id) is not int or ws_id <= 0:
+        raise ValueError("invalid workspace id")
+
+    def work():
+        approvals = load_approvals()
+        layout = read_settings().get("workspace_layouts", {}).get(ws_id)
+        if on and isinstance(layout, dict) and layout.get("autostart") is not False and \
+                isinstance(confirmed, dict) and launcher_keys(confirmed) == launcher_keys(layout):
+            approvals[str(ws_id)] = app_fingerprint(layout)
+        else:
+            approvals.pop(str(ws_id), None)
+        save_approvals(approvals)
+        return str(ws_id) in approvals
+    if locked:
+        return work()
+    with runtime_lock():
+        return work()
+
+
 def _autostart_all(dry_run):
-    started = []
+    started, unconfirmed = [], []
+    approvals = load_approvals()
     settings = read_settings()
     modes = settings.get("workspace_modes", {})
     for ws_id, layout in sorted(settings.get("workspace_layouts", {}).items()):
         # Only an App Preset in use starts: one the workspace left (a layout
         # chosen, a reset) stays saved but quiet.
         in_use = modes.get(ws_id) == "manual"   # clean_presets writes it for every App Preset in use
+        if layout.get("autostart") is True and in_use and approvals.get(str(ws_id)) != app_fingerprint(layout):
+            unconfirmed.append(ws_id)        # never confirmed (or changed since): not started
+            continue
         if layout.get("autostart") is True and in_use:
             # The batch already owns the runtime lock.
             restore = restore_workspace if dry_run else _restore_workspace
@@ -1330,7 +1428,11 @@ def _autostart_all(dry_run):
                 kwargs["conflict_action"] = "move"
             started.append({"workspace": ws_id, "result": restore(ws_id, **kwargs)})
     failures = sum(len(w["result"].get("failed", [])) for w in started)
-    return {"status": "partial" if failures else "ok", "workspaces": started, "failed_count": failures}
+    if unconfirmed and not dry_run:
+        send_notification(APP_NAME, "Autostart skipped for workspace %s: switch its autostart off and on once "
+                                    "in App Presets to confirm the saved apps." % ", ".join(map(str, unconfirmed)))
+    return {"status": "partial" if failures else "ok", "workspaces": started, "failed_count": failures,
+            "unconfirmed": unconfirmed}
 
 
 # Omarchy 4.5 gives every workspace a mode (Super + L): dwindle, scrolling or

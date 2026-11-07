@@ -89,7 +89,9 @@ class SnapshotTests(unittest.TestCase):
     def test_autostart_only_app_presets_in_use(self):
         tile.save_store({"workspaceModes": {"2": "manual", "3": "auto"},
                          "workspaceLayouts": {"2": {"autostart": True, "apps": []}, "3": {"autostart": True, "apps": []}}})
-        with patch.object(tile, "_restore_workspace", return_value={"status": "ok"}) as restore:
+        both = {str(ws): tile.app_fingerprint({"apps": []}) for ws in (2, 3)}       # confirmed in the panel
+        with patch.object(tile, "_restore_workspace", return_value={"status": "ok"}) as restore, \
+                patch.object(tile, "load_approvals", return_value=both), patch.object(tile, "send_notification"):
             tile._autostart_all(False)
         self.assertEqual([call.args[0] for call in restore.call_args_list], [2])
 
