@@ -137,17 +137,34 @@ class AskAiTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 theme_ai.run("claude", "PROMPT")
 
-    def test_jail_hides_home_but_the_agents_own_folders(self):
+    def test_jail_hides_home_and_shows_the_agents_folders_as_throwaway_overlays(self):
         work = Path("/tmp/ask-work")
-        with patch.object(theme_ai, "real_binary", return_value="/home/u/.local/share/mise/installs/codex/1/bin/codex"):
-            argv = theme_ai.jail_argv(theme_ai.HELPERS["agy"], ["agy", "-p", "x"], work,
-                                      home=Path("/home/u"), environ={}, bus=work / "bus")
-        joined = " ".join(argv)
-        self.assertIn("--tmpfs /home/u", joined)                       # an empty home
-        self.assertIn("--bind-try /home/u/.gemini /home/u/.gemini", joined)
-        self.assertIn("--ro-bind /home/u/.local/share/mise/installs", joined)
-        self.assertNotIn("/home/u/Documents", joined)
-        self.assertEqual(argv[-2:], ["-p", "x"])
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".gemini").mkdir()
+            (home / ".codex").mkdir()
+            (home / ".codex/auth.json").write_text("{}")
+            (home / ".codex/config.toml").write_text("")
+            binary = str(home / ".local/share/mise/installs/codex/1/bin/codex")
+            with patch.object(theme_ai, "real_binary", return_value=binary):
+                argv = theme_ai.jail_argv(theme_ai.HELPERS["agy"], ["agy", "-p", "x"], work,
+                                          home=home, environ={}, bus=work / "bus")
+                agy = " ".join(argv)
+                codex = theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex", "exec"], work, home=home, environ={})
+            self.assertIn(f"--tmpfs {home}", agy)                      # an empty home
+            self.assertIn(f"--overlay-src {home}/.gemini --tmp-overlay {home}/.gemini", agy)
+            self.assertNotIn("--bind-try", agy)                        # nothing of theirs written through
+            self.assertNotIn(".config/antigravity", agy)               # missing: not mounted at all
+            self.assertIn(f"--ro-bind {home}/.local/share/mise/installs", agy)
+            joined = " ".join(codex)
+            self.assertIn(f"--tmp-overlay {home}/.codex", joined)
+            self.assertIn(f"--bind {home}/.codex/auth.json {home}/.codex/auth.json", joined)   # sign-in kept
+            self.assertNotIn("config.toml", joined)
+            (home / ".codex/auth.json").unlink()
+            (home / ".codex/auth.json").symlink_to(home / "elsewhere")
+            with patch.object(theme_ai, "real_binary", return_value=binary):
+                joined = " ".join(theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex"], work, home=home, environ={}))
+            self.assertNotIn("auth.json", joined)                      # a link is never bound
         self.assertIn("--die-with-parent", argv)
         self.assertIn("unix:path=/tmp/ask-work/bus", argv)              # the filtered bus only
         self.assertLess(argv.index("--unshare-pid"), argv.index("--proc"))  # no host processes

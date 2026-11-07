@@ -50,23 +50,19 @@ def window(address, cls='term', ws=2, **extra):
 
 
 class RestoreTests(unittest.TestCase):
-    def test_browser_restore_requests_new_window_and_preserves_profile(self):
-        app = {"argv": ["chrome", "--profile-directory=Work"], "name": "Chrome"}
-        prepared = tile.app_for_restore(app, {"class": "google-chrome"})
-        self.assertEqual(prepared["argv"], ["chrome", "--new-window", "--profile-directory=Work"])
-        self.assertEqual(app["argv"], ["chrome", "--profile-directory=Work"])
-        self.assertEqual(tile.app_for_restore(prepared, {"class": "google-chrome"})["argv"].count("--new-window"), 1)
-        self.assertIs(tile.app_for_restore(app, {"class": "chrome-webapp-Default"}), app)
-
-    def test_browser_restore_uses_installed_launcher_not_saved_exec(self):
+    def test_a_saved_browser_starts_only_from_its_launcher(self):
+        """2.0.0 (release review): no command line is built for a browser any more; the saved
+        app starts through uwsm-app with its installed launcher, whatever its class says."""
         with tempfile.TemporaryDirectory() as directory:
-            desktop = Path(directory) / "chrome.desktop"
-            desktop.write_text('[Desktop Entry]\nExec=/opt/chrome --profile-directory="Work Profile" %U\n')
-            app = {"desktop_path": str(desktop), "exec": "untrusted-command"}
-            prepared = tile.app_for_restore(app, {"class": "google-chrome"})
-        self.assertEqual(prepared["argv"], ["/opt/chrome", "--new-window", "--profile-directory=Work Profile"])
-        app = {"exec": "untrusted-command"}
-        self.assertIs(tile.app_for_restore(app, {"class": "google-chrome"}), app)
+            desktop = Path(directory) / "other-app.desktop"
+            desktop.write_text("[Desktop Entry]\nName=Other\nExec=/opt/other %U\n")
+            record = {"desktop_path": str(desktop), "desktop_id": "other-app"}
+            app = {"class": "google-chrome", "desktop_path": str(desktop), "argv": ["/opt/other", "x"]}
+            with patch.object(tile, "parse_desktop_files", return_value=[record]), \
+                    patch.object(tile.shutil, "which", return_value="/usr/bin/uwsm-app"), \
+                    patch.object(tile.subprocess, "Popen") as popen:
+                self.assertTrue(tile.launch_app(tile.restorable(app)))
+            self.assertEqual(popen.call_args[0][0], ["uwsm-app", "--", str(desktop)])
 
     def test_inactive_workspace_close_restores_both_chrome_windows(self):
         chrome = window("0x1", "google-chrome", ws=2)
@@ -96,13 +92,16 @@ class RestoreTests(unittest.TestCase):
 
         def launch(argv, **kwargs):
             self.assertEqual(state["active"], 2)
-            self.assertEqual(argv, ["chrome", "--new-window"])
+            self.assertEqual(argv, ["uwsm-app", "--", str(launcher)])      # its launcher, nothing else
             self.assertNotIn(extra, state["clients"])
             state["clients"].append(missing)
 
         with patch.object(tile, "read_settings", return_value=settings), \
                 patch.object(tile, "runtime_lock"), patch.object(tile, "hypr", side_effect=hypr), \
                 patch.object(tile, "is_app_available", return_value=(True, "ok")), \
+                patch.object(tile, "parse_desktop_files", return_value=[{"desktop_path": str(launcher),
+                                                                        "desktop_id": "google-chrome"}]), \
+                patch.object(tile.shutil, "which", return_value="/usr/bin/uwsm-app"), \
                 patch.object(tile.subprocess, "Popen", side_effect=launch) as popen, \
                 patch.object(tile, "apply_layout_preset"), patch.object(tile, "restore_geometry") as geometry:
             result = tile.restore_workspace(2, conflict_action="close")
@@ -207,21 +206,35 @@ class RestoreTests(unittest.TestCase):
             app = tile.resolve_app_for_client({"class": "sneaky", "pid": 4242}, [])
         self.assertEqual(app["argv"], [])
 
-    def test_terminal_class_from_a_sandbox_is_not_a_terminal(self):
-        """A window calling itself "foot" whose process is in another mount namespace (a sandbox),
-        or whose executable is not an installed terminal, gets no command from its children."""
-        with patch.object(tile, "same_mount_namespace", return_value=False), \
-                patch.object(tile, "get_terminal_active_command") as active:
-            tile.resolve_app_for_client({"class": "foot", "pid": 4242}, [])
-        active.assert_not_called()
-        with patch.object(tile, "same_mount_namespace", return_value=True), \
-                patch.object(tile.os, "readlink", return_value="/home/x/.local/bin/foot"):
-            self.assertFalse(tile.host_terminal(4242))
-        with patch.object(tile, "same_mount_namespace", return_value=True), \
-                patch.object(tile.os, "readlink", return_value="/usr/bin/foot"):
-            self.assertTrue(tile.host_terminal(4242))
-        self.assertTrue(tile.same_mount_namespace(os.getpid()))
-        self.assertFalse(tile.same_mount_namespace("1; rm"))
+    def test_a_terminal_is_saved_as_its_launcher_and_proc_is_never_read(self):
+        """2.0.0 (release review): the command running in a terminal is not read from /proc,
+        stored or restarted; the terminal window maps to its own launcher."""
+        foot = {"name": "Foot", "desktop_id": "foot", "desktop_path": "/usr/share/applications/foot.desktop",
+                "startup_class": "foot", "icon": "foot", "exec": "foot"}
+        with patch.object(tile.Path, "read_bytes", side_effect=AssertionError("/proc read")), \
+                patch.object(tile.os, "listdir", side_effect=AssertionError("/proc scan")):
+            app = tile.resolve_app_for_client({"class": "foot", "pid": 4242}, [foot])
+        self.assertIs(app, foot)
+        self.assertNotIn("argv", app)
+        self.assertFalse(hasattr(tile, "get_terminal_active_command"))
+
+    def test_short_launcher_names_do_not_claim_other_windows(self):
+        short = {"name": "R", "desktop_id": "gh", "desktop_path": "/x/gh.desktop", "exec": "gh"}
+        app = tile.resolve_app_for_client({"class": "org.gnome.Nautilus", "pid": 0}, [short])
+        self.assertEqual(app["desktop_path"], "")
+
+    def test_launcher_files_are_regular_files_read_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "ok.desktop").write_text("[Desktop Entry]\nName=Ok\nExec=ok\n")
+            os.mkfifo(base / "fifo.desktop")
+            (base / "link.desktop").symlink_to(base / "fifo.desktop")
+            (base / "big.desktop").write_bytes(b"x" * (tile.DESKTOP_FILE_MAX + 1))
+            (base / "flatpak.desktop").symlink_to(base / "ok.desktop")      # a link to a file is fine
+            self.assertIsNone(tile.read_launcher(base / "fifo.desktop"))
+            self.assertIsNone(tile.read_launcher(base / "link.desktop"))
+            self.assertIsNone(tile.read_launcher(base / "big.desktop"))
+            self.assertIn("Name=Ok", tile.read_launcher(base / "flatpak.desktop"))
 
     def test_waits_for_matching_new_window_even_on_wrong_workspace(self):
         old = window('0x1')

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import configparser
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -27,7 +26,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import shlex
 import stat
 import subprocess
 import sys
@@ -558,6 +556,28 @@ DESKTOP_FILE_MAX = 256 * 1024     # a launcher file larger than this is skipped
 DESKTOP_FILES_MAX = 4000          # and no more than this many are read
 
 
+def read_launcher(path):
+    """A launcher's text, or None. It may be a link (Flatpak exports are) but must lead to a
+    regular file of at most DESKTOP_FILE_MAX bytes; opened without blocking and checked again on
+    the open file, so a FIFO or device (also swapped in after the first check) is never read."""
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > DESKTOP_FILE_MAX:
+            return None
+        data = os.read(fd, DESKTOP_FILE_MAX + 1)
+        return None if len(data) > DESKTOP_FILE_MAX else data.decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def parse_desktop_files():
     apps, seen_ids = [], set()
     for directory in get_desktop_directories():
@@ -569,11 +589,8 @@ def parse_desktop_files():
             seen_ids.add(path.name)
             values, section = {}, None
             try:
-                if not path.is_file() or path.stat().st_size > DESKTOP_FILE_MAX:
-                    continue
-                with path.open("rb") as stream:
-                    text = stream.read(DESKTOP_FILE_MAX + 1).decode("utf-8", errors="ignore")
-                if len(text) > DESKTOP_FILE_MAX:
+                text = read_launcher(path)
+                if text is None:
                     continue
                 for raw in text.splitlines():
                     line = raw.strip()
@@ -627,162 +644,13 @@ def installed_launcher(app, desktop_apps=None):
     return ""
 
 
-TRUSTED_BIN_DIRS = ("/usr/bin", "/usr/local/bin", "/bin")
-TERMINAL_BINS = {"foot", "footclient", "alacritty", "kitty", "ghostty", "wezterm-gui", "xterm", "gnome-terminal-server"}
-
-
-def same_mount_namespace(pid):
-    """True only for a process in this session's own mount namespace. A sandboxed app (Flatpak,
-    bubblewrap, a container) has its own: what it says about itself (cmdline, children) is never
-    turned into a command."""
-    try:
-        return os.stat(f"/proc/{int(pid)}/ns/mnt").st_ino == os.stat("/proc/self/ns/mnt").st_ino
-    except (OSError, ValueError, TypeError):
-        return False
-
-
-def host_terminal(pid):
-    """The window's process is a terminal emulator installed on the host (its real executable, in
-    this namespace), not a window that only calls itself one through its class."""
-    if not same_mount_namespace(pid):
-        return False
-    try:
-        exe = Path(os.readlink(f"/proc/{int(pid)}/exe"))
-    except (OSError, ValueError):
-        return False
-    return exe.name.casefold() in TERMINAL_BINS and exe.is_absolute() and str(exe).startswith("/usr/")
-
-
-def get_terminal_active_command(pid, terminal_cls):
-    """If the window is a terminal emulator, find the foreground/active command inside it."""
-    shells = {"sh", "bash", "zsh", "fish", "dash", "csh", "tcsh", "login", "init", "systemd"}
-    terminal_bins = TERMINAL_BINS
-
-    def get_children(p):
-        children = []
-        try:
-            cf = Path(f"/proc/{p}/task/{p}/children")
-            if cf.exists():
-                children = [int(x) for x in cf.read_text().split()]
-        except Exception:
-            pass
-        if not children:
-            try:
-                for proc in Path("/proc").iterdir():
-                    if proc.name.isdigit():
-                        try:
-                            stat = (proc / "stat").read_text()
-                            ppid = int(stat.split(")")[1].split()[1])
-                            if ppid == p:
-                                children.append(int(proc.name))
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-        return children
-
-    queue = get_children(pid)
-    candidate_proc = None
-
-    while queue:
-        curr = queue.pop(0)
-        try:
-            exe_name = Path(os.readlink(f"/proc/{curr}/exe")).name.casefold()
-        except Exception:
-            try:
-                exe_name = Path(f"/proc/{curr}/comm").read_text().strip().casefold()
-            except Exception:
-                exe_name = ""
-
-        if exe_name and exe_name not in shells and exe_name not in terminal_bins and same_mount_namespace(curr):
-            candidate_proc = (curr, exe_name)
-        queue.extend(get_children(curr))
-
-    if not candidate_proc:
-        return None
-
-    cpid, cname = candidate_proc
-    try:
-        raw = Path(f"/proc/{cpid}/cmdline").read_bytes()
-        cmdline = [part.decode("utf-8", errors="ignore") for part in raw.split(b"\0") if part]
-    except Exception:
-        cmdline = [cname]
-
-    try:
-        exe_path = str(Path(os.readlink(f"/proc/{cpid}/exe")).resolve())
-        if cmdline and not shutil.which(cmdline[0]) and Path(exe_path).is_file():
-            cmdline[0] = exe_path
-    except Exception:
-        pass
-
-    try:
-        cwd = str(Path(f"/proc/{cpid}/cwd").resolve())
-    except Exception:
-        cwd = ""
-
-    t_cls = terminal_cls.lower()
-    t_bin = shutil.which(t_cls) or shutil.which("foot") or "foot"
-
-    if "foot" in t_cls:
-        argv = [t_bin]
-        if cwd and Path(cwd).is_dir():
-            argv.extend(["-D", cwd])
-        argv.extend(cmdline)
-    elif "alacritty" in t_cls:
-        argv = [t_bin]
-        if cwd and Path(cwd).is_dir():
-            argv.extend(["--working-directory", cwd])
-        argv.extend(["-e", *cmdline])
-    elif "kitty" in t_cls:
-        argv = [t_bin]
-        if cwd and Path(cwd).is_dir():
-            argv.extend(["--directory", cwd])
-        argv.extend(cmdline)
-    elif "ghostty" in t_cls:
-        argv = [t_bin]
-        if cwd and Path(cwd).is_dir():
-            argv.extend(["--working-directory", cwd])
-        argv.extend(["-e", *cmdline])
-    else:
-        argv = [t_bin, *cmdline]
-
-    return {
-        "name": cname.capitalize(),
-        "command": cname,
-        "argv": argv,
-        "argv_source": "terminal",
-        "cwd": cwd,
-        "icon": "utilities-terminal",
-    }
-
-
 def resolve_app_for_client(client, desktop_apps):
     cls = client.get("class", "").strip()
     icls = client.get("initialClass", "").strip()
     pid = client.get("pid", 0)
 
-    # 0. Check if this is a terminal running a specific CLI tool (e.g. codex, nvim)
-    terminal_classes = {"foot", "footclient", "alacritty", "kitty", "ghostty", "wezterm", "xterm", "gnome-terminal"}
-    if pid and any(t in cls.lower() for t in terminal_classes) and host_terminal(pid):
-        active_cmd = get_terminal_active_command(pid, cls)
-        if active_cmd:
-            cmd_name = active_cmd["command"]
-            icon = "utilities-terminal"
-            for d in desktop_apps:
-                if d.get("desktop_id", "").casefold() == cmd_name or d.get("name", "").casefold() == cmd_name:
-                    if d.get("icon"):
-                        icon = d.get("icon")
-                    break
-            return {
-                "name": active_cmd["name"],
-                "class": cls,
-                "desktop_id": cmd_name if valid_desktop_id(cmd_name) else "",
-                "desktop_path": "",
-                "icon": icon,
-                "argv": active_cmd["argv"],
-                "argv_source": "terminal",
-                "cwd": active_cmd["cwd"],
-            }
+    # A terminal window is saved as its terminal's own launcher (1–3 below): the
+    # command running in it is never read from /proc, stored or started again.
 
     # 1. Match StartupWMClass
     for app in desktop_apps:
@@ -802,11 +670,13 @@ def resolve_app_for_client(client, desktop_apps):
         did = app.get("desktop_id", "").casefold()
         name = app.get("name", "").casefold()
         exec_cmd = app.get("exec", "").casefold()
-        if (did and did in cls_lower) or (name and name in cls_lower):
+        # A launcher's ID or name inside the class counts only when it is a real word (at least
+        # 4 characters): a "Name=R" launcher must not claim every window with an "r" in its class.
+        if (len(did) >= 4 and did in cls_lower) or (len(name) >= 4 and name in cls_lower):
             return app
         if "omarchy-launch-webapp" in exec_cmd:
             url_part = exec_cmd.split()[-1].replace("https://", "").replace("http://", "").split("/")[0]
-            if url_part and (url_part in cls_lower or cls_lower in url_part):
+            if len(url_part) >= 4 and len(cls_lower) >= 4 and (url_part in cls_lower or cls_lower in url_part):
                 return app
 
     # 3. Match /proc/<pid>/exe
@@ -942,24 +812,9 @@ def restorable(app):
 
 
 def is_app_available(app):
-    """Check if an app can be executed or located on the system."""
-    if "argv" in app and app["argv"]:
-        argv = app["argv"]
-        if len(argv) == 1 and " " in argv[0]:
-            import shlex
-            try:
-                argv = shlex.split(argv[0])
-                app["argv"] = argv
-            except Exception:
-                pass
-        cmd = argv[0]
-        if shutil.which(cmd):
-            return True, "ok"
-        path = Path(cmd)
-        if path.is_file() and os.access(path, os.X_OK):
-            return True, "ok"
-        return False, "command_not_found"
-
+    """Whether an app can be started: only through an installed launcher (a saved
+    command line is never used, see restorable)."""
+    app.pop("argv", None)
     # Only an installed launcher starts the app (installed_launcher), never a saved path or ID.
     desktop_path = app.get("desktop_path", "")
     launcher = installed_launcher(app) if desktop_path or app.get("desktop_id") else ""
@@ -1029,62 +884,10 @@ def _clean_env():
     return env
 
 
-def app_for_restore(app, saved):
-    """Request a real browser window for each missing normal Chrome slot."""
-    browser_classes = {"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"}
-    classes = {str(saved.get(k, "")).casefold() for k in ("class", "initialClass")}
-    if not classes & browser_classes:
-        return app  # Chrome web apps keep their own desktop launcher.
-    argv = list(app.get("argv") or [])
-    try:
-        if argv and len(argv) == 1 and " " in argv[0]:
-            argv = shlex.split(argv[0])
-        if not argv:
-            # Read the installed launcher, never execute a saved raw Exec string.
-            desktop = configparser.ConfigParser(interpolation=None, strict=False)
-            desktop.read(app.get("desktop_path") or "", encoding="utf-8")
-            argv = shlex.split(desktop.get("Desktop Entry", "Exec"))
-            argv = [arg for arg in argv if arg not in ("%U", "%u", "%F", "%f")]
-            if any("%" in arg for arg in argv):
-                return app
-    except (OSError, ValueError, configparser.Error):
-        return app
-    if not argv or any(arg.startswith(("--app=", "--app-id=")) for arg in argv):
-        return app
-    if "--new-window" not in argv:
-        argv.insert(1, "--new-window")
-    return dict(app, argv=argv)
-
-
 def launch_app(app):
-    """Launch an application following approved security guidelines.
-
-    1. Direct argv for standalone binaries (never through a shell).
-    2. uwsm-app for desktop files (in app-graphical.slice).
-    3. GioUnix.DesktopAppInfo fallback for desktop files.
-    Never executes arbitrary shell strings.
-    """
-    if "argv" in app and app["argv"]:
-        argv = app["argv"]
-        if len(argv) == 1 and " " in argv[0]:
-            import shlex
-            try:
-                argv = shlex.split(argv[0])
-                app["argv"] = argv
-            except Exception:
-                pass
-        try:
-            subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                env=_clean_env(),
-            )
-            return True
-        except OSError:
-            return False
-
+    """Start a saved app only from its installed launcher: uwsm-app with the
+    .desktop file (in app-graphical.slice), Gio as the fallback. Never a saved
+    command line, never a shell string."""
     desktop_path = app.get("desktop_path", "")
     # Second check where it is started: only an installed launcher's own file (is_app_available
     # put it there), so no other path can hand uwsm-app or Gio a file from elsewhere.
@@ -1443,7 +1246,7 @@ def _restore_workspace(ws_id, dry_run=False, conflict_action="ask"):
                 before = {c.get("address") for c in json.loads(hypr("clients", "-j"))}
                 focus_changed = True
                 hypr("eval", 'hl.dispatch(hl.dsp.focus({workspace=%d}))' % ws_id)
-                if not launch_app(app_for_restore(app, saved)):
+                if not launch_app(app):
                     failed.append({"name": name, "reason": "launch_failed"})
                     continue
                 client = wait_for_window(saved, before)

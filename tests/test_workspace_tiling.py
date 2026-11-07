@@ -441,12 +441,11 @@ class AppLaunchTests(unittest.TestCase):
         lock.start()
         self.addCleanup(lock.stop)
 
-    def test_launch_standalone_argv(self):
+    def test_a_saved_command_line_is_never_launched(self):
         app = {"argv": ["/opt/bin/my-app", "--flag"]}
         with patch.object(tile.subprocess, "Popen") as popen:
-            self.assertTrue(tile.launch_app(app))
-            popen.assert_called_once()
-            self.assertEqual(popen.call_args[0][0], ["/opt/bin/my-app", "--flag"])
+            self.assertFalse(tile.launch_app(app))          # no launcher: nothing starts
+        popen.assert_not_called()
 
     def test_launch_desktop_with_uwsm(self):
         app = {"desktop_path": "/usr/share/applications/test.desktop"}
@@ -514,17 +513,14 @@ class AppLaunchTests(unittest.TestCase):
 
 
     def test_is_app_available_checks_command_and_desktop(self):
-        # Binary in argv exists
-        with patch.object(tile.shutil, "which", return_value="/usr/bin/python3"):
-            avail, reason = tile.is_app_available({"argv": ["python3"]})
-            self.assertTrue(avail)
-            self.assertEqual(reason, "ok")
-
-        # Missing binary in argv
-        with patch.object(tile.shutil, "which", return_value=None):
-            avail, reason = tile.is_app_available({"argv": ["nonexistent_xyz_app"]})
+        # A saved command line alone never makes an app available (only a launcher does).
+        with patch.object(tile.shutil, "which", return_value="/usr/bin/python3"), \
+                patch.object(tile, "get_desktop_directories", return_value=[]):
+            app = {"argv": ["python3"]}
+            avail, reason = tile.is_app_available(app)
             self.assertFalse(avail)
-            self.assertEqual(reason, "command_not_found")
+            self.assertEqual(reason, "no_launcher")
+            self.assertNotIn("argv", app)
 
         # Missing desktop file
         avail, reason = tile.is_app_available({"desktop_path": "/nonexistent/path.desktop"})

@@ -1638,7 +1638,13 @@ def image_size_problem(source) -> str | None:
             size = _image_header_size(handle)
             meta = _png_metadata_problem(handle) if size and bytes(source[:8]) == PNG_SIGNATURE else None
         else:
-            with open(source, "rb") as handle:
+            # A regular file only, opened without blocking: a FIFO or device named as an
+            # image (in a store, a backup, a launcher) is refused, never waited on.
+            fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                return _("unreadable image")
+            with os.fdopen(fd, "rb") as handle:
                 size = _image_header_size(handle)
                 handle.seek(0)
                 png = handle.read(8) == PNG_SIGNATURE

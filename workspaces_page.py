@@ -1876,12 +1876,12 @@ class WorkspacesPageMixin:
         chip.add_css_class("tm-ws-chip")
         if failed:
             chip.add_css_class("tm-ws-chip-failed")
-        icon_name = app.get("icon") or "application-x-executable"
-        if isinstance(icon_name, str) and icon_name.startswith("/"):
-            icon = Gtk.Image.new_from_file(icon_name) if not theme_core.image_size_problem(icon_name) \
-                else Gtk.Image.new_from_icon_name("application-x-executable")
-        else:
-            icon = Gtk.Image.new_from_icon_name(icon_name)
+        # A saved icon is only ever an icon-theme name: a path (from the shared store, a
+        # backup or a launcher) is never opened or decoded here, on the UI thread.
+        icon_name = app.get("icon") if isinstance(app.get("icon"), str) else ""
+        if not icon_name or "/" in icon_name:
+            icon_name = "application-x-executable"
+        icon = Gtk.Image.new_from_icon_name(icon_name)
         icon.set_pixel_size(18)
         chip.append(icon)
         name = str(app.get("name") or app.get("class") or _("App"))

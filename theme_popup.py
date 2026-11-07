@@ -2587,15 +2587,25 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         return page
 
     def open_editor(self, base: theme_core.ThemeInfo, edit: bool = False,
-                    wallpaper: theme_core.WallpaperInfo | None = None):
+                    wallpaper: theme_core.WallpaperInfo | None = None, palette=None):
         """Make a new theme from `base`, from one of its wallpapers (colors
         taken from the picture), or (edit=True) change a custom theme."""
-        try:
-            palette = theme_custom.palette_from_image(wallpaper.path) if wallpaper else \
-                theme_custom.load_palette(base)
-        except (OSError, ValueError) as error:
-            theme_core.notify(_("Could not read the colors"), str(error))
+        if wallpaper is not None and palette is None:
+            # The picture is decoded on a worker thread, never on the UI thread;
+            # the editor opens when its colors are known.
+            def done(result, error):
+                if error is not None or result is None:
+                    theme_core.notify(_("Could not read the colors"), str(error or ""))
+                    return
+                self.open_editor(base, edit, wallpaper, palette=result)
+            self._async(lambda: theme_custom.palette_from_image(wallpaper.path), done)
             return
+        if palette is None:
+            try:
+                palette = theme_custom.load_palette(base)
+            except (OSError, ValueError) as error:
+                theme_core.notify(_("Could not read the colors"), str(error))
+                return
         self.active_theme = None
         self.stop_preview()
         self.ed_return_page = None          # Ask AI's Use sets it after opening
@@ -5765,7 +5775,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 def main():
     app = ThemeManager()
     atexit.register(cleanup_pid)
-    atexit.register(theme_ai.release_local)   # ended (also by a signal): unload what Ask AI loaded
+    atexit.register(lambda: theme_ai.release_local(wait=1.0))   # ended (also by a signal): never hangs
     return app.run()
 
 

@@ -121,7 +121,9 @@ HELPERS = {
         "login": "codex login",
         # It can read files: it runs in a bubblewrap jail that shows it no
         # home folder but its own (see jail_argv).
-        "jail": {"rw": [".codex"], "dbus": False},
+        # Its folder is an overlay whose writes vanish (no config, hook or MCP
+        # change outlives the Ask); only the sign-in file is written through.
+        "jail": {"overlay": [".codex"], "keep": [".codex/auth.json"], "dbus": False},
     },
     "agy": {
         "name": "Antigravity",
@@ -132,7 +134,7 @@ HELPERS = {
         "files": [".gemini/antigravity-cli/history.jsonl"], "env": ["GEMINI_API_KEY"],
         "login": "agy",
         # Its sign-in is in the keyring: the jail gets a filtered bus (keyring only).
-        "jail": {"rw": [".gemini", ".config/antigravity"], "dbus": True},
+        "jail": {"overlay": [".gemini", ".config/antigravity"], "keep": [], "dbus": True},
     },
 }
 
@@ -434,11 +436,15 @@ def owned_models() -> list[tuple]:
         return list(_OWNED)
 
 
-def release_local(keep=None) -> list[tuple]:
+def release_local(keep=None, wait: float = -1) -> list[tuple]:
     """Unload every model an Ask loaded, except `keep` (a local_key). Returns
-    what was unloaded. Short timeouts; errors are ignored."""
+    what was unloaded. Short timeouts; errors are ignored. `wait`: seconds to
+    wait for an unload or Ask start in progress (-1: as long as it takes; at
+    exit a short wait, never a hang)."""
     done = []
-    with _UNLOADING:
+    if not _UNLOADING.acquire(timeout=wait):
+        return done
+    try:
         with _OWNED_LOCK:
             targets = [(key, kind) for key, kind in _OWNED.items() if key != keep]
         for key, kind in targets:
@@ -456,6 +462,8 @@ def release_local(keep=None) -> list[tuple]:
                 with _OWNED_LOCK:
                     _OWNED.pop(key, None)          # a failed unload stays recorded and is tried again
                 done.append(key)
+    finally:
+        _UNLOADING.release()
     return done
 
 
@@ -573,13 +581,10 @@ def real_binary(command: str) -> str | None:
         return None
     real = os.path.realpath(found)
     if os.path.basename(real) == "mise" and shutil.which("mise"):
-        try:
-            done = subprocess.run(["mise", "which", command], capture_output=True, timeout=10, check=False)
-            path = done.stdout.decode("utf-8", "replace").strip()
-            if done.returncode == 0 and path and os.path.isfile(path):
-                return os.path.realpath(path)
-        except (OSError, subprocess.SubprocessError):
-            return None
+        out, ok = theme_core.read_bounded_output(["mise", "which", command], max_bytes=4096, timeout=10.0)
+        path = out.decode("utf-8", "replace").strip()
+        if ok and path and os.path.isfile(path):
+            return os.path.realpath(path)
         return None
     return real
 
@@ -587,8 +592,10 @@ def real_binary(command: str) -> str | None:
 def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = None, environ=None,
               bus: Path | None = None) -> list[str]:
     """argv inside bubblewrap: the system read-only, an empty home with only
-    the agent's own folders, the private work folder, the network. None of
-    the user's files can be read."""
+    the agent's own folders (as throw-away overlays, its sign-in file written
+    through), the private work folder, the network. None of the user's files
+    can be read, and nothing it writes outside its work folder and sign-in
+    outlives the Ask."""
     home = home or Path.home()
     environ = os.environ if environ is None else environ
     binary = real_binary(argv[0])
@@ -609,8 +616,18 @@ def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = Non
         if root == home or home.is_relative_to(root):
             root = Path(binary)
         args += ["--ro-bind", str(root), str(root)]
-    for folder in jail["rw"]:
-        args += ["--bind-try", str(home / folder), str(home / folder)]
+    for folder in jail["overlay"]:
+        # The agent sees its own folder, but every write goes to a throw-away
+        # layer: it cannot plant config, hooks, plugins or MCP servers for
+        # the next time you run it yourself.
+        source = home / folder
+        if source.is_dir() and not source.is_symlink():
+            args += ["--overlay-src", str(source), "--tmp-overlay", str(source)]
+    for name in jail["keep"]:
+        # Its sign-in alone is written through (a refreshed token must stay).
+        path = home / name
+        if path.is_file() and not path.is_symlink():
+            args += ["--bind", str(path), str(path)]
     if bus is not None:
         # Only the keyring answers on this bus (a filtering proxy in the
         # work folder): no systemd, no portals, nothing that starts programs.
