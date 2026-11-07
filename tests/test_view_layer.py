@@ -10,6 +10,7 @@ system (apply_theme, clipboard) are stubbed.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -1799,6 +1800,27 @@ class ViewLayerTest(unittest.TestCase):
         off = self.app.ws_autostart_changes(state.toggle_layout_flag, 3, "autostart")
         self.assertEqual(off, [(3, None)])                                         # switched off: forgotten
         self.assertEqual(self.app.ws_autostart_changes(state.set_split, 3, 0.6), [])  # nothing about apps
+
+    def test_quick_removals_leave_the_copy_of_the_last_view(self):
+        import tempfile
+        import workspace_state as state
+        import workspace_tiling as tiling
+        apps = [{"desktop_id": d, "class": d} for d in ("foot", "gimp", "kitty")]
+        windows = [{"class": d, "at": [i * 600, 0], "size": [590, 1000]} for i, d in enumerate(("foot", "gimp", "kitty"))]
+        store = {"workspaceLayouts": {"3": {"mode": "manual", "autostart": True, "apps": apps, "windows": windows}},
+                 "workspaceModes": {"3": "manual"}}
+        disk = {"store": json.loads(json.dumps(store))}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
+                patch.object(tiling, "runtime_lock"), \
+                patch.object(tiling, "load_store", side_effect=lambda: json.loads(json.dumps(disk["store"]))), \
+                patch.object(tiling, "save_store", side_effect=lambda s: disk.update(store=json.loads(json.dumps(s))) or s), \
+                patch.object(self.app, "_async", side_effect=lambda work, done: done(work(), None)):
+            self.app.ws_store = json.loads(json.dumps(store))
+            self.app.ws_change(state.remove_app, 3, 2)                      # kitty
+            self.app.ws_store = json.loads(json.dumps(store))              # a view one click behind
+            self.app.ws_change(state.remove_app, 3, 1)                      # gimp
+            copy = tiling.load_snapshots()["3"]
+        self.assertEqual([a["desktop_id"] for a in copy["apps"]], ["foot"])   # neither removed app comes back
 
     def test_maprisma_hints_setting_puts_the_note_behind_a_help_button_or_removes_it(self):
         import theme_ai

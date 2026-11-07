@@ -1397,20 +1397,51 @@ def save_snapshots(data):
         raise
 
 
-def approve_autostart(ws_id, on, confirmed=None):
+def _slot_key(item):
+    """What makes a saved app or window the same one: its launcher and class."""
+    if not isinstance(item, dict):
+        return None
+    app = item.get("app") if isinstance(item.get("app"), dict) else {}
+    return json.dumps([item.get("desktop_id"), item.get("desktop_path"), item.get("class"),
+                       app.get("desktop_id"), app.get("desktop_path")], sort_keys=True)
+
+
+def agreed_layout(shown, saved):
+    """The layout the user saw, keeping only apps and windows the saved store
+    also holds: a view a click behind cannot bring back a removed app, and
+    nothing added elsewhere gets in."""
+    if not isinstance(shown, dict) or not isinstance(saved, dict):
+        return None
+    out = dict(shown)
+    for key in ("apps", "windows"):
+        present = [_slot_key(i) for i in (saved.get(key) if isinstance(saved.get(key), list) else [])]
+        kept = []
+        for item in shown.get(key) if isinstance(shown.get(key), list) else []:
+            slot = _slot_key(item)
+            if slot in present:
+                present.remove(slot)        # each saved slot once: no duplicates beyond the store's
+                kept.append(item)
+        out[key] = kept
+    return out
+
+
+def approve_autostart(ws_id, on, confirmed=None, locked=False):
     """The Presets page's confirmation: keep `confirmed` (the layout the page
-    showed) as what starts at login (on), or forget it (off). True if kept."""
+    showed) as what starts at login (on), or forget it (off). True if kept.
+    `locked`: the caller already holds the runtime lock (right after its save)."""
     if type(ws_id) is not int or ws_id <= 0:
         raise ValueError("invalid workspace id")
-    with runtime_lock():
-        snapshots = load_snapshots()
-        snapshot = snapshot_of(confirmed) if on else None
-        if snapshot and (snapshot["apps"] or snapshot["windows"]):
-            snapshots[str(ws_id)] = snapshot
-        else:
-            snapshots.pop(str(ws_id), None)
-        save_snapshots(snapshots)
-        return str(ws_id) in snapshots
+    if not locked:
+        with runtime_lock():
+            return approve_autostart(ws_id, on, confirmed, locked=True)
+    snapshots = load_snapshots()
+    snapshot = snapshot_of(confirmed) if on else None
+    if snapshot and (snapshot["apps"] or snapshot["windows"]):
+        snapshots[str(ws_id)] = snapshot
+    else:
+        snapshots.pop(str(ws_id), None)
+    save_snapshots(snapshots)
+    return str(ws_id) in snapshots
 
 
 def _autostart_all(dry_run):

@@ -239,16 +239,30 @@ class WorkspacesPageMixin:
             with tiling.runtime_lock():
                 store = tiling.load_store()
                 action = rule(store, *args)
-                return tiling.save_store(store), action
+                saved = tiling.save_store(store)
+                # Under the same lock, right after this save: copies are written in the
+                # order of the saves, and keep only what the view and the store agree on.
+                failed = []
+                for ws, shown in autostart:
+                    real = state.layout_for(saved, ws)
+                    agreed = tiling.agreed_layout(shown, real) if shown is not None else None
+                    try:
+                        kept = tiling.approve_autostart(ws, agreed is not None and real is not None
+                                                        and real.get("autostart") is True, agreed, locked=True)
+                    except (OSError, RuntimeError, ValueError):
+                        kept = False
+                    if shown is not None and not kept:
+                        failed.append(ws)
+                return saved, action, failed
 
         def done(result, error):
             if error is not None:
                 theme_core.notify(_("Could not save the setting"), str(error))
                 return
-            self.ws_store, action = result
+            self.ws_store, action, failed = result
+            for ws in failed:
+                self.ws_message = _("Autostart could not be confirmed for workspace {0}.").format(ws)
             self.ws_render()
-            for ws, layout in autostart:
-                self.ws_approve(ws, layout is not None, layout)
             if action:
                 self.ws_run(action, then)
             elif then:
@@ -1995,16 +2009,6 @@ class WorkspacesPageMixin:
         """A switch of an App Preset. For autostart, the layout shown right now
         (when the switch was clicked) is what will start at login."""
         self.ws_change(state.toggle_layout_flag, ws, key)     # ws_change keeps or forgets the copy
-
-    def ws_approve(self, ws, on, shown):
-        """Switched on here (or saved with it on): keep a private copy of `shown`,
-        the layout the user saw, as what starts at login; switched off: forget it.
-        Workspace Presets starts from the same copy while it is on the bar."""
-        def done(kept, error):
-            if error is not None or (on and not kept):
-                self.ws_message = _("Autostart could not be confirmed for workspace {0}.").format(ws)
-                self.ws_render()
-        self._async(lambda: tiling.approve_autostart(ws, on, shown), done)
 
     def ws_restore(self, ws, action=None, use=False):
         if self.ws_busy:

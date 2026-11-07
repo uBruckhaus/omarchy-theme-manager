@@ -1163,6 +1163,15 @@ class AutostartSnapshotTests(unittest.TestCase):
         self.assertFalse(tile.approve_autostart(2, False))
         self.assertEqual(self.run_autostart(self.shown)[0], [])
 
+    def test_the_copy_keeps_only_what_view_and_store_agree_on(self):
+        foot, gimp, evil = ({"desktop_id": d} for d in ("foot", "gimp", "evil"))
+        shown = {"apps": [foot, gimp], "windows": []}                  # a view one click behind
+        saved = {"apps": [foot, evil, evil], "windows": []}            # gimp removed, something added elsewhere
+        self.assertEqual(tile.agreed_layout(shown, saved)["apps"], [foot])
+        twice = {"apps": [foot, foot], "windows": []}
+        self.assertEqual(tile.agreed_layout(twice, {"apps": [foot], "windows": []})["apps"], [foot])   # no extra copies
+        self.assertIsNone(tile.agreed_layout(shown, None))
+
     def test_the_copy_file_is_private_and_never_holds_commands(self):
         with_argv = dict(self.shown, apps=[{"desktop_id": "foot", "argv": ["sh", "-c", "x"]}])
         tile.approve_autostart(2, True, with_argv)
