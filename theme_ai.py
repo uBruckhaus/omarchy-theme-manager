@@ -1,7 +1,7 @@
 """Ask AI for Theme Manager: find or make a theme from a plain request.
 
 Opt-in (Settings → Ask AI, off by default) and only with a coding agent that
-is installed and signed in: Claude Code, Codex, Antigravity, pi or Hermes -
+is installed and signed in: Claude Code, Codex, pi or Hermes -
 or with a local model on this PC: every local chat model pi is connected to
 (~/.pi/agent/models.json, a provider on localhost, e.g. llama.cpp or Ollama)
 is a helper of its own, and Hermes counts as local when its default model is.
@@ -9,10 +9,11 @@ Local models spend no tokens and nothing leaves the computer; their server is
 started (llama-server.service / ollama.service) when it is not running.
 The pattern is Maprisma Launcher's (docs/proposals/ask-ai.md there):
 
-- The agent has no tools (Claude Code), or (Codex: read-only sandbox,
-  Antigravity: plan mode) it runs in a bubblewrap jail that shows it the
-  system, its own sign-in folders and an empty private work folder, never
-  the user's files. Without bubblewrap those two are not offered.
+- The agent has no tools (Claude Code, pi, Hermes), or (Codex: read-only
+  sandbox) it runs in a bubblewrap jail that shows it the system, its own
+  folder as a throw-away layer and an empty private work folder, never the
+  user's files, and no session bus. Without bubblewrap Codex is not offered.
+  (Antigravity was dropped in 2.0.0: its sign-in needs the whole keyring.)
 - It gets facts (installed themes and their main colors, the omarchy.org
   catalog's names, the installed fonts) and the user's text inside <request>
   tags: names and the request are data, never instructions.
@@ -44,7 +45,7 @@ TIMEOUT = 240                 # seconds for one answer
 MAX_ANSWER = 256 * 1024       # bytes read from the agent
 AGENT_FILE_MAX = 256 * 1024 * 1024   # RLIMIT_FSIZE of an agent: no file it writes grows past this
 WORK_MAX = 64 * 1024 * 1024          # all files in the Ask's private folder together
-MAX_PROMPT = 100 * 1024       # Antigravity takes it as one argument
+MAX_PROMPT = 100 * 1024       # characters of the whole prompt
 MAX_REQUEST = 600             # characters of the user's text
 MAX_PROMPTS = 12              # saved suggestions under the prompt
 
@@ -123,18 +124,7 @@ HELPERS = {
         # home folder but its own (see jail_argv).
         # Its folder is an overlay whose writes vanish (no config, hook or MCP
         # change outlives the Ask); only the sign-in file is written through.
-        "jail": {"overlay": [".codex"], "keep": [".codex/auth.json"], "dbus": False},
-    },
-    "agy": {
-        "name": "Antigravity",
-        # agy takes the prompt only as -p's value (not from stdin), and
-        # --disable-slash-commands would switch plan mode off: so neither.
-        "argv": ["agy", "--mode", "plan", "--sandbox", "--output-format", "text", "-p", "{prompt}"],
-        "stdin": False,
-        "files": [".gemini/antigravity-cli/history.jsonl"], "env": ["GEMINI_API_KEY"],
-        "login": "agy",
-        # Its sign-in is in the keyring: the jail gets a filtered bus (keyring only).
-        "jail": {"overlay": [".gemini", ".config/antigravity"], "keep": [], "dbus": True},
+        "jail": {"overlay": [".codex"], "keep": [".codex/auth.json"]},
     },
 }
 
@@ -304,17 +294,12 @@ def _listeners(port: int) -> list[tuple[str, int]]:
     return found
 
 
-LOOPBACK_ADDRESSES = {"0100007F", "00000000",                      # 127.0.0.1, 0.0.0.0
-                      "00000000000000000000000001000000",          # ::1
-                      "00000000000000000000000000000000"}          # ::
-
-
 def port_is_trusted(port: int) -> bool | None:
-    """Whether the server listening on this loopback port is yours (or a
-    system service's): None when nothing listens, False when any loopback
-    listener on it belongs to another person's account (it could read the
-    prompt or answer for the model), True otherwise."""
-    mine, owners = os.getuid(), [uid for address, uid in _listeners(port) if address in LOOPBACK_ADDRESSES]
+    """Whether every socket listening on this port, on any address (also an
+    IPv4-mapped one), is yours or a system service's: None when no listener
+    can be seen, False when one belongs to another person's account (it could
+    read the prompt or answer for the model), True otherwise."""
+    mine, owners = os.getuid(), [uid for _address, uid in _listeners(port)]
     if not owners:
         return None
     return all(uid == mine or uid <= SYSTEM_UID_MAX for uid in owners)
@@ -326,8 +311,8 @@ def ensure_local_server(model: dict, wait: float = 60.0) -> None:
     short reason."""
     host, port = model["host"], model["port"]
     if _port_open(host, port):
-        if port_is_trusted(port) is False:
-            raise RuntimeError(f"port {port} belongs to another account: not used")
+        if port_is_trusted(port) is not True:      # fail closed: only a listener proven yours
+            raise RuntimeError(f"port {port} is not your model server: not used")
         return
     unit = LOCAL_UNITS.get(port)
     if unit is None or shutil.which("systemctl") is None:
@@ -340,8 +325,8 @@ def ensure_local_server(model: dict, wait: float = 60.0) -> None:
     waited = 0.0
     while waited < wait:
         if _port_open(host, port):
-            if port_is_trusted(port) is False:
-                raise RuntimeError(f"port {port} belongs to another account: not used")
+            if port_is_trusted(port) is not True:
+                raise RuntimeError(f"port {port} is not your model server: not used")
             return
         time.sleep(0.5)
         waited += 0.5
@@ -643,8 +628,10 @@ def real_binary(command: str) -> str | None:
     return real
 
 
-def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = None, environ=None,
-              bus: Path | None = None) -> list[str]:
+JAIL_TMPFS = 64 * 1024 * 1024     # the jail's /tmp and empty home: each at most this
+
+
+def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = None, environ=None) -> list[str]:
     """argv inside bubblewrap: the system read-only, an empty home with only
     the agent's own folders (as throw-away overlays, its sign-in file written
     through), the private work folder, the network. None of the user's files
@@ -659,9 +646,9 @@ def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = Non
     args = ["bwrap", "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc",
             "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
             "--symlink", "usr/bin", "/bin", "--symlink", "usr/bin", "/sbin",
-            "--unshare-pid", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            "--unshare-pid", "--proc", "/proc", "--dev", "/dev", "--size", str(JAIL_TMPFS), "--tmpfs", "/tmp",
             "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve",
-            "--tmpfs", str(home), "--bind", str(work), str(work)]
+            "--size", str(JAIL_TMPFS), "--tmpfs", str(home), "--bind", str(work), str(work)]
     if binary.startswith(str(home) + os.sep):
         # Its install folder (mise keeps every version under installs/); a
         # program right in the home folder is bound alone, never the home.
@@ -670,24 +657,23 @@ def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = Non
         if root == home or home.is_relative_to(root):
             root = Path(binary)
         args += ["--ro-bind", str(root), str(root)]
-    for folder in jail["overlay"]:
-        # The agent sees its own folder, but every write goes to a throw-away
-        # layer: it cannot plant config, hooks, plugins or MCP servers for
+    for index, folder in enumerate(jail["overlay"]):
+        # The agent sees its own folder, but every write goes to a layer in
+        # the private work folder (counted against WORK_MAX, removed after
+        # the Ask): it cannot plant config, hooks, plugins or MCP servers for
         # the next time you run it yourself.
         source = home / folder
         if source.is_dir() and not source.is_symlink():
-            args += ["--overlay-src", str(source), "--tmp-overlay", str(source)]
+            layer = work / ".layers" / str(index)
+            (layer / "up").mkdir(parents=True, mode=0o700)
+            (layer / "wk").mkdir(mode=0o700)
+            args += ["--overlay-src", str(source), "--overlay", str(layer / "up"), str(layer / "wk"), str(source)]
     for name in jail["keep"]:
         # Its sign-in alone is written through (a refreshed token must stay).
         path = home / name
         if path.is_file() and not path.is_symlink():
             args += ["--bind", str(path), str(path)]
-    if bus is not None:
-        # Only the keyring answers on this bus (a filtering proxy in the
-        # work folder): no systemd, no portals, nothing that starts programs.
-        args += ["--setenv", "DBUS_SESSION_BUS_ADDRESS", "unix:path=" + str(bus)]
-    else:
-        args += ["--unsetenv", "DBUS_SESSION_BUS_ADDRESS"]
+    args += ["--unsetenv", "DBUS_SESSION_BUS_ADDRESS"]    # no session bus: no keyring, no portals
     args += ["--setenv", "HOME", str(home), "--die-with-parent", "--new-session", "--chdir", str(work), "--",
              binary, *argv[1:]]
     return args
@@ -709,23 +695,24 @@ def helper_env(helper: dict, environ=None) -> dict:
     return env
 
 
-def keyring_proxy(work: Path):
-    """A D-Bus proxy that lets through the Secret Service only (Antigravity
-    keeps its sign-in in the keyring). (process, socket) or (None, None)."""
-    address = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
-    if not address or shutil.which("xdg-dbus-proxy") is None:
-        return None, None
-    socket = work / "bus"
-    process = subprocess.Popen(["xdg-dbus-proxy", address, str(socket), "--filter",
-                                "--talk=org.freedesktop.secrets"],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _n in range(40):
-        if socket.exists():
-            return process, socket
-        time.sleep(0.05)
-    process.kill()
-    process.wait()
-    return None, None
+def remove_work(work: Path) -> None:
+    """The Ask's private folder, all of it: overlayfs leaves its helper folder
+    unreadable (mode 000), so access is granted back before removing (links
+    are never followed)."""
+    def grant(func, path, _error):
+        for target in (os.path.dirname(path), path):
+            try:
+                os.chmod(target, 0o700, follow_symlinks=False)
+            except (OSError, NotImplementedError):
+                pass
+        try:
+            if func is os.open or os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, onexc=grant)
+            else:
+                func(path)
+        except OSError:
+            pass
+    shutil.rmtree(work, onexc=grant)
 
 
 def _limit_files() -> None:
@@ -841,10 +828,7 @@ def _run_helper(helper: dict, argv_extra: list, prompt: str, timeout: int) -> st
         if "jail" in helper:      # inside try: a failed setup still cleans up
             if shutil.which("bwrap") is None:
                 raise RuntimeError("bubblewrap (bwrap) is needed for this helper")
-            bus = None
-            if helper["jail"]["dbus"]:
-                proxy, bus = keyring_proxy(work)
-            argv = jail_argv(helper, argv, work, bus=bus)
+            argv = jail_argv(helper, argv, work)
         # Output goes to files in the private folder, never into memory
         # unbounded; a helper that writes more than MAX_ANSWER is stopped.
         # The prompt is read from a file: writing it can never block the
@@ -890,7 +874,7 @@ def _run_helper(helper: dict, argv_extra: list, prompt: str, timeout: int) -> st
         except OSError:
             pass
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            remove_work(work)
 
 
 def first_json(text: str):

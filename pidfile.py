@@ -66,7 +66,7 @@ def read():
     if path is None:
         return None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
     with os.fdopen(fd) as f:

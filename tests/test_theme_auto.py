@@ -103,6 +103,21 @@ class BoundedStateTests(unittest.TestCase):
             self.assertEqual(theme_auto._read_json(base / "big.json", []), [])
 
 
+class BarStateTests(AutoTestCase):
+    """The bar widget reads its state through the helper (bounded), not by loading files itself."""
+
+    def test_bar_state_summarises_settings_and_workspaces(self):
+        theme_auto.update_settings(workspace_themes=True, slideshow_minutes=10, language="de")
+        theme_auto._write_json(theme_auto.config_dir() / "workspaces.json",
+                               {"active": True, "workspaceLayouts": {"2": {"autostart": True}}})
+        state = theme_auto.bar_state()
+        self.assertEqual(state, {"workspace_wallpapers": False, "workspace_themes": True, "timed": True,
+                                 "language": "de", "tiling_active": True, "has_autostart": True,
+                                 "has_workspace_presets": True})
+        (theme_auto.config_dir() / "workspaces.json").write_bytes(b" " * (theme_auto.STATE_MAX + 1))
+        self.assertFalse(theme_auto.bar_state()["tiling_active"])         # too large: not read
+
+
 class FavoritesTests(AutoTestCase):
     def test_favorites_keep_their_order_and_reject_bad_slugs(self):
         theme_auto.set_favorite("nord", True)

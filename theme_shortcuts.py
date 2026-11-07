@@ -151,7 +151,7 @@ def combo_id(combo: dict) -> tuple[int, str]:
 def load_state() -> dict:
     """{action: {"mods": [...], "key": "T", "replaces": "..."}} for valid actions."""
     try:
-        raw = json.loads(state_file().read_text())
+        raw = json.loads(theme_core.read_small(state_file()))
     except (OSError, ValueError):
         return {}
     out = {}

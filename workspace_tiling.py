@@ -267,7 +267,7 @@ def wp_on_bar():
 
 def _read_store_file():
     path = store_path()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > STORE_MAX_BYTES:
@@ -296,7 +296,7 @@ def read_shell_config(path=None):
     """(shell.json as data, its mode): a regular file of this user (a symlink
     is followed to it), at most SHELL_JSON_MAX bytes."""
     path = path or shell_config_path().resolve()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > SHELL_JSON_MAX:
@@ -1355,7 +1355,7 @@ def read_mode_file(path, key):
     """The quoted value of key in one of Omarchy's saved mode files, or None.
     Only small regular files are read, never through a symlink."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
     try:

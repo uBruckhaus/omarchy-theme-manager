@@ -15,12 +15,10 @@ BarWidget {
   readonly property string togglePath: Qt.resolvedUrl("theme-toggle").toString().replace(/^file:\/\//, "")
   readonly property string autoPath: Qt.resolvedUrl("theme_auto.py").toString().replace(/^file:\/\//, "")
   readonly property string syncPath: Qt.resolvedUrl("switcher_sync.py").toString().replace(/^file:\/\//, "")
-  readonly property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/theme-manager/settings.json"
   // Workspace presets (taken over from the Workspace Presets plugin): window
   // limits with overflow and App Preset autostart. The helper itself stays
   // idle while that plugin is still on the bar.
   readonly property string tilingPath: Qt.resolvedUrl("workspace_tiling.py").toString().replace(/^file:\/\//, "")
-  readonly property string workspacesPath: Quickshell.env("HOME") + "/.config/omarchy/theme-manager/workspaces.json"
   property bool tilingActive: false
   property bool hasAutostart: false
   property bool hasWorkspacePresets: false
@@ -66,16 +64,6 @@ BarWidget {
 
   function close() {
     menuOpen = false
-  }
-
-  function parseSettings(text) {
-    var data = {}
-    try { data = JSON.parse(text) || {} } catch (e) { data = {} }
-    workspaceWallpapers = data.workspace_wallpapers === true
-    workspaceThemes = data.workspace_themes === true
-    timed = (typeof data.slideshow_minutes === "number" && data.slideshow_minutes > 0)
-      || (!!data.schedule && data.schedule.enabled === true)
-    languageSetting = typeof data.language === "string" ? data.language : "auto"
   }
 
   // One helper run at a time; while one runs, only the latest request waits.
@@ -128,22 +116,30 @@ BarWidget {
     }
   }
 
-  function parseWorkspaces(text) {
-    var data = {}
-    try { data = JSON.parse(text) || {} } catch (e) { data = {} }
-    tilingActive = data.active === true
-    var layouts = (data.workspaceLayouts && typeof data.workspaceLayouts === "object") ? data.workspaceLayouts : {}
-    hasAutostart = Object.keys(layouts).some(function(k) { return layouts[k] && layouts[k].autostart === true })
-    hasWorkspacePresets = Object.keys(data).length > 0
+  // settings.json and workspaces.json are read by the helper (bounded, regular
+  // files only); the shell only parses its short answer.
+  Process {
+    id: barState
+    command: ["/usr/bin/python3", root.autoPath, "bar-state"]
+    stdout: StdioCollector {
+      onStreamFinished: root.applyBarState(text)
+    }
   }
 
-  FileView {
-    id: workspacesFile
-    path: root.workspacesPath
-    watchChanges: true
-    onFileChanged: reload()
-    onLoaded: root.parseWorkspaces(text())
-    onLoadFailed: root.parseWorkspaces("{}")
+  function refreshBarState() {
+    if (!barState.running) barState.running = true
+  }
+
+  function applyBarState(text) {
+    var data = {}
+    try { data = JSON.parse(text.length <= 4096 ? text : "{}") || {} } catch (e) { data = {} }
+    workspaceWallpapers = data.workspace_wallpapers === true
+    workspaceThemes = data.workspace_themes === true
+    timed = data.timed === true
+    languageSetting = typeof data.language === "string" ? data.language : "auto"
+    tilingActive = data.tiling_active === true
+    hasAutostart = data.has_autostart === true
+    hasWorkspacePresets = data.has_workspace_presets === true
   }
 
   // One window at a time, as the plugin did: the helper re-reads the
@@ -223,21 +219,13 @@ BarWidget {
     }
   }
 
-  FileView {
-    id: settingsFile
-    path: root.settingsPath
-    watchChanges: true
-    onFileChanged: reload()
-    onLoaded: root.parseSettings(text())
-    onLoadFailed: root.parseSettings("{}")
-  }
-
-  // settings.json is replaced atomically, which a file watch can miss.
+  // The settings can change in the popup at any time: read them again every few seconds.
   Timer {
-    interval: 15000
+    interval: 5000
     running: true
     repeat: true
-    onTriggered: { settingsFile.reload(); workspacesFile.reload() }
+    triggeredOnStart: true
+    onTriggered: root.refreshBarState()
   }
 
   Connections {

@@ -50,12 +50,11 @@ def enabled(settings: dict) -> bool:
 
 
 DESCRIPTION = N_("Find or make a theme from a few words with a coding agent on this computer (Claude Code, "
-               "Codex, Antigravity, pi or Hermes) or a local model, using your plan or tokens only when you "
+               "Codex, pi or Hermes) or a local model, using your plan or tokens only when you "
                "click Ask; a local model uses none and nothing leaves the computer. Each Ask sends your "
                "words with the names and main colors of your installed themes, the omarchy.org theme names "
-               "and your installed font names; nothing else. Antigravity gets them as a command-line "
-               "argument.")
-NO_HELPER = N_("No helper ready: install Claude Code, Codex, Antigravity, pi or Hermes and sign in, "
+               "and your installed font names; nothing else.")
+NO_HELPER = N_("No helper ready: install Claude Code, Codex, pi or Hermes and sign in, "
              "or connect pi or Hermes to a local model.")
 MAPRISMA_URL = "https://plugins.omarchy.org/plugin.html?id=ubruckhaus.maprisma"
 MAPRISMA_TEXT = N_("Maprisma sets up AI on Omarchy for you: online agents and their providers, and local models "

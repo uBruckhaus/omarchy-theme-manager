@@ -69,13 +69,14 @@ class AskAiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             (Path(home) / ".codex").mkdir()
             (Path(home) / ".codex/auth.json").write_text("{}")
-            with patch.object(theme_ai.shutil, "which", side_effect=lambda c: "/usr/bin/" + c if c != "agy" else None):
+            with patch.object(theme_ai.shutil, "which", side_effect=lambda c: "/usr/bin/" + c if c != "pi" else None):
                 states = {h["id"]: h for h in theme_ai.helpers(home=Path(home), environ={})}
         self.assertTrue(states["codex"]["signed_in"])
         self.assertFalse(states["claude"]["signed_in"])
-        self.assertFalse(states["agy"]["installed"])
+        self.assertFalse(states["pi"]["installed"])
+        self.assertNotIn("agy", states)
 
-    def test_run_codex_reads_its_answer_file_and_agy_gets_the_prompt_argument(self):
+    def test_run_codex_reads_its_answer_file(self):
         calls = []
 
         class FakeProcess:
@@ -110,17 +111,12 @@ class AskAiTests(unittest.TestCase):
                 return 0
 
         with patch.object(theme_ai.subprocess, "Popen", FakeProcess), \
-                patch.object(theme_ai, "jail_argv", side_effect=lambda h, argv, work, bus=None: argv), \
-                patch.object(theme_ai, "keyring_proxy", return_value=(None, None)), \
+                patch.object(theme_ai, "jail_argv", side_effect=lambda h, argv, work: argv), \
                 patch.object(theme_ai.shutil, "which", return_value="/usr/bin/bwrap"), \
                 patch.object(theme_ai.subprocess, "run", side_effect=AssertionError("no real agent")):
             self.assertEqual(theme_ai.run("codex", "PROMPT"), '{"candidates": []}')
-            self.assertEqual(theme_ai.run("agy", "PROMPT"), "agy answer")
-        codex, agy = calls
+        codex, = calls
         self.assertEqual(codex.sent, b"PROMPT")
-        self.assertEqual(agy.sent, b"")                           # agy: only the argument
-        self.assertEqual(agy.argv[-2:], ["-p", "PROMPT"])
-        self.assertNotIn("--disable-slash-commands", agy.argv)   # it would switch plan mode off
         self.assertFalse(Path(codex.cwd).exists())                # the private folder is gone again
 
     def test_oversized_answer_is_refused_even_after_exit(self):
@@ -138,61 +134,59 @@ class AskAiTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 theme_ai.run("claude", "PROMPT")
 
-    def test_jail_hides_home_and_shows_the_agents_folders_as_throwaway_overlays(self):
-        work = Path("/tmp/ask-work")
+    def test_jail_hides_home_and_shows_the_agents_folder_as_a_counted_layer(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            (home / ".gemini").mkdir()
-            (home / ".codex").mkdir()
+            home, work = Path(tmp) / "home", Path(tmp) / "work"
+            (home / ".codex").mkdir(parents=True)
+            work.mkdir()
             (home / ".codex/auth.json").write_text("{}")
             (home / ".codex/config.toml").write_text("")
             binary = str(home / ".local/share/mise/installs/codex/1/bin/codex")
             with patch.object(theme_ai, "real_binary", return_value=binary):
-                argv = theme_ai.jail_argv(theme_ai.HELPERS["agy"], ["agy", "-p", "x"], work,
-                                          home=home, environ={}, bus=work / "bus")
-                agy = " ".join(argv)
-                codex = theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex", "exec"], work, home=home, environ={})
-            self.assertIn(f"--tmpfs {home}", agy)                      # an empty home
-            self.assertIn(f"--overlay-src {home}/.gemini --tmp-overlay {home}/.gemini", agy)
-            self.assertNotIn("--bind-try", agy)                        # nothing of theirs written through
-            self.assertNotIn(".config/antigravity", agy)               # missing: not mounted at all
-            self.assertIn(f"--ro-bind {home}/.local/share/mise/installs", agy)
-            joined = " ".join(codex)
-            self.assertIn(f"--tmp-overlay {home}/.codex", joined)
+                argv = theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex", "exec"], work, home=home, environ={})
+            joined = " ".join(argv)
+            self.assertIn(f"--size {theme_ai.JAIL_TMPFS} --tmpfs {home}", joined)    # an empty, capped home
+            self.assertIn(f"--size {theme_ai.JAIL_TMPFS} --tmpfs /tmp", joined)
+            self.assertIn(f"--overlay-src {home}/.codex --overlay {work}/.layers/0/up {work}/.layers/0/wk {home}/.codex",
+                          joined)                                     # its writes land in the counted work folder
             self.assertIn(f"--bind {home}/.codex/auth.json {home}/.codex/auth.json", joined)   # sign-in kept
+            self.assertIn("--unsetenv DBUS_SESSION_BUS_ADDRESS", joined)   # no keyring, no portals
+            self.assertIn(f"--ro-bind {home}/.local/share/mise/installs", joined)
             self.assertNotIn("config.toml", joined)
+            self.assertIn("--die-with-parent", argv)
+            self.assertLess(argv.index("--unshare-pid"), argv.index("--proc"))  # no host processes
             (home / ".codex/auth.json").unlink()
             (home / ".codex/auth.json").symlink_to(home / "elsewhere")
+            theme_ai.remove_work(work)
+            work.mkdir()
             with patch.object(theme_ai, "real_binary", return_value=binary):
                 joined = " ".join(theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex"], work, home=home, environ={}))
             self.assertNotIn("auth.json", joined)                      # a link is never bound
-        self.assertIn("--die-with-parent", argv)
-        self.assertIn("unix:path=/tmp/ask-work/bus", argv)              # the filtered bus only
-        self.assertLess(argv.index("--unshare-pid"), argv.index("--proc"))  # no host processes
 
-    def test_failed_jail_setup_stops_the_proxy_and_removes_the_folder(self):
-        stopped, folders = [], []
+    def test_failed_jail_setup_removes_the_folder_and_antigravity_is_gone(self):
+        folders = []
 
-        class Proxy:
-            def poll(self):
-                return None
-
-            def kill(self):
-                stopped.append(True)
-
-            def wait(self):
-                return 0
-
-        def proxy(work):
+        def jail(helper, argv, work, **_k):
             folders.append(work)
-            return Proxy(), work / "bus"
-        with patch.object(theme_ai, "keyring_proxy", side_effect=proxy), \
-                patch.object(theme_ai, "jail_argv", side_effect=RuntimeError("helper not found")), \
+            raise RuntimeError("helper not found")
+        with patch.object(theme_ai, "jail_argv", side_effect=jail), \
                 patch.object(theme_ai.shutil, "which", return_value="/usr/bin/bwrap"):
             with self.assertRaises(RuntimeError):
-                theme_ai.run("agy", "PROMPT")
-        self.assertEqual(stopped, [True])
+                theme_ai.run("codex", "PROMPT")
         self.assertFalse(folders[0].exists())
+        self.assertNotIn("agy", theme_ai.HELPERS)                      # dropped in 2.0.0 (keyring)
+        self.assertFalse(hasattr(theme_ai, "keyring_proxy"))
+        with self.assertRaises(RuntimeError):
+            theme_ai.run("agy", "PROMPT")
+
+    def test_the_work_folder_with_overlay_layers_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "ask"
+            (work / ".layers/0/wk/work").mkdir(parents=True)
+            (work / ".layers/0/up/x").write_text("x") if (work / ".layers/0/up").mkdir() is None else None
+            (work / ".layers/0/wk/work").chmod(0)                       # as overlayfs leaves it
+            theme_ai.remove_work(work)
+            self.assertFalse(work.exists())
 
     def test_a_program_in_the_home_folder_is_bound_alone(self):
         with patch.object(theme_ai, "real_binary", return_value="/home/u/codex"):
@@ -503,6 +497,25 @@ class PortOwnerTests(unittest.TestCase):
         with self.owners(965):                                           # a system service (packaged ollama)
             self.assertIs(theme_ai.port_is_trusted(8080), True)
         self.assertIsNone(theme_ai.port_is_trusted(1))                   # nothing listens there
+        with patch.object(theme_ai, "_port_open", return_value=True), \
+                patch.object(theme_ai, "port_is_trusted", return_value=None), self.assertRaises(RuntimeError):
+            theme_ai.ensure_local_server(model)                          # not provably yours: fail closed
+
+    def test_a_listener_on_any_address_counts(self):
+        import io
+        other = os.getuid() + 1 if os.getuid() >= 1000 else 4242
+        tcp6 = ("header\n   0: 0000000000000000FFFF00000100007F:1F90 00000000000000000000000000000000:0000 0A "
+                "00000000:00000000 00:00000000 00000000  %d        0 1\n" % other).encode()
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **k):
+            if str(path) == "/proc/net/tcp":
+                return io.BytesIO(self.TABLE.format(uid=os.getuid()).encode())
+            if str(path) == "/proc/net/tcp6":
+                return io.BytesIO(tcp6)
+            return real_open(path, mode, *a, **k)
+        with patch("builtins.open", side_effect=fake_open):
+            self.assertIs(theme_ai.port_is_trusted(8080), False)        # ::ffff:127.0.0.1 of another account
 
     def test_chunked_bodies_parse_by_offsets_with_a_chunk_cap(self):
         many = b"1\r\nx\r\n" * 5000 + b"0\r\n\r\n"
@@ -582,6 +595,7 @@ class LocalModelTests(unittest.TestCase):
         model = {"provider": "llama-local", "model": "m", "host": "127.0.0.1", "port": 8080}
         answers = iter([False, False, True])
         with patch.object(theme_ai, "_port_open", side_effect=lambda *a, **k: next(answers)), \
+                patch.object(theme_ai, "port_is_trusted", return_value=True), \
                 patch.object(theme_ai.shutil, "which", return_value="/usr/bin/systemctl"), \
                 patch.object(theme_ai.subprocess, "run") as run, patch.object(theme_ai.time, "sleep"):
             theme_ai.ensure_local_server(model)

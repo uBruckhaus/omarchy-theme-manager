@@ -76,7 +76,7 @@ def capture(geometry: tuple[int, int, int, int], folder: Path | None = None,
                                     stderr=subprocess.DEVNULL, timeout=15, check=False)
             if result.returncode != 0:
                 raise OSError("grim failed")
-            source = os.open(shot, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            source = os.open(shot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             try:
                 size = os.fstat(source).st_size
                 if size == 0 or size > MAX_SHOT:

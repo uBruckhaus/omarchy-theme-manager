@@ -248,5 +248,14 @@ class BackupFifoTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 theme_backup.preview(fifo)
 
+
+class BackupHelperChoiceTests(unittest.TestCase):
+    def test_a_retired_or_local_helper_choice_never_rejects_a_backup(self):
+        import theme_backup
+        for helper, kept in (("agy", False), ("bogus", False), ("codex", True), ("pi:llama/gemma-4-12B", True)):
+            value = {"ask_ai_helper": helper}
+            theme_backup._validate_settings(value)
+            self.assertEqual("ask_ai_helper" in value, kept, helper)
+
 if __name__ == "__main__":
     unittest.main()

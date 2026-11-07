@@ -155,7 +155,7 @@ def plain_text(text: str, limit: int = 300) -> str:
 def current_theme(roots: Roots | None = None) -> str:
     roots = roots or default_roots()
     try:
-        slug = (roots.state_current / "theme.name").read_text().strip()
+        slug = read_small(roots.state_current / "theme.name").strip()
     except OSError:
         return ""
     return slug if SLUG_RE.match(slug) else ""
@@ -208,7 +208,7 @@ def discover_themes(roots: Roots | None = None) -> list[ThemeInfo]:
 def load_hidden(path: Path | None = None) -> set[str]:
     path = path or hidden_file()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_small(path))
     except (OSError, ValueError):
         return set()
     if isinstance(data, list):
@@ -362,7 +362,7 @@ def ensure_menu_override(wrapper: str | Path, path: Path | None = None) -> bool:
     installed = path is None
     path = path or menu_extension_file()
     try:
-        text = path.read_text()
+        text = read_small(path)
     except FileNotFoundError:
         text = "{\n}\n"
     entry_id = menu_entry_id(text, installed=installed)
@@ -399,9 +399,37 @@ def settings_file() -> Path:
     return Path.home() / ".config/omarchy/theme-manager/settings.json"
 
 
+SMALL_FILE_MAX = 4 * 1024 * 1024    # settings, state and config files we read
+
+
+def read_small(path, limit: int = SMALL_FILE_MAX) -> str:
+    """Text of a small regular file (a link to one is fine, e.g. a dotfiles
+    setup), opened without blocking and checked on the open file: a FIFO,
+    device or a file over `limit` bytes raises OSError and is never waited on
+    or read whole."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise OSError(f"not a small regular file: {path}")
+        data = os.read(fd, limit + 1)
+        while len(data) <= limit:
+            more = os.read(fd, limit + 1 - len(data))
+            if not more:
+                break
+            data += more
+        if len(data) > limit:
+            raise OSError(f"file too large: {path}")
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise OSError(str(error)) from None
+    finally:
+        os.close(fd)
+
+
 def _load_settings(path: Path) -> dict:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_small(path))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -420,7 +448,7 @@ def sync_enabled(path: Path | None = None) -> bool:
         return value
     # Installs from before the setting existed already carry our hook: keep them on.
     try:
-        return HOOK_MARKER in theme_set_hook_file().read_text()
+        return HOOK_MARKER in read_small(theme_set_hook_file())
     except OSError:
         return False
 
@@ -467,7 +495,7 @@ def remove_menu_override(path: Path | None = None) -> bool:
     """Remove our marked line pair from the menu extension file, nothing else."""
     path = path or menu_extension_file()
     try:
-        lines = path.read_text().splitlines()
+        lines = read_small(path).splitlines()
     except OSError:
         return False
     for i, line in enumerate(lines):
@@ -484,7 +512,7 @@ def remove_theme_set_hook(path: Path | None = None) -> bool:
     """Delete our hook file, and only if it is ours."""
     path = path or theme_set_hook_file()
     try:
-        if path.is_symlink() or HOOK_MARKER not in path.read_text():
+        if path.is_symlink() or HOOK_MARKER not in read_small(path):
             return False
     except OSError:
         return False
@@ -527,7 +555,7 @@ def ensure_theme_set_hook(sync_script: str | Path, path: Path | None = None) -> 
             f"# Installed by the Theme Manager plugin; delete this file to undo.\n"
             f"[[ -f '{sync_script}' ]] && /usr/bin/python3 -I '{sync_script}' wallpapers\n")
     try:
-        existing = path.read_text()
+        existing = read_small(path)
     except FileNotFoundError:
         existing = None
     if existing == text:
@@ -823,7 +851,7 @@ def load_hidden_wallpapers(path: Path | None = None) -> dict[str, set[str]]:
     """{theme slug: {file name, ...}} of shipped wallpapers hidden by the user."""
     path = path or hidden_wallpapers_file()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_small(path))
     except (OSError, ValueError):
         return {}
     out: dict[str, set[str]] = {}

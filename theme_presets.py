@@ -68,7 +68,7 @@ def _valid(entry) -> dict | None:
 def load(path: Path | None = None) -> list[dict]:
     path = path or file_path()
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > MAX_BYTES:

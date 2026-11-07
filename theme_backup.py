@@ -116,8 +116,11 @@ def _validate_settings(value: dict) -> None:
     if "header_order" in value:
         value["header_order"] = header_order.normalize(value["header_order"])
     boolean = ("sync_omarchy", "workspace_wallpapers", "workspace_themes", "screenshot_key", "ask_ai", "maprisma_hints")
-    if "ask_ai_helper" in value and value["ask_ai_helper"] not in theme_ai.HELPERS:
-        raise ValueError("invalid settings")
+    if "ask_ai_helper" in value:
+        helper = value["ask_ai_helper"]
+        local = isinstance(helper, str) and helper.startswith("pi:") and bool(theme_ai.NAME_RE.match(helper[3:]))
+        if helper not in theme_ai.HELPERS and not local:
+            value.pop("ask_ai_helper")      # an unknown or retired helper (Antigravity): the first ready one
     if any(key in value and not isinstance(value[key], bool) for key in boolean):
         raise ValueError("invalid settings")
     if "ask_prompts" in value and value["ask_prompts"] is not None and \

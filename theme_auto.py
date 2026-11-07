@@ -650,6 +650,26 @@ def forget_dead_key(slug: str) -> int:
     return 1
 
 
+def bar_state() -> dict:
+    """What the bar widget needs, from settings.json and workspaces.json read
+    bounded here (the shell never loads either file itself)."""
+    data = settings()
+    tiling = _read_json(config_dir() / "workspaces.json", {})
+    layouts = tiling.get("workspaceLayouts") if isinstance(tiling.get("workspaceLayouts"), dict) else {}
+    plan = data.get("schedule") if isinstance(data.get("schedule"), dict) else {}
+    minutes = data.get("slideshow_minutes")
+    language = data.get("language")
+    return {
+        "workspace_wallpapers": data.get("workspace_wallpapers") is True,
+        "workspace_themes": data.get("workspace_themes") is True,
+        "timed": (type(minutes) is int and minutes > 0) or plan.get("enabled") is True,
+        "language": language if isinstance(language, str) and len(language) <= 8 else "auto",
+        "tiling_active": tiling.get("active") is True,
+        "has_autostart": any(isinstance(v, dict) and v.get("autostart") is True for v in layouts.values()),
+        "has_workspace_presets": len(tiling) > 0,
+    }
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__.strip(), file=sys.stderr)
@@ -657,6 +677,9 @@ def main(argv: list[str]) -> int:
     command, args = argv[0], argv[1:]
     if command == "menu":
         print(json.dumps(menu_data()))
+        return 0
+    if command == "bar-state" and not args:
+        print(json.dumps(bar_state()))
         return 0
     with locked():
         if command == "workspace" and len(args) == 1 and args[0].isdigit():

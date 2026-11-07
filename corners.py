@@ -49,7 +49,7 @@ def radius(setting, window_rounding):
 def lua_rounding(path):
     """The last uncommented `rounding = N` in a Lua config file, or None."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
     try:

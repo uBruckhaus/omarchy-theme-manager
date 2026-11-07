@@ -373,7 +373,7 @@ def marker_of(theme) -> dict | None:
     try:
         if path.is_symlink() or path.stat().st_size > 4096:
             return None
-        data = json.loads(path.read_text())
+        data = json.loads(theme_core.read_small(path))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None

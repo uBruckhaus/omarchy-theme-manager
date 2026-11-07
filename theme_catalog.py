@@ -100,7 +100,7 @@ def load_catalog(force: bool = False) -> tuple[list[CatalogTheme], float]:
     cached: list[CatalogTheme] = []
     fetched_at = 0.0
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(theme_core.read_small(path))
         fetched_at = float(data["fetched_at"])
         for item in data["themes"]:
             entry = CatalogTheme(**{k: str(item[k]) for k in ("name", "repo", "slug", "preview")})
