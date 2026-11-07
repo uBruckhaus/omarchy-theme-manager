@@ -261,8 +261,23 @@ def save_hidden(hidden: set[str], path: Path | None = None) -> None:
 # menu's Theme entry is pointed at the wrapper.
 
 MENU_ENTRY_ID = "style.theme"
+NEW_MENU_ENTRY_ID = "appearance.theme"
 MENU_MARKER = "// theme-manager: hidden themes are filtered out of the theme picker"
 _SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9/._-]+$")
+
+
+def menu_entry_id(menu_text: str = "", *, installed: bool = False) -> str:
+    """Use the ID in the installed Omarchy menu, with the old ID as fallback."""
+    if installed:
+        default = Path(os.environ.get("OMARCHY_PATH", "/usr/share/omarchy")) / "default/omarchy/omarchy-menu.jsonc"
+        try:
+            with default.open("rb") as handle:
+                menu_text = handle.read(1024 * 1024).decode("utf-8", "replace")
+        except OSError:
+            pass
+    if f'"{NEW_MENU_ENTRY_ID}"' in menu_text:
+        return NEW_MENU_ENTRY_ID
+    return MENU_ENTRY_ID
 
 
 def switcher_cache_dir() -> Path:
@@ -303,7 +318,7 @@ def prune_switcher_previews(hidden: set[str], preview_dir: Path | None = None,
                 removed.append(stem)
             except OSError:
                 pass
-    if removed:
+    if removed or hidden:
         _forget_picker_rows(preview_dir)
     return removed
 
@@ -313,9 +328,10 @@ def _forget_picker_rows(preview_dir: Path) -> None:
     check is the directory's mtime in whole seconds, so a rebuild and a prune
     within one second would otherwise keep serving the unfiltered rows."""
     key = hashlib.md5(str(preview_dir).encode()).hexdigest()
-    stamp = image_selector_cache() / f"{key}.fast-signature"
-    if stamp.is_file() and not stamp.is_symlink():
-        stamp.unlink(missing_ok=True)
+    for suffix in ("fast-signature", "signature", "rows"):
+        stamp = image_selector_cache() / f"{key}.{suffix}"
+        if stamp.is_file() and not stamp.is_symlink():
+            stamp.unlink(missing_ok=True)
 
 
 def invalidate_switcher_cache(cache_dir: Path | None = None) -> None:
@@ -325,14 +341,16 @@ def invalidate_switcher_cache(cache_dir: Path | None = None) -> None:
     (cache_dir / "fast-signature").unlink(missing_ok=True)
 
 
-def menu_override_line(wrapper: str | Path) -> str:
+def menu_override_line(wrapper: str | Path, entry_id: str = MENU_ENTRY_ID) -> str:
     wrapper = str(wrapper)
     if not _SAFE_PATH_RE.match(wrapper):
         raise ValueError(f"unsafe wrapper path: {wrapper!r}")
     action = f'theme=$({wrapper}); [[ -n $theme ]] && omarchy-theme-set "$theme"'
     entry = {"icon": "\U000f0e0c", "label": "Theme",
              "aliases": ["theme", "themes"], "action": action}
-    return f"  {json.dumps(MENU_ENTRY_ID)}: {json.dumps(entry, ensure_ascii=False)},"
+    if entry_id not in (MENU_ENTRY_ID, NEW_MENU_ENTRY_ID):
+        raise ValueError("unknown menu entry")
+    return f"  {json.dumps(entry_id)}: {json.dumps(entry, ensure_ascii=False)},"
 
 
 def ensure_menu_override(wrapper: str | Path, path: Path | None = None) -> bool:
@@ -341,12 +359,14 @@ def ensure_menu_override(wrapper: str | Path, path: Path | None = None) -> bool:
     Idempotent. Only a line carrying our marker is ever rewritten; if the
     user already overrides `style.theme` themselves, the file is left alone.
     Returns True when the file changed."""
+    installed = path is None
     path = path or menu_extension_file()
-    line = menu_override_line(wrapper)
     try:
         text = path.read_text()
     except FileNotFoundError:
         text = "{\n}\n"
+    entry_id = menu_entry_id(text, installed=installed)
+    line = menu_override_line(wrapper, entry_id)
     lines = text.splitlines()
     for i, existing in enumerate(lines):
         if existing.strip() == MENU_MARKER and i + 1 < len(lines):
@@ -355,7 +375,7 @@ def ensure_menu_override(wrapper: str | Path, path: Path | None = None) -> bool:
             lines[i + 1] = line
             break
     else:
-        if f'"{MENU_ENTRY_ID}"' in text:
+        if f'"{entry_id}"' in text:
             return False  # the user's own override wins
         opening = next((i for i, l in enumerate(lines) if l.strip().startswith("{")), None)
         if opening is None:
@@ -452,7 +472,8 @@ def remove_menu_override(path: Path | None = None) -> bool:
         return False
     for i, line in enumerate(lines):
         if line.strip() == MENU_MARKER:
-            end = i + 2 if i + 1 < len(lines) and f'"{MENU_ENTRY_ID}"' in lines[i + 1] else i + 1
+            end = i + 2 if i + 1 < len(lines) and any(f'"{entry_id}"' in lines[i + 1]
+                        for entry_id in (MENU_ENTRY_ID, NEW_MENU_ENTRY_ID)) else i + 1
             del lines[i:end]
             _atomic_write(path, "\n".join(lines) + "\n")
             return True
@@ -487,6 +508,7 @@ def set_sync_enabled(on: bool, wrapper: str | Path, sync_script: str | Path) -> 
         invalidate_switcher_cache()
         _forget_picker_rows(switcher_cache_dir() / "previews")
         sync_current_theme(hidden_override={})
+        refresh_shell_theme_rows()
 
 
 def theme_set_hook_file() -> Path:
@@ -521,8 +543,21 @@ def refresh_switcher_cache(wrapper: str | Path, timeout: float = 60.0) -> bool:
     wrapper, and wait for it. Once the cache matches the theme folders again,
     Omarchy's own (unfiltered) `omarchy-theme-switcher --preload` finds nothing
     to rebuild, so hidden themes stay out of the picker."""
+    _forget_picker_rows(switcher_cache_dir() / "previews")
     _, ok = read_bounded_output([str(wrapper), "--preload"], max_bytes=65536, timeout=timeout)
+    if ok:
+        refresh_shell_theme_rows()
     return ok
+
+
+def refresh_shell_theme_rows() -> None:
+    """Reload Omarchy 4.5's in-memory picker rows; older releases ignore it."""
+    try:
+        subprocess.run(["omarchy-shell", "shell", "call", "omarchy.image-picker",
+                        "refreshThemeRows", ""], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def preload_switcher(wrapper: str | Path) -> None:

@@ -14,10 +14,26 @@ BarWidget {
 
   readonly property string togglePath: Qt.resolvedUrl("theme-toggle").toString().replace(/^file:\/\//, "")
   readonly property string autoPath: Qt.resolvedUrl("theme_auto.py").toString().replace(/^file:\/\//, "")
+  readonly property string syncPath: Qt.resolvedUrl("switcher_sync.py").toString().replace(/^file:\/\//, "")
   readonly property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/theme-manager/settings.json"
+  // Workspace presets (taken over from the Workspace Presets plugin): window
+  // limits with overflow and App Preset autostart. The helper itself stays
+  // idle while that plugin is still on the bar.
+  readonly property string tilingPath: Qt.resolvedUrl("workspace_tiling.py").toString().replace(/^file:\/\//, "")
+  readonly property string workspacesPath: Quickshell.env("HOME") + "/.config/omarchy/theme-manager/workspaces.json"
+  property bool tilingActive: false
+  property bool hasAutostart: false
+  property bool hasWorkspacePresets: false
+  property var tilingQueue: []
+  property bool autostartFinished: false
+  property int autostartAttempts: 0
+  property int autostartPartialTries: 0
 
   // What settings.json switches on (all off by default).
   property bool workspaceWallpapers: false
+  property bool workspaceThemes: false
+  onWorkspaceThemesChanged: syncFocusedWorkspace(true)
+  onWorkspaceWallpapersChanged: syncFocusedWorkspace()
   property bool timed: false
   // Interface language: the one picked in Theme Manager's settings, else the system's.
   property string languageSetting: "auto"
@@ -33,9 +49,20 @@ BarWidget {
   property var menuThemes: []
   property string menuSource: "favorites"
   property var pending: null
+  property int focusedWorkspaceId: 0
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  // Let the shell's built-in picker finish its first load, then refresh its
+  // rows from Theme Manager's filtered cache. The helper checks the opt-in
+  // setting, so a normal install leaves Omarchy's picker alone.
+  Timer {
+    interval: 2000
+    running: root.primary
+    repeat: false
+    onTriggered: Quickshell.execDetached(["/usr/bin/python3", "-I", root.syncPath, "startup"])
+  }
 
   function close() {
     menuOpen = false
@@ -45,6 +72,7 @@ BarWidget {
     var data = {}
     try { data = JSON.parse(text) || {} } catch (e) { data = {} }
     workspaceWallpapers = data.workspace_wallpapers === true
+    workspaceThemes = data.workspace_themes === true
     timed = (typeof data.slideshow_minutes === "number" && data.slideshow_minutes > 0)
       || (!!data.schedule && data.schedule.enabled === true)
     languageSetting = typeof data.language === "string" ? data.language : "auto"
@@ -55,6 +83,22 @@ BarWidget {
     if (helper.running) { pending = args; return }
     helper.command = ["/usr/bin/python3", root.autoPath].concat(args)
     helper.running = true
+  }
+
+  function syncFocusedWorkspace(force) {
+    if (!primary || (!force && !(workspaceThemes || workspaceWallpapers))) return
+    var ws = Hyprland.focusedWorkspace
+    if (ws && ws.id > 0) run(["workspace", String(ws.id)])
+  }
+
+  Timer {
+    id: workspaceDebounce
+    interval: 500
+    repeat: false
+    onTriggered: {
+      if (root.focusedWorkspaceId > 0 && (root.workspaceThemes || root.workspaceWallpapers))
+        root.run(["workspace", String(root.focusedWorkspaceId)])
+    }
   }
 
   Process {
@@ -84,6 +128,101 @@ BarWidget {
     }
   }
 
+  function parseWorkspaces(text) {
+    var data = {}
+    try { data = JSON.parse(text) || {} } catch (e) { data = {} }
+    tilingActive = data.active === true
+    var layouts = (data.workspaceLayouts && typeof data.workspaceLayouts === "object") ? data.workspaceLayouts : {}
+    hasAutostart = Object.keys(layouts).some(function(k) { return layouts[k] && layouts[k].autostart === true })
+    hasWorkspacePresets = Object.keys(data).length > 0
+  }
+
+  FileView {
+    id: workspacesFile
+    path: root.workspacesPath
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: root.parseWorkspaces(text())
+    onLoadFailed: root.parseWorkspaces("{}")
+  }
+
+  // One window at a time, as the plugin did: the helper re-reads the
+  // workspaces under its lock, so a burst of windows never overfills one.
+  function nextTilingWindow() {
+    if (tilingWorker.running || tilingQueue.length === 0) return
+    if (!tilingActive) { tilingQueue = []; return }
+    var queue = tilingQueue.slice()
+    var address = queue.shift()
+    tilingQueue = queue
+    tilingWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--window", address]
+    tilingWorker.running = true
+  }
+
+  Connections {
+    target: Hyprland
+    enabled: root.primary && root.tilingActive
+    function onRawEvent(event) {
+      if (event.name !== "openwindow") return
+      var address = event.data.split(",")[0]
+      if (!/^(0x)?[0-9a-fA-F]+$/.test(address)) return
+      root.tilingQueue = root.tilingQueue.concat([address])
+      tilingSettle.restart()
+    }
+  }
+  Timer { id: tilingSettle; interval: 150; onTriggered: root.nextTilingWindow() }
+  Process {
+    id: tilingWorker
+    onExited: tilingSettle.restart()
+  }
+
+  // At shell start, while the Workspace Presets plugin may still be on the
+  // bar: take its settings once (no workspaces.json yet), so removing it
+  // from the bar later loses nothing.
+  Timer {
+    interval: 1500
+    running: root.primary
+    repeat: false
+    onTriggered: Quickshell.execDetached(["/usr/bin/python3", "-I", root.tilingPath, "--init-store"])
+  }
+
+  // Once per shell start: Omarchy's workspace modes (Super + L) in step with the presets.
+  Timer {
+    interval: 2500
+    running: root.primary && root.hasWorkspacePresets
+    repeat: false
+    onTriggered: Quickshell.execDetached(["/usr/bin/python3", "-I", root.tilingPath, "--sync-modes", "start"])
+  }
+
+  // App Presets with autostart open once per Hyprland session (the helper
+  // keeps a per-session marker, shared with the plugin it replaces).
+  Process {
+    id: autostartWorker
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var res = JSON.parse(text)
+          if (res.status === "ok" || res.status === "already_started" || res.status === "skipped")
+            root.autostartFinished = true
+          // Some apps did not start: the helper left its session marker unset,
+          // so try twice more (each try starts only what is still missing).
+          else if (res.status === "partial" && ++root.autostartPartialTries > 2)
+            root.autostartFinished = true
+        } catch (e) {}
+      }
+    }
+  }
+  Timer {
+    interval: 2000
+    running: root.primary && root.hasAutostart && !root.autostartFinished
+    repeat: true
+    onTriggered: {
+      if (autostartWorker.running) return
+      if (++root.autostartAttempts > 15) { root.autostartFinished = true; return }
+      autostartWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--autostart"]
+      autostartWorker.running = true
+    }
+  }
+
   FileView {
     id: settingsFile
     path: root.settingsPath
@@ -98,15 +237,17 @@ BarWidget {
     interval: 15000
     running: true
     repeat: true
-    onTriggered: settingsFile.reload()
+    onTriggered: { settingsFile.reload(); workspacesFile.reload() }
   }
 
   Connections {
     target: Hyprland
-    enabled: root.workspaceWallpapers && root.primary
+    enabled: (root.workspaceWallpapers || root.workspaceThemes) && root.primary
     function onFocusedWorkspaceChanged() {
       var ws = Hyprland.focusedWorkspace
-      if (ws && ws.id > 0) root.run(["workspace", String(ws.id)])
+      if (!ws || ws.id <= 0) return
+      root.focusedWorkspaceId = ws.id
+      workspaceDebounce.restart()
     }
   }
 

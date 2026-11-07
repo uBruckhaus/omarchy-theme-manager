@@ -59,6 +59,32 @@ def workspace_file() -> Path:
     return config_dir() / "workspace-wallpapers.json"
 
 
+def workspace_themes_file() -> Path:
+    return config_dir() / "workspace-themes.json"
+
+
+def workspace_theme_state_file() -> Path:
+    # The base theme must survive a reboot or cache cleanup while an assigned
+    # workspace is active.
+    return config_dir() / "workspace-theme-state.json"
+
+
+def remember_base_theme(slug: str) -> None:
+    """A manual or scheduled choice becomes the theme restored on exit."""
+    slug = theme_core._validate_slug(slug)
+    state = _read_json(workspace_theme_state_file(), {})
+    if state.get("assigned_workspace") is not None:
+        state["base_theme"] = slug
+        _write_json(workspace_theme_state_file(), state)
+
+
+def remember_base_wallpaper(slug: str, path: Path) -> None:
+    state = _read_json(state_file(), {})
+    state["theme"] = theme_core._validate_slug(slug)
+    state["base"] = str(path)
+    _write_json(state_file(), state)
+
+
 def state_file() -> Path:
     """Short-lived state (the background in use before a workspace took
     over, the last slideshow change). Losing it is harmless: it is a cache."""
@@ -110,6 +136,10 @@ def update_settings(**values) -> None:
 
 def workspace_wallpapers_enabled() -> bool:
     return settings().get("workspace_wallpapers") is True
+
+
+def workspace_themes_enabled() -> bool:
+    return settings().get("workspace_themes") is True
 
 
 def slideshow_minutes() -> int:
@@ -215,6 +245,10 @@ def rename_state(old: str, new: str) -> None:
         recent[new] = recent.pop(old)
         _write_json(recent_file(), recent)
     mapping = load_workspace_map()
+    workspace_themes = load_workspace_themes()
+    if old in workspace_themes.values():
+        _write_json(workspace_themes_file(),
+                    {str(ws): new if slug == old else slug for ws, slug in workspace_themes.items()})
     if old in mapping:
         mapping[new] = mapping.pop(old)
         save_workspace_map(mapping)
@@ -225,6 +259,99 @@ def rename_state(old: str, new: str) -> None:
 
 
 # --- wallpapers per workspace ------------------------------------------------------------
+
+def load_workspace_themes() -> dict[int, str]:
+    raw = _read_json(workspace_themes_file(), {})
+    return {int(ws): slug for ws, slug in raw.items()
+            if isinstance(ws, str) and ws.isdigit() and 1 <= int(ws) <= MAX_WORKSPACE
+            and _valid_slug(slug)}
+
+
+def set_workspace_theme(workspace: int, slug: str | None) -> None:
+    if not 1 <= int(workspace) <= MAX_WORKSPACE:
+        raise ValueError(_("workspace out of range"))
+    if slug is not None:
+        slug = theme_core._validate_slug(slug)
+        if slug not in {theme.slug for theme in theme_core.discover_themes()}:
+            raise FileNotFoundError(slug)
+    with locked():          # never between "Use on all workspaces" and its Undo
+        mapping = load_workspace_themes()
+        if slug is None:
+            mapping.pop(int(workspace), None)
+        else:
+            mapping[int(workspace)] = slug
+        _write_json(workspace_themes_file(), {str(ws): name for ws, name in sorted(mapping.items())})
+
+
+def use_everywhere() -> dict | None:
+    """"Use on all workspaces": no workspace keeps a theme of its own, and the
+    theme applied now becomes the one every workspace shows (also the one
+    restored after a workspace's own theme). The theme-specific workspace
+    wallpapers stay. Returns what Undo needs, or None when nothing was set."""
+    with locked():
+        mapping = load_workspace_themes()
+        current = theme_core.current_theme()
+        if not mapping or not current:
+            return None                 # nothing set, or no theme to keep everywhere
+        state = _read_json(workspace_theme_state_file(), {})
+        new_state = dict(state)
+        new_state["assigned_workspace"] = None
+        new_state.pop("assigned_slug", None)
+        new_state["base_theme"] = current
+        _write_json(workspace_themes_file(), {})
+        _write_json(workspace_theme_state_file(), new_state)
+        return {"mapping": mapping, "state": state, "new_state": new_state, "theme": current}
+
+
+def undo_use_everywhere(saved: dict) -> bool:
+    """Puts the workspaces' own themes back, only while nothing changed since
+    (a new assignment, a manual or scheduled theme). True if restored."""
+    with locked():
+        if load_workspace_themes() or \
+                _read_json(workspace_theme_state_file(), {}) != saved["new_state"] or \
+                theme_core.current_theme() != saved["theme"]:
+            return False
+        _write_json(workspace_themes_file(), {str(ws): slug for ws, slug in sorted(saved["mapping"].items())})
+        _write_json(workspace_theme_state_file(), saved["state"])
+    return True
+
+
+def apply_workspace(workspace: int) -> Path | None:
+    """Switch the global theme for a focused workspace, then its wallpaper."""
+    state = _read_json(workspace_theme_state_file(), {})
+    slug = load_workspace_themes().get(workspace) if workspace_themes_enabled() else None
+    current = theme_core.current_theme()
+    if slug:
+        if state.get("assigned_workspace") is None:
+            state["base_theme"] = current
+        elif current not in (state.get("assigned_slug"), state.get("base_theme")):
+            state["base_theme"] = current
+        if slug != current:
+            try:
+                if not apply_theme(slug, track_base=False):
+                    slug = None
+            except (FileNotFoundError, OSError, ValueError):
+                slug = None  # A removed theme must not break workspace events.
+        if slug:
+            state["assigned_workspace"] = workspace
+            state["assigned_slug"] = slug
+    if not slug:
+        base = state.get("base_theme")
+        assigned = state.get("assigned_slug")
+        if state.get("assigned_workspace") is not None:
+            if current not in (assigned, base):
+                # A manual choice or the schedule supersedes the workspace override.
+                base = current
+            elif base and base != current:
+                try:
+                    apply_theme(base, track_base=False)
+                except (FileNotFoundError, OSError, ValueError):
+                    pass
+        state["assigned_workspace"] = None
+        state.pop("assigned_slug", None)
+        state["base_theme"] = theme_core.current_theme()
+    _write_json(workspace_theme_state_file(), state)
+    return on_workspace(workspace)
 
 def load_workspace_map() -> dict[str, dict[int, str]]:
     """{theme slug: {workspace id: wallpaper file name}}."""
@@ -339,7 +466,8 @@ def on_workspace(workspace: int) -> Path | None:
     assignments = load_workspace_map().get(theme.slug, {})
     state = _read_json(state_file(), {})
     if state.get("theme") != theme.slug:
-        state = {"theme": theme.slug}   # a new theme brings its own background
+        state = {key: state[key] for key in ("period", "slide_at") if key in state}
+        state["theme"] = theme.slug   # a new theme brings its own background
     left = state.get("workspace")
     if not (isinstance(left, int) and left in assignments):
         # Leaving a workspace without its own wallpaper: remember what it showed.
@@ -396,7 +524,7 @@ def period_at(now: time.struct_time, day_at: str, night_at: str) -> str:
     return "day" if inside else "night"
 
 
-def apply_theme(slug: str) -> bool:
+def apply_theme(slug: str, *, track_base: bool = True) -> bool:
     """Apply a theme the way the popup does: a hidden theme is unhidden
     first, and it counts as recently used."""
     slug = theme_core._validate_slug(slug)
@@ -410,6 +538,8 @@ def apply_theme(slug: str) -> bool:
     if ok:
         record_recent(slug)
         theme_custom.apply_theme_font(slug)
+        if track_base:
+            remember_base_theme(slug)
     return ok
 
 
@@ -427,7 +557,11 @@ def tick(now: float | None = None) -> dict:
             state["period"] = period
             _write_json(state_file(), state)
             wanted = plan[period]
-            if wanted != theme_core.current_theme():
+            active = active_workspace() if workspace_themes_enabled() else None
+            assigned = active is not None and active in load_workspace_themes()
+            if assigned:
+                remember_base_theme(wanted)
+            elif wanted != theme_core.current_theme():
                 done["theme"] = wanted
                 apply_theme(wanted)
                 state = _read_json(state_file(), {})
@@ -508,7 +642,7 @@ def main(argv: list[str]) -> int:
         return 0
     with locked():
         if command == "workspace" and len(args) == 1 and args[0].isdigit():
-            on_workspace(int(args[0]))
+            apply_workspace(int(args[0]))
         elif command == "tick" and not args:
             tick()
         elif command == "bg" and args in (["next"], ["prev"]):

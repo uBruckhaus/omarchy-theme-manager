@@ -9,6 +9,10 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
 OMARCHY_BIN="${OMARCHY_PATH:-/usr/share/omarchy}/bin"
 
+if [[ ${THEME_MANAGER_PRELOAD:-} == 1 && ${1:-} != "--preload" && ${1:-} != "--print-rows" ]]; then
+    set -- --preload "$@"
+fi
+
 if (( $# > 0 )); then
     /usr/bin/python3 -I "${DIR}/switcher_sync.py" prune "${!#}" >/dev/null 2>&1 || true
 fi

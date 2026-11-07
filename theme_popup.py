@@ -12,6 +12,7 @@ import colorsys
 import os
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -58,20 +59,33 @@ import wallpaper_search
 from palette import ThemePalette
 import pidfile
 import i18n
+import screenshots
+import theme_presets
+import theme_health
+import theme_backup
+import header_order
+import workspace_state
+import theme_ai
+from workspaces_page import WorkspacesPageMixin
+import ask_page
+from ask_page import AskPageMixin
 from i18n import _, ngettext
 
-# Default outer size matches Simple Launcher: a 420 px card around a 590 px
-# list, the same on every page so switching pages never resizes the popup.
+# Default outer size: a 420 px card around a 784 px list (Uwe's choice,
+# 2026-11-06: room for the workspace cards and their controls), the same on every page so switching pages never resizes the popup.
 # The grip in the bottom-right corner resizes it; the grids then show more
 # columns (the size is remembered in settings.json).
 CARD_WIDTH = 420
-LIST_HEIGHT = 590
+LIST_HEIGHT = 784
 TILE_STEP = 196        # one grid column: tile, its padding and border, the spacing
 UNDO_SECONDS = 10      # how long Undo is offered after a delete
 PREVIEW_SECONDS = 5    # a preview started from a menu
 SCREEN_MARGIN = 120    # space kept free above and below the card
 PREVIEW_W, PREVIEW_H = 192, 108   # theme previews are 16:9
-TILE = 176
+TILE = 170             # the smallest tile (two fit the default card); wider popups get larger ones (tile_w)
+TILE_TARGET = 320      # a wide popup aims at columns about this wide
+MAX_COLUMNS = 4        # more width then makes the tiles larger, not more of them
+WIDE_EDITOR_FROM = 900 # from this card width the theme editor uses two columns
 SWITCHER_WRAPPER = Path(__file__).resolve().parent / "theme-switcher"
 SYNC_SCRIPT = Path(__file__).resolve().parent / "switcher_sync.py"
 PREVIEW_WORKERS = 4    # parallel preview downloads on the import page
@@ -191,7 +205,7 @@ class ThemeGrid(Gtk.FlowBox):
         self.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.set_homogeneous(True)
         self.set_activate_on_single_click(True)
-        self.set_column_spacing(8)
+        self.set_column_spacing(6)
         self.set_row_spacing(2)
         self.set_valign(Gtk.Align.START)
 
@@ -237,9 +251,22 @@ def dropped_paths(value) -> list[Path]:
     return parse_uris(value if isinstance(value, str) else "")
 
 
-class ThemeManager(Gtk.Application):
+class _PresetsPage:
+    """The themes tab collects the old page's rows; .outer is the page."""
+
+    def __init__(self, outer, themes_tab):
+        self.outer = outer
+        self.themes_tab = themes_tab
+
+    def append(self, widget):
+        self.themes_tab.append(widget)
+
+
+class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.omarchy.thememanager")
+        self.ws_init()
+        self.presets_tab = "workspaces"
         self.window = None
         self.theme = ThemePalette()
         self.hidden = self.load_hidden_list()
@@ -254,6 +281,7 @@ class ThemeManager(Gtk.Application):
         self.position = theme_core.window_position()   # None: centered
         self.move_start = ((0, 0), None)
         self.moving = False
+        self.header_drag_id = None
         self.menu_anchor = None
         self.decoder = ImageDecoder(PREVIEW_WORKERS)
         # Type-to-filter as in Simple Launcher: no search field, the title shows it.
@@ -261,8 +289,13 @@ class ThemeManager(Gtk.Application):
         self.wp_filter = ""        # wallpaper page
         size = theme_core.window_size() or (CARD_WIDTH, LIST_HEIGHT)
         self.card_w, self.list_h = size
+        self.settings_previous_size = None
+        self.settings_previous_position = None
+        self.settings_adjusted_position = None
         self.columns = 2
         self.theme_columns = 1
+        self.tile_w = TILE
+        self.theme_tile_w = TILE
         self.theme_keys = {}
         self.sized = []            # widgets whose width follows the card
         self.resize_start = None
@@ -397,6 +430,10 @@ class ThemeManager(Gtk.Application):
         sizer.connect("drag-end", self.on_resize_end)
         grip.add_controller(sizer)
         frame.add_overlay(grip)
+        frame.add_overlay(self.build_ws_hover())          # a workspace card's large preview
+        frame.add_overlay(self.build_drag_ghost())        # a dragged layout follows the pointer
+        self.ws_hover_frame = frame
+        frame.add_overlay(self.build_screenshot_dialog())
         # Drop images anywhere on the card while a wallpaper page is open:
         # files from a file manager (uri-list), the image bytes a browser
         # offers for a dragged picture, or file paths as text. The drop is read
@@ -415,6 +452,7 @@ class ThemeManager(Gtk.Application):
         self.list_h = max(theme_core.MIN_WINDOW_SIZE[1], min(self.list_h, monitor_height() - 2 * SCREEN_MARGIN))
 
         header = Gtk.Box(spacing=8)
+        self.main_header = header
         title = Gtk.Label(label="Theme Manager")
         title.set_ellipsize(Pango.EllipsizeMode.END)
         title.set_max_width_chars(30)   # a long filter query must not widen the card
@@ -459,7 +497,6 @@ class ThemeManager(Gtk.Application):
         import_button.add_css_class("flat")
         import_button.add_css_class("tm-header-btn")
         import_button.connect("clicked", lambda *_: self.open_import())
-        header.append(import_button)
         # The same Nerd Font gear (U+F0493) in a small bordered box as the other plugins.
         settings_button = Gtk.Button()
         gear = Gtk.Label(label="\U000F0493")
@@ -478,10 +515,70 @@ class ThemeManager(Gtk.Application):
         info_button.set_tooltip_text(_("Information"))
         info_button.add_css_class("flat")
         info_button.add_css_class("tm-header-btn")
-        info_button.add_css_class("tm-gear-btn")
         info_button.connect("clicked", lambda *_: self.open_info())
-        header.append(self.hidden_button)
-        header.append(info_button)
+        presets_button = Gtk.Button(icon_name="bookmark-new-symbolic")
+        presets_button.set_tooltip_text(_("Presets: saved theme, wallpaper and font"))
+        presets_button.add_css_class("flat")
+        presets_button.add_css_class("tm-header-btn")
+        presets_button.connect("clicked", lambda *_: self.open_presets())
+        self.presets_button = presets_button
+        # Ask AI, always there as in Maprisma Launcher: the same sparkle
+        # (Material's auto_awesome = Nerd Font md-creation, U+F0674), accent
+        # when a helper is ready, dim while Ask AI is off, a dot while it is
+        # on but no helper is signed in. The page explains and switches it on.
+        ask_button = Gtk.Button()
+        ask_face = Gtk.Overlay()
+        ask_glyph = Gtk.Label(label="\U000F0674")
+        ask_glyph.add_css_class("tm-ask-glyph")
+        ask_face.set_child(ask_glyph)
+        ask_dot = Gtk.Box()
+        ask_dot.add_css_class("tm-ask-dot")
+        ask_dot.set_halign(Gtk.Align.END)
+        ask_dot.set_valign(Gtk.Align.START)
+        ask_dot.set_can_target(False)
+        ask_face.add_overlay(ask_dot)
+        ask_button.set_child(ask_face)
+        ask_button.add_css_class("flat")
+        ask_button.add_css_class("tm-header-btn")
+        ask_button.connect("clicked", lambda *_: self.open_ask())
+        self.ask_header_button = ask_button
+        self.ask_header_glyph = ask_glyph
+        self.ask_header_dot = ask_dot
+        self.header_buttons = {"import": import_button, "hidden": self.hidden_button, "ask": ask_button,
+                               "presets": presets_button, "info": info_button}
+        self.header_tooltips = {
+            "import": _("Import themes from omarchy.org (Ctrl+I)"),
+            "hidden": _("Show hidden themes and wallpapers"),
+            "presets": _("Presets: saved theme, wallpaper and font"),
+            "info": _("Information"),
+            "ask": _("Ask AI: find or make a theme"),
+        }
+        self.header_order = header_order.normalize(theme_auto.settings().get("header_order"))
+        group = Gtk.Overlay()
+        group.set_child(Gtk.Box(spacing=0, accessible_role=Gtk.AccessibleRole.GROUP))
+        self.header_group = group
+        self.header_group_row = group.get_child()
+        self.header_group_row.add_css_class("tm-header-group")
+        self.header_group_row.update_property([Gtk.AccessibleProperty.LABEL], [_('Header buttons')])
+        marker = Gtk.Box()
+        marker.add_css_class("tm-header-drop-marker")
+        marker.set_halign(Gtk.Align.START)
+        marker.set_valign(Gtk.Align.START)
+        marker.set_can_target(False)
+        marker.set_visible(False)
+        group.add_overlay(marker)
+        self.header_drop_marker = marker
+        self.header_separators = {}
+        for button_id, button in self.header_buttons.items():
+            self.set_header_tooltip(button_id)
+            drag = Gtk.GestureDrag()
+            drag.connect("drag-begin", self.on_header_drag_begin, button_id)
+            drag.connect("drag-update", self.on_header_drag_update, button_id)
+            drag.connect("drag-end", self.on_header_drag_end, button_id)
+            drag.connect("cancel", self.on_header_drag_cancel, button_id)
+            button.add_controller(drag)
+        self.rebuild_header_group()
+        header.append(group)
         header.append(settings_button)   # rightmost, like the other plugins
         self.settings_button = settings_button
         self.info_button = info_button
@@ -542,13 +639,7 @@ class ThemeManager(Gtk.Application):
         self.track_width(wallpaper_page)
 
         wp_header = Gtk.Box(spacing=8)
-        back_button = Gtk.Button()
-        back_button.add_css_class("flat")
-        back_button.add_css_class("tm-header-btn")
-        back_box = Gtk.Box(spacing=6)
-        back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label=_("Back")))
-        back_button.set_child(back_box)
+        back_button = self.back_button()
         back_button.set_tooltip_text(_("Back to themes (Left, Backspace or Esc)"))
         back_button.connect("clicked", lambda *_: self.show_themes())
         wp_header.append(back_button)
@@ -607,13 +698,7 @@ class ThemeManager(Gtk.Application):
         web_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.track_width(web_page)
         ws_header = Gtk.Box(spacing=8)
-        ws_back = Gtk.Button()
-        ws_back.add_css_class("flat")
-        ws_back.add_css_class("tm-header-btn")
-        ws_back_box = Gtk.Box(spacing=6)
-        ws_back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        ws_back_box.append(Gtk.Label(label=_("Back")))
-        ws_back.set_child(ws_back_box)
+        ws_back = self.back_button()
         ws_back.set_tooltip_text(_("Back to the wallpapers (Backspace or Esc)"))
         ws_back.connect("clicked", lambda *_: self.close_web_search())
         ws_header.append(ws_back)
@@ -658,13 +743,7 @@ class ThemeManager(Gtk.Application):
         import_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.track_width(import_page)
         im_header = Gtk.Box(spacing=8)
-        im_back = Gtk.Button()
-        im_back.add_css_class("flat")
-        im_back.add_css_class("tm-header-btn")
-        im_back_box = Gtk.Box(spacing=6)
-        im_back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        im_back_box.append(Gtk.Label(label=_("Back")))
-        im_back.set_child(im_back_box)
+        im_back = self.back_button()
         im_back.set_tooltip_text(_("Back to themes (Left, Backspace or Esc)"))
         im_back.connect("clicked", lambda *_: self.show_themes())
         im_header.append(im_back)
@@ -720,6 +799,10 @@ class ThemeManager(Gtk.Application):
         self.confirm_label = Gtk.Label(xalign=0, wrap=True, max_width_chars=36)
         self.confirm_label.add_css_class("tm-confirm")
         confirm_page.append(self.confirm_label)
+        self.confirm_detail = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
+        self.confirm_detail.add_css_class("tm-hint")
+        self.confirm_detail.set_visible(False)
+        confirm_page.append(self.confirm_detail)
         answers = Gtk.Box(spacing=12)
         answers.set_halign(Gtk.Align.END)
         cancel = Gtk.Button(label=_("Cancel"))
@@ -737,6 +820,8 @@ class ThemeManager(Gtk.Application):
         self.confirm_return = "themes"
 
         stack.add_named(self.build_settings_page(), "settings")
+        stack.add_named(self.build_presets_page(), "presets")
+        stack.add_named(self.build_ask_page(), "ask")
         stack.add_named(self.build_info_page(), "info")
         stack.add_named(self.build_editor_page(), "editor")
         stack.add_named(self.build_shortcut_page(), "shortcut")
@@ -783,6 +868,43 @@ class ThemeManager(Gtk.Application):
 
     # --- size ----------------------------------------------------------------------
 
+    def set_ask_ai(self, on: bool):
+        self.save_setting(ask_ai=on)
+        self.update_ask_symbol()
+
+    def set_maprisma_hints(self, on: bool):
+        self.save_setting(maprisma_hints=on)
+        if self.stack.get_visible_child_name() == "settings":
+            GLib.idle_add(self.fill_settings)    # the note: shown, or behind its ?
+
+    def update_ask_symbol(self):
+        """Accent when Ask AI is on and a helper is ready; dim when off; a dot
+        when on but no helper is signed in (as Maprisma Launcher's)."""
+        on = ask_page.enabled(theme_auto.settings())
+        ready = bool(theme_ai.ready_helpers()) if on else False
+        glyph = self.ask_header_glyph
+        for css, active in (("tm-ask-ready", on and ready), ("tm-ask-off", not on)):
+            (glyph.add_css_class if active else glyph.remove_css_class)(css)
+        self.ask_header_dot.set_visible(on and not ready)
+        tip = (_("Ask AI") if on and ready else
+               _("Ask AI (set up a helper first)") if on else _("Ask AI (off: turn it on in Settings)"))
+        self.header_tooltips["ask"] = tip
+        self.set_header_tooltip("ask")
+
+    def back_button(self) -> Gtk.Button:
+        """Back as in Maprisma, on every page: accent text, no border,
+        "← Back · ⌫" (Backspace and Esc go back too)."""
+        button = Gtk.Button()
+        button.add_css_class("flat")
+        button.add_css_class("tm-back")
+        box = Gtk.Box(spacing=6)
+        box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
+        box.append(Gtk.Label(label=_("Back")))
+        box.append(Gtk.Label(label="· ⌫"))
+        button.set_child(box)
+        button.update_property([Gtk.AccessibleProperty.LABEL], [_("Back")])
+        return button
+
     def track_width(self, widget):
         """`widget` is as wide as the card's inside and follows it when the
         popup is resized."""
@@ -800,23 +922,52 @@ class ThemeManager(Gtk.Application):
         max_w, max_h = self.size_limits()
         self.card_w = max(CARD_WIDTH, min(int(width), max_w))
         self.list_h = max(theme_core.MIN_WINDOW_SIZE[1], min(int(height), max_h))
+        self.update_settings_navigation_layout()
         for widget in self.sized:
             widget.set_size_request(self.card_w, -1)
+        if getattr(self, "ask_prompt_scroller", None) is not None:
+            self.ask_prompt_height()                 # Ask AI's suggestions: 2 rows narrow, 4 wide
         # Raise the maximum first: GTK refuses a minimum above the maximum.
         self.list_scroller.set_max_content_height(100000)
         self.list_scroller.set_min_content_height(self.list_h)
         self.list_scroller.set_max_content_height(self.list_h)
-        self.columns = max(2, (self.card_w + 8) // TILE_STEP)
-        # Themes: the list at the default width; any wider, tiles in columns
+        # Columns about TILE_TARGET wide, the tiles filling them: a large popup
+        # shows larger previews, not just more small ones.
+        self.columns = min(MAX_COLUMNS, max(2, (self.card_w + 8) // TILE_TARGET))
+        # Less each tile's padding, border and the spacing, so N tiles always
+        # fit the card (two at the default 420 px).
+        tile_w = max(TILE, (self.card_w + 8) // self.columns - (TILE_STEP - TILE) - 6)
+        # The theme grid's own tiles are slimmer (spacing 6, padding 2, tile
+        # padding 3): two at the default 420 px get previews larger than the
+        # old list rows (195 px against 192) and still fit the card exactly.
+        theme_tile_w = max(TILE, (self.card_w - (self.columns - 1) * 6) // self.columns - 12)
+        self.tiles_dirty = getattr(self, "tiles_dirty", False) or tile_w != self.tile_w \
+            or theme_tile_w != getattr(self, "theme_tile_w", 0)
+        self.tile_w = tile_w
+        self.theme_tile_w = theme_tile_w
+        # Themes: tiles in columns at every width
         # like the wallpapers.
         was = self.theme_columns
-        self.theme_columns = 1 if self.card_w < CARD_WIDTH + 40 else self.columns
+        # Tiles at every width (Uwe, 2026-11-06): two columns already at the
+        # default size, no more list rows with empty space beside the name.
+        self.theme_columns = self.columns
         self.rows.set_min_children_per_line(self.theme_columns)
         self.rows.set_max_children_per_line(self.theme_columns)
         self.rows.set_halign(Gtk.Align.FILL)
         self.rows.set_row_spacing(2 if self.theme_columns == 1 else 8)
         if (was > 1) != (self.theme_columns > 1) and self.theme_list:
             self.refresh_themes()   # switch between list rows and tiles
+        elif self.tiles_dirty and getattr(self, "resize_start", None) is None and self.theme_list:
+            # New tile size (not while the grip is dragged: once on release).
+            self.tiles_dirty = False
+            self.refresh_themes()
+            if getattr(self, "active_theme", None) is not None:
+                self.refresh_wallpapers()
+            if getattr(self, "catalog", None):
+                self.fill_catalog(self.catalog, None)          # import page tiles
+            self.rebuild_web_tiles()
+        self.ws_set_width(self.card_w)
+        self.ed_set_width(self.card_w)
         for grid in (self.wp_grid, self.web_grid, self.import_grid):
             grid.set_min_children_per_line(self.columns)
             grid.set_max_children_per_line(self.columns)
@@ -923,6 +1074,7 @@ class ThemeManager(Gtk.Application):
             if hint:
                 control.set_tooltip_text(hint)
             row.append(control)
+        row.tm_search = (title + " " + hint).casefold()
         box.append(row)
         return row
 
@@ -941,15 +1093,7 @@ class ThemeManager(Gtk.Application):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.track_width(page)
         header = Gtk.Box(spacing=8)
-        back = Gtk.Button()
-        back.add_css_class("flat")
-        back.add_css_class("tm-header-btn")
-        back_box = Gtk.Box(spacing=6)
-        back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label=_("Back")))
-        back_box.append(Gtk.Label(label="· ⌫"))
-        back.set_child(back_box)
-        back.add_css_class("tm-back-bordered")
+        back = self.back_button()
         back.set_tooltip_text(_("Back to themes (Backspace, Esc)"))
         back.connect("clicked", lambda *_: self.show_themes())
         header.append(back)
@@ -960,6 +1104,31 @@ class ThemeManager(Gtk.Application):
         rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         rule.add_css_class("tm-settings-rule")
         page.append(rule)
+        body = Gtk.Box(spacing=12)
+        body.set_vexpand(True)
+        nav = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        nav.add_css_class("tm-settings-nav")
+        nav.set_size_request(158, -1)
+        body.append(nav)
+        self.settings_nav = nav
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        content.set_hexpand(True)
+        search = Gtk.SearchEntry(placeholder_text=_("Find in Settings"))
+        search.add_css_class("tm-settings-search")
+        self.guard_text_field(search)
+        search.connect("search-changed", lambda *_: self.filter_settings())
+        content.append(search)
+        self.settings_search = search
+        chips_scroller = Gtk.ScrolledWindow()
+        chips_scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        chips_scroller.set_min_content_width(1)
+        chips_scroller.set_min_content_height(42)
+        chips = Gtk.Box(spacing=5)
+        chips.add_css_class("tm-settings-chips")
+        chips_scroller.set_child(chips)
+        content.append(chips_scroller)
+        self.settings_chips_scroller = chips_scroller
+        self.settings_chips = chips
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
@@ -967,39 +1136,620 @@ class ThemeManager(Gtk.Application):
         self.settings_box.add_css_class("tm-settings")
         self.settings_box.add_css_class("tm-settings-page")
         scroller.set_child(self.settings_box)
-        page.append(scroller)
+        content.append(scroller)
+        self.settings_scroller = scroller
+        body.append(content)
+        page.append(body)
         reset = Gtk.Button(label=_("Reset to defaults"))
         reset.add_css_class("sc-small")
         reset.set_halign(Gtk.Align.START)
-        reset.set_valign(Gtk.Align.END)
-        reset.set_tooltip_text(_("System language, corners like the windows, sorted by name, hidden themes also "
-                                 "hidden in Omarchy's pickers, no day and night switching, a wallpaper for each "
-                                 "workspace, the wallpaper never changes. Shortcuts, favorites, hidden themes and "
-                                 "the chosen day and night themes stay."))
+        reset.set_tooltip_text(_("Resets language, corners, sorting, header button order, picker sync, schedule, wallpaper rotation, and screenshot key and folder. Keeps favorites, hidden themes, shortcuts and saved workspace assignments; themes per workspace turn off."))
         reset.connect("clicked", lambda *_a: self.reset_settings())
-        page.append(reset)  # Under the scrolling options: always in the bottom left corner.
+        nav.append(Gtk.Box(vexpand=True))
+        nav.append(reset)
+        reset_narrow = Gtk.Button(label=_("Reset to defaults"))
+        reset_narrow.add_css_class("sc-small")
+        reset_narrow.set_halign(Gtk.Align.START)
+        reset_narrow.set_tooltip_text(reset.get_tooltip_text())
+        reset_narrow.connect("clicked", lambda *_a: self.reset_settings())
+        content.append(reset_narrow)
+        self.settings_reset_narrow = reset_narrow
+        self.settings_selected = "general"
+        self.settings_nav_last_button = None
+        self.settings_chip_buttons = {}
         self.settings_ready = False
         return page
 
+    def settings_section(self, key: str, title: str, hint: str = "") -> Gtk.Box:
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        section.tm_title = title
+        section.add_css_class("tm-settings-section")
+        heading = Gtk.Label(label=title, xalign=0)
+        heading.add_css_class("tm-setting-heading")
+        heading.tm_search = title.casefold()
+        section.append(heading)
+        self.settings_box.append(section)
+        self.settings_sections[key] = section
+        button = Gtk.Button(label=title)
+        button.add_css_class("tm-settings-nav-button")
+        button.set_halign(Gtk.Align.FILL)
+        button.get_child().set_xalign(0)
+        if hint:
+            button.set_tooltip_text(hint)
+        button.connect("clicked", lambda *_: self.select_settings_section(key))
+        self.settings_nav.insert_child_after(button, self.settings_nav_last_button)
+        self.settings_nav_last_button = button
+        self.settings_nav_buttons[key] = button
+        chip = Gtk.Button(label=title)
+        chip.add_css_class("tm-settings-chip")
+        chip.connect("clicked", lambda *_: self.select_settings_section(key))
+        self.settings_chips.append(chip)
+        self.settings_chip_buttons[key] = chip
+        return section
+
+    def update_settings_navigation_layout(self):
+        if not hasattr(self, "settings_nav"):
+            return
+        wide = self.card_w >= 700
+        self.settings_nav.set_visible(wide)
+        self.settings_chips_scroller.set_visible(not wide)
+        self.settings_reset_narrow.set_visible(not wide)
+
+    def select_settings_section(self, key: str):
+        self.settings_selected = key
+        self.settings_search.set_text("")
+        self.filter_settings()
+
+    def filter_settings(self):
+        if not hasattr(self, "settings_sections"):
+            return
+        query = self.settings_search.get_text().strip().casefold()
+        any_hits = False
+        for key, section in self.settings_sections.items():
+            title_match = bool(query and query in section.tm_title.casefold())
+            hits = False
+            child = section.get_first_child()
+            while child is not None:
+                match = not query or title_match or query in getattr(child, "tm_search", "")
+                child.set_visible(match)
+                hits = hits or match
+                child = child.get_next_sibling()
+            section.get_first_child().set_visible(hits)
+            section.set_visible(hits if query else key == self.settings_selected)
+            any_hits = any_hits or hits
+            button = self.settings_nav_buttons[key]
+            chip = self.settings_chip_buttons[key]
+            if key == self.settings_selected and not query:
+                button.add_css_class("tm-nav-active")
+                chip.add_css_class("tm-nav-active")
+                button.update_state([Gtk.AccessibleState.SELECTED], [True])
+                chip.update_state([Gtk.AccessibleState.SELECTED], [True])
+            else:
+                button.remove_css_class("tm-nav-active")
+                chip.remove_css_class("tm-nav-active")
+                button.update_state([Gtk.AccessibleState.SELECTED], [False])
+                chip.update_state([Gtk.AccessibleState.SELECTED], [False])
+        if hasattr(self, "settings_no_match"):
+            self.settings_no_match.set_visible(bool(query and not any_hits))
+        self.settings_scroller.get_vadjustment().set_value(0)
+
     def update_page_buttons(self, stack):
-        on_page = stack.get_visible_child_name() in ("settings", "info")
+        if stack.get_visible_child_name() != "presets":
+            self.ws_hover_hide()
+        on_page = stack.get_visible_child_name() in ("settings", "info", "presets", "ask")
         self.settings_button.set_visible(not on_page)
         self.info_button.set_visible(not on_page)
+        self.presets_button.set_visible(not on_page)
+        self.ask_header_button.set_visible(not on_page)
+        self.update_ask_symbol()
+        self.update_header_separators()
+
+    def set_header_tooltip(self, button_id):
+        """Tooltip with the move hint; the accessible name stays the plain
+        label (the tooltip would otherwise become the name, hint included)."""
+        text = self.header_tooltips[button_id]
+        hint = _('Drag to rearrange · Alt+←/→')
+        button = self.header_buttons[button_id]
+        button.set_tooltip_text(text + "\n" + hint)
+        button.update_property([Gtk.AccessibleProperty.LABEL, Gtk.AccessibleProperty.DESCRIPTION],
+                               [text, hint])
+
+    def rebuild_header_group(self):
+        """Reparent the buttons only after a drag is over."""
+        row = self.header_group_row
+        child = row.get_first_child()
+        while child is not None:
+            following = child.get_next_sibling()
+            row.remove(child)
+            child = following
+        for button_id in self.header_order:
+            separator = self.header_separators.get(button_id)
+            if separator is None:
+                separator = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+                separator.add_css_class("tm-header-sep")
+                self.header_separators[button_id] = separator
+            row.append(separator)
+            row.append(self.header_buttons[button_id])
+        self.update_header_separators()
+
+    def update_header_separators(self):
+        seen_visible = False
+        for button_id in self.header_order:
+            visible = self.header_buttons[button_id].get_visible()
+            self.header_separators[button_id].set_visible(visible and seen_visible)
+            seen_visible = seen_visible or visible
+
+    def header_button_bounds(self, button):
+        result = button.compute_bounds(self.header_group)
+        if isinstance(result, tuple):
+            if not result[0]:
+                return None
+            result = result[1]
+        return result
+
+    def header_drag_position(self, button_id, x):
+        visible = [item for item in self.header_order if self.header_buttons[item].get_visible()]
+        rectangles = [self.header_button_bounds(self.header_buttons[item]) for item in visible]
+        if not rectangles or any(rect is None for rect in rectangles):
+            return visible, None, None
+        source = self.header_button_bounds(self.header_buttons[button_id])
+        if source is None:
+            return visible, None, None
+        group_x = source.get_x() + x
+        slot = header_order.insertion_index([(rect.get_x(), rect.get_width()) for rect in rectangles], group_x)
+        edge = rectangles[slot].get_x() if slot < len(rectangles) else \
+            rectangles[-1].get_x() + rectangles[-1].get_width()
+        return visible, slot, (edge, rectangles[0].get_y(), rectangles[0].get_height())
+
+    def on_header_drag_begin(self, _gesture, x, _y, button_id):
+        # drag-begin fires on the press itself. Claiming here would deny the
+        # button's own click gesture (same widget, other group), so ordinary
+        # clicks would never fire: claim only once the pointer really moves.
+        self.header_drag_id = None
+        self.header_press = (button_id, x)
+        self.header_drop_slot = None
+
+    def on_header_drag_update(self, gesture, dx, dy, button_id):
+        press = getattr(self, "header_press", None)
+        if self.header_drag_id is None:
+            if press is None or press[0] != button_id:
+                return
+            threshold = Gtk.Settings.get_default().get_property("gtk-dnd-drag-threshold")
+            if max(abs(dx), abs(dy)) < max(1, threshold):
+                return
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)  # no click on release
+            self.header_drag_id = button_id
+            self.header_drag_start_x = press[1]
+        if self.header_drag_id == button_id:
+            self.mark_header_drop(button_id, self.header_drag_start_x + dx)
+
+    def on_header_drag_cancel(self, _gesture, _sequence, button_id):
+        """A cancelled drag (popup hidden, grab lost) must not reorder."""
+        if self.header_drag_id == button_id or (getattr(self, "header_press", None) or (None,))[0] == button_id:
+            self.header_drag_id = None
+            self.header_press = None
+            self.header_drop_slot = None
+            self.header_drop_marker.set_visible(False)
+
+    def mark_header_drop(self, button_id, x):
+        _visible, slot, position = self.header_drag_position(button_id, x)
+        self.header_drop_slot = slot
+        marker = self.header_drop_marker
+        if position is None:
+            marker.set_visible(False)
+            return
+        edge, top, height = position
+        marker.set_margin_start(max(0, round(edge) - 1))
+        marker.set_margin_top(round(top))
+        marker.set_size_request(3, round(height))
+        marker.set_visible(True)
+
+    def on_header_drag_end(self, _gesture, _dx, _dy, button_id):
+        if (getattr(self, "header_press", None) or (None,))[0] == button_id:
+            self.header_press = None
+        if self.header_drag_id != button_id:
+            return
+        slot = self.header_drop_slot
+        visible = [item for item in self.header_order if self.header_buttons[item].get_visible()]
+        self.header_drag_id = None
+        self.header_drop_slot = None
+        self.header_drop_marker.set_visible(False)  # drag-leave is not guaranteed
+        if slot is None:
+            return
+        reordered = header_order.move_to_visible_slot(self.header_order, button_id, visible, slot)
+        if reordered != self.header_order:
+            # GTK must finish dispatching drag-end before its source is reparented.
+            GLib.idle_add(self.save_header_order, reordered)
+
+    def save_header_order(self, order):
+        if order != self.header_order:
+            self.header_order = list(order)
+            self.save_setting(header_order=self.header_order)
+            self.rebuild_header_group()
+        return False
+
+    def save_header_order_live(self, order):
+        """Show an order already saved elsewhere (backup restore)."""
+        if order != self.header_order:
+            self.header_order = list(order)
+            self.rebuild_header_group()
+
+    def move_header_button(self, button_id, direction):
+        """One visible place left or right; buttons hidden on this page keep
+        their place (a swap with one would change nothing on screen)."""
+        visible = [item for item in self.header_order if self.header_buttons[item].get_visible()]
+        if button_id not in visible:
+            return
+        index = visible.index(button_id)
+        slot = index - 1 if direction < 0 else index + 2
+        if not 0 <= slot <= len(visible):
+            return
+        self.save_header_order(header_order.move_to_visible_slot(self.header_order, button_id, visible, slot))
+        self.header_buttons[button_id].grab_focus()
+
+    def build_presets_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.track_width(page)
+        header = Gtk.Box(spacing=8)
+        back = self.back_button()
+        back.connect('clicked', lambda *_: self.show_themes())
+        header.append(back)
+        title = Gtk.Label(label=_('Presets').upper(), xalign=0, hexpand=True)
+        title.add_css_class('tm-section-title')
+        header.append(title)
+        page.append(header)
+        # Three tabs: theme presets, and what the Workspace Presets plugin did
+        # (layouts per workspace, App Presets), which Theme Manager took over.
+        # As Maprisma's tab rows: outlined buttons with an icon, natural width,
+        # left-aligned; the active one has a 2 px accent border.
+        tabs = Gtk.Box(spacing=8, accessible_role=Gtk.AccessibleRole.TAB_LIST)
+        tabs.add_css_class('tm-tabs')
+        tabs.set_halign(Gtk.Align.START)
+        self.presets_tabs = {}
+        inner = Gtk.Stack()
+        inner.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        inner.set_transition_duration(120)
+        inner.set_vexpand(True)
+        self.presets_stack = inner
+        for key, label, icon in (('workspaces', _('Workspaces'), 'view-grid-symbolic'),
+                                 ('apps', _('App Presets'), 'view-app-grid-symbolic'),
+                                 ('themes', _('Save/Load Presets'), 'document-save-symbolic')):
+            button = Gtk.ToggleButton(accessible_role=Gtk.AccessibleRole.TAB)
+            face = Gtk.Box(spacing=6)
+            face.append(Gtk.Image.new_from_icon_name(icon))
+            face.append(Gtk.Label(label=label))
+            button.set_child(face)
+            button.update_property([Gtk.AccessibleProperty.LABEL], [label])
+            button.add_css_class('tm-tab')
+            button.connect('toggled', lambda b, k=key: b.get_active() and self.show_presets_tab(k))
+            if self.presets_tabs:
+                button.set_group(next(iter(self.presets_tabs.values())))
+            tabs.append(button)
+            self.presets_tabs[key] = button
+        page.append(tabs)
+        page.append(self.build_ws_banner())   # Workspace Presets still on the bar: shown on every tab
+        page.append(inner)
+        themes_tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        inner.add_named(themes_tab, 'themes')
+        inner.add_named(self.build_ws_tab('workspaces'), 'workspaces')
+        inner.add_named(self.build_ws_tab('apps'), 'apps')
+        hint = Gtk.Label(label=_('Save the current theme, wallpaper and font for later.'),
+                         xalign=0, wrap=True)
+        hint.add_css_class('tm-hint')
+        themes_tab.append(hint)
+        page = _PresetsPage(page, themes_tab)
+        save_row = Gtk.Box(spacing=6)
+        name = Gtk.Entry(placeholder_text=_('Preset name'), hexpand=True)
+        self.guard_text_field(name)
+        name.connect('activate', lambda *_: self.save_current_preset())
+        save_row.append(name)
+        self.preset_name = name
+        save = Gtk.Button(label=_('Save current'))
+        save.add_css_class('tm-paste')
+        save.connect('clicked', lambda *_: self.save_current_preset())
+        save.set_sensitive(False)
+        name.connect('changed', lambda entry: save.set_sensitive(bool(entry.get_text().strip())))
+        save_row.append(save)
+        page.append(save_row)
+        # The Workspaces and App Presets tabs' settings can go with a preset.
+        include = Gtk.CheckButton(label=_('Include workspace presets and app presets'))
+        include.set_active(True)
+        page.append(include)
+        self.preset_workspaces = include
+        scroller = Gtk.ScrolledWindow(vexpand=True)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.presets_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        scroller.set_child(self.presets_box)
+        page.append(scroller)
+        self.presets_tabs['workspaces'].set_active(True)
+        return page.outer
+
+    def show_presets_tab(self, key):
+        self.ws_drag_reset()          # a drag in the preview never crosses tabs
+        self.presets_tab = key
+        self.presets_stack.set_visible_child_name(key)
+        self.ws_hover_hide()
+        if getattr(self, 'stack', None) is None or self.stack.get_visible_child_name() != 'presets':
+            return   # building the page: nothing to load yet
+        self.ws_refresh_banner()
+        if key == 'themes':
+            self.preset_name.grab_focus()
+        else:
+            self.ws_reload()
+
+    def open_presets(self, tab=None):
+        self.active_theme = None
+        self.ws_choose_current()      # the workspace you are on is the one chosen
+        self.refresh_presets()
+        self.stack.set_visible_child_name('presets')
+        tab = tab or self.presets_tab
+        if self.presets_tabs[tab].get_active():
+            self.show_presets_tab(tab)
+        else:
+            self.presets_tabs[tab].set_active(True)
+
+    def include_workspace_presets(self) -> bool:
+        return self.preset_workspaces.get_active()
+
+    def save_current_preset(self):
+        try:
+            name = theme_presets.clean_name(self.preset_name.get_text())
+            exists = any(item['name'].casefold() == name.casefold() for item in theme_presets.load())
+            if exists:
+                self.ask_confirm(_('Replace “{0}”?').format(name), _('Replace'),
+                                 lambda: self.write_current_preset(name, replace=True))
+                return
+        except (OSError, ValueError) as error:
+            theme_core.notify(_('Could not save preset'), self.preset_error_text(error))
+            return
+        self.write_current_preset(name, replace=False)
+
+    def write_current_preset(self, name, replace):
+        try:
+            include = self.include_workspace_presets()
+            if replace:
+                theme_presets.replace_current(name, include_workspaces=include)
+            else:
+                theme_presets.add_current(name, include_workspaces=include)
+        except (OSError, ValueError) as error:
+            theme_core.notify(_('Could not save preset'), self.preset_error_text(error))
+            return
+        self.preset_name.set_text('')
+        self.refresh_presets()
+
+    @staticmethod
+    def preset_error_text(error):
+        known = {
+            'preset name is required': _('Enter a preset name.'),
+            'preset name must be 1–60 printable characters': _('Use a name of up to 60 printable characters.'),
+            'a preset with this name already exists': _('A preset with this name already exists.'),
+            'current theme is unavailable': _('The current theme is unavailable.'),
+            'preset theme is not installed': _('Theme missing'),
+            'preset wallpaper is unavailable': _('Wallpaper missing'),
+            'invalid preset': _('Invalid preset'),
+            'presets file too large': _('The presets are too large to save: delete a preset with workspace presets first.'),
+            'workspace presets too large': _('The presets are too large to save: delete a preset with workspace presets first.'),
+            'invalid workspace preset': _('Invalid preset'),
+            'could not apply the preset theme': _('Could not apply the preset theme.'),
+            'wallpaper-only preset theme is not active': _('Apply the preset theme too, or choose a preset for the active theme.'),
+        }
+        return known.get(str(error), _('Theme missing') if isinstance(error, FileNotFoundError) else str(error))
+
+    def refresh_presets(self):
+        box = self.presets_box
+        child = box.get_first_child()
+        while child is not None:
+            box.remove(child)
+            child = box.get_first_child()
+        presets = theme_presets.load()
+        themes = {item.slug: item for item in theme_core.discover_themes()}
+        if not presets:
+            box.append(Gtk.Label(label=_('No presets yet.'), xalign=0))
+        for preset in presets:
+            row = Gtk.Box(spacing=6)
+            row.add_css_class('tm-setting-row')
+            detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+            label = Gtk.Label(label=preset['name'], xalign=0,
+                              ellipsize=Pango.EllipsizeMode.END)
+            detail.append(label)
+            theme = themes.get(preset['theme'])
+            wallpaper = theme_auto.wallpaper_named(theme, preset['wallpaper']) if theme and preset['wallpaper'] else None
+            parts = [theme_core.plain_text(theme.name, 60) if theme else _('Theme missing'),
+                     preset['wallpaper'] if wallpaper else _('Wallpaper missing') if preset['wallpaper'] else _('No wallpaper'),
+                     preset['font'] or _('No font')]
+            summary = Gtk.Label(label=' · '.join(parts), xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            summary.add_css_class('tm-hint')
+            detail.append(summary)
+            if 'workspaces' in preset:
+                layouts, apps = workspace_state.snapshot_counts(preset['workspaces'])
+                spaces = Gtk.Label(label=_('Workspace presets: {0} · App presets: {1}').format(layouts, apps),
+                                   xalign=0, ellipsize=Pango.EllipsizeMode.END)
+                spaces.add_css_class('tm-hint')
+                detail.append(spaces)
+            row.append(detail)
+            apply_button = Gtk.Button(label=_('Apply'))
+            apply_button.add_css_class('tm-paste')
+            apply_button.set_sensitive(theme is not None)
+            apply_button.connect('clicked', lambda _b, p=preset: self.confirm_apply_preset(p))
+            row.append(apply_button)
+            workspace = Gtk.Button(icon_name='view-grid-symbolic')
+            workspace.add_css_class('tm-paste')
+            workspace.set_sensitive(theme is not None)
+            workspace.set_tooltip_text(_('Assign theme and/or wallpaper to workspace'))
+            workspace.update_property([Gtk.AccessibleProperty.LABEL],
+                                      [_('Assign preset {0} to workspace').format(preset['name'])])
+            workspace.connect('clicked', lambda b, p=preset: self.show_preset_workspace_menu(b, p))
+            row.append(workspace)
+            delete = Gtk.Button(icon_name='user-trash-symbolic')
+            delete.add_css_class('tm-paste')
+            delete.add_css_class('tm-destructive')
+            delete.set_tooltip_text(_('Delete preset'))
+            delete.update_property([Gtk.AccessibleProperty.LABEL],
+                                   [_('Delete preset {0}').format(preset['name'])])
+            delete.connect('clicked', lambda _b, p=preset: self.ask_confirm(
+                _('Delete preset “{0}”?').format(p['name']), _('Delete'),
+                lambda: (theme_presets.delete(p['name']), self.refresh_presets())))
+            row.append(delete)
+            box.append(row)
+
+    def confirm_apply_preset(self, preset):
+        """App presets start apps and move other windows away: ask first."""
+        apps = workspace_state.app_preset_workspaces(preset.get('workspaces') or {})
+        if not apps:
+            self.apply_preset(preset)
+            return
+        self.ask_confirm(_('Apply “{0}”?').format(preset['name']), _('Apply'),
+                         lambda: self.apply_preset(preset),
+                         _('Missing apps on workspaces {0} start; other windows there move to a free workspace.')
+                         .format(', '.join(str(ws) for ws in apps)))
+
+    def apply_preset(self, preset):
+        def done(warnings, error):
+            if error:
+                theme_core.notify(_('Could not apply preset'), self.preset_error_text(error))
+            else:
+                mapped = {'wallpaper unavailable': _('Wallpaper missing'),
+                          'font unavailable': _('Font unavailable'),
+                          'workspace presets failed': _('The workspace presets could not be applied.'),
+                          'some workspace apps failed': _('Some workspace apps did not start.')}
+                theme_core.notify(_('Preset applied'), ', '.join(mapped.get(item, item) for item in warnings or []))
+                self.current_slug = theme_core.current_theme()
+                if self.theme.reload():
+                    self.apply_theme_css()
+                self.refresh_themes()
+        self._async(lambda: theme_presets.apply(preset), done)
+
+    def show_preset_workspace_menu(self, anchor, preset):
+        self.show_menu(anchor, lambda popover: self.build_preset_workspace_menu(popover, preset))
+
+    def build_preset_workspace_menu(self, popover, preset):
+        box = self.menu_box()
+        box.append(Gtk.Label(label=_('Assign to workspace'), xalign=0))
+        options = [(_('Theme'), True, False)]
+        installed = next((item for item in theme_core.discover_themes()
+                          if item.slug == preset['theme']), None)
+        if installed and preset['wallpaper'] and theme_auto.wallpaper_named(installed, preset['wallpaper']):
+            if theme_core.current_theme() == preset['theme']:
+                options.append((_('Wallpaper'), False, True))
+            options.append((_('Theme + wallpaper'), True, True))
+        choice = Gtk.DropDown.new_from_strings([label for label, _theme, _wallpaper in options])
+        choice.set_selected(0)
+        box.append(choice)
+        grid = Gtk.Grid(column_spacing=2, row_spacing=2, column_homogeneous=True)
+        for ws in range(1, 11):
+            button = Gtk.Button(label=str(ws))
+            button.add_css_class('tm-menu-item')
+            button.connect('clicked', lambda _b, w=ws: (
+                popover.popdown(), self.assign_preset_workspace(
+                    preset, w, options[choice.get_selected()][1],
+                    options[choice.get_selected()][2])))
+            grid.attach(button, (ws - 1) % 5, (ws - 1) // 5, 1, 1)
+        box.append(grid)
+        return box
+
+    def assign_preset_workspace(self, preset, workspace, use_theme, use_wallpaper):
+        try:
+            theme_presets.assign_workspace(preset, workspace, theme=use_theme, wallpaper=use_wallpaper)
+        except (OSError, ValueError) as error:
+            theme_core.notify(_('Could not assign workspace'), self.preset_error_text(error))
+            return
+        theme_core.notify(_('Workspace {0} assigned').format(workspace), preset['name'])
+        self.refresh_presets()
+        self.refresh_focused_workspace(workspace)
+
+    def refresh_focused_workspace(self, workspace):
+        if theme_auto.active_workspace() == workspace:
+            def apply():
+                with theme_auto.locked():
+                    theme_auto.apply_workspace(workspace)
+            self._async(apply, lambda _value, error: error and theme_core.notify(
+                _('Could not assign workspace'), str(error)))
+
+    def build_screenshot_dialog(self) -> Gtk.Widget:
+        """After F12, as in Maprisma Launcher: a small dialog over the card with
+        where the picture went and an optional note. A separate Gtk.Window
+        would open beneath this layer surface, so it is an overlay; the
+        backdrop takes every click meant for the page under it."""
+        backdrop = Gtk.Box()
+        backdrop.add_css_class("tm-dialog-backdrop")
+        backdrop.set_hexpand(True)
+        backdrop.set_vexpand(True)
+        backdrop.set_visible(False)
+        dialog = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                         accessible_role=Gtk.AccessibleRole.DIALOG)
+        dialog.add_css_class("tm-dialog")
+        dialog.set_halign(Gtk.Align.CENTER)
+        dialog.set_valign(Gtk.Align.CENTER)
+        dialog.set_hexpand(True)
+        dialog.set_margin_start(24)
+        dialog.set_margin_end(24)
+        path = Gtk.Label(xalign=0, wrap=True, selectable=True, max_width_chars=40)
+        path.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        dialog.append(path)
+        self.shot_path_label = path
+        note = Gtk.Entry(placeholder_text=_("What is wrong? (optional)"))
+        note.update_property([Gtk.AccessibleProperty.LABEL], [_("What is wrong? (optional)")])
+        note.set_max_length(1000)
+        self.guard_text_field(note)
+        note.connect("activate", lambda *_: self.finish_screenshot_note(True))
+        dialog.append(note)
+        self.shot_note_entry = note
+        actions = Gtk.Box(spacing=8)
+        actions.set_halign(Gtk.Align.END)
+        open_folder = Gtk.Button(label=_("Open folder"))
+        open_folder.add_css_class("tm-paste")
+        open_folder.connect("clicked", lambda *_: self.open_screenshot_folder())
+        actions.append(open_folder)
+        done = Gtk.Button(label=_("Done"))
+        done.add_css_class("tm-paste")
+        done.connect("clicked", lambda *_: self.finish_screenshot_note(True))
+        actions.append(done)
+        dialog.append(actions)
+        backdrop.append(dialog)
+        self.shot_dialog = backdrop
+        self.shot_path = None
+        return backdrop
+
+    def shot_dialog_open(self) -> bool:
+        return getattr(self, "shot_dialog", None) is not None and self.shot_dialog.get_visible()
+
+    def show_screenshot_note(self, path: Path):
+        self.shot_path = path
+        self.shot_path_label.set_label(_("Screenshot saved: {0}").format(path))
+        self.shot_note_entry.set_text("")
+        self.shot_dialog.set_visible(True)
+        for widget in (self.stack, self.main_header):   # no Tab into the page under it
+            widget.set_sensitive(False)
+        self.shot_note_entry.grab_focus()
+
+    def finish_screenshot_note(self, save: bool):
+        """Done or Enter keeps the note (none typed, no file); Esc skips it."""
+        if save and self.shot_path is not None:
+            try:
+                screenshots.save_note(self.shot_path, self.shot_note_entry.get_text())
+            except (OSError, ValueError) as error:
+                theme_core.notify(_("Could not save screenshot note"), str(error))
+        self.shot_path = None
+        self.shot_dialog.set_visible(False)
+        for widget in (self.stack, self.main_header):
+            widget.set_sensitive(True)
+
+    def open_screenshot_folder(self):
+        if self.shot_path is None:
+            return
+        try:
+            subprocess.Popen(["xdg-open", str(self.shot_path.parent)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as error:
+            theme_core.notify(_("Could not open folder"), str(error))
 
     def build_info_page(self) -> Gtk.Widget:
         """Information: the author's other marketplace plugins as cards."""
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.track_width(page)
         header = Gtk.Box(spacing=8)
-        back = Gtk.Button()
-        back.add_css_class("flat")
-        back.add_css_class("tm-header-btn")
-        back_box = Gtk.Box(spacing=6)
-        back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label=_("Back")))
-        back_box.append(Gtk.Label(label="· ⌫"))
-        back.set_child(back_box)
-        back.add_css_class("tm-back-bordered")
+        back = self.back_button()
         back.set_tooltip_text(_("Back to themes (Backspace, Esc)"))
         back.connect("clicked", lambda *_: self.show_themes())
         header.append(back)
@@ -1085,9 +1835,18 @@ class ThemeManager(Gtk.Application):
         while child is not None:
             box.remove(child)
             child = box.get_first_child()
+        for button in getattr(self, "settings_nav_buttons", {}).values():
+            self.settings_nav.remove(button)
+        for button in getattr(self, "settings_chip_buttons", {}).values():
+            self.settings_chips.remove(button)
+        self.settings_nav_buttons = {}
+        self.settings_chip_buttons = {}
+        self.settings_nav_last_button = None
+        self.settings_sections = {}
         themes = sorted(theme_core.discover_themes(), key=lambda t: t.name.casefold())
         slugs = [t.slug for t in themes]
         names = [theme_core.plain_text(t.name, 60) for t in themes]
+        box = self.settings_section("general", _("General"))
 
         # Interface language: the system's unless picked here. Switching
         # restarts the popup (same process id) so every label is rebuilt.
@@ -1106,7 +1865,7 @@ class ThemeManager(Gtk.Application):
                           self.corner_choices.index(corners.choice(theme_auto.settings().get("corners"))),
                           lambda i: self.set_corners(self.corner_choices[i])))
 
-        self.settings_heading(box, _("Themes").upper())
+        box = self.settings_section("themes", _("Themes"))
         self.setting_line(box, _("Sort the list"), _("Favorites (★ in a theme's menu) always come first."),
                           self.dropdown([_("By name"), _("Recently used first")],
                                         theme_auto.SORT_CHOICES.index(theme_auto.sort_order()),
@@ -1117,7 +1876,7 @@ class ThemeManager(Gtk.Application):
                           self.switch(theme_core.sync_enabled(), self.set_omarchy_sync))
 
         plan = theme_auto.schedule()
-        self.settings_heading(box, _("Day and night").upper())
+        box = self.settings_section("day-night", _("Day and night"))
         self.setting_line(box, _("Switch themes by time of day"),
                           _("At the times below. A theme you pick by hand stays until the next switch."),
                           self.switch(plan["enabled"], self.set_schedule_enabled))
@@ -1132,14 +1891,19 @@ class ThemeManager(Gtk.Application):
                                       lambda i, k=at_key: self.save_schedule(**{k: times[i]})))
             self.setting_line(box, label, "", line)
 
-        self.settings_heading(box, _("Wallpapers").upper(),
-                              _("Scroll on the bar icon for the next or previous wallpaper; right-click it for your "
-                                "favorite themes."))
+        box = self.settings_section("wallpapers", _("Wallpapers"),
+                                    _("Scroll on the bar icon for the next or previous wallpaper; right-click it for your "
+                                      "favorite themes."))
         self.setting_line(box, _("A wallpaper for each workspace"),
                           _("Choose workspaces in a wallpaper's ☰ menu → Show on workspace. Workspaces "
                           "without one keep the theme's background."),
                           self.switch(theme_auto.workspace_wallpapers_enabled(),
                                       lambda on: self.save_setting(workspace_wallpapers=on)))
+        self.setting_line(box, _("A theme for each workspace"),
+                          _("Switches Omarchy's global theme when you focus a workspace with an assigned theme.")
+                          + " " + _("Switching takes a moment and changes every monitor. Leaving the workspace goes back to the theme you used before."),
+                          self.switch(theme_auto.workspace_themes_enabled(),
+                                      lambda on: self.save_setting(workspace_themes=on)))
         labels = [_("Never"), _("Every 5 minutes"), _("Every 10 minutes"), _("Every 15 minutes"), _("Every 30 minutes"),
                   _("Every hour"), _("Every 2 hours")]
         self.setting_line(box, _("Change the wallpaper"),
@@ -1148,10 +1912,10 @@ class ThemeManager(Gtk.Application):
                                         lambda i: self.save_setting(
                                             slideshow_minutes=theme_auto.SLIDESHOW_CHOICES[i])))
 
-        self.settings_heading(box, _("Keyboard shortcuts").upper(),
-                              _("Give a theme its own key in its ⋮ menu → Shortcut…. Keys live in "
-                                "~/.config/hypr/theme-manager-shortcuts.lua; removing the last one removes that file "
-                                "and its line in hyprland.lua again."))
+        box = self.settings_section("shortcuts", _("Keyboard shortcuts"),
+                                    _("Give a theme its own key in its ⋮ menu → Shortcut…. Keys live in "
+                                      "~/.config/hypr/theme-manager-shortcuts.lua; removing the last one removes that file "
+                                      "and its line in hyprland.lua again."))
         state = shortcuts.load_state()
         for action in shortcuts.ACTIONS:
             self.shortcut_setting_row(box, action, state.get(action))
@@ -1160,7 +1924,170 @@ class ThemeManager(Gtk.Application):
                             key=lambda a: shortcuts.action_label(a).casefold())
         for action in theme_keys:
             self.shortcut_setting_row(box, action, state[action])
+        box = self.settings_section("screenshots", _("Screenshots"))
+        self.setting_line(box, _("F12 saves a screenshot"),
+                          _("Save a picture of the Theme Manager window while it is open."),
+                          self.switch(screenshots.key_enabled(theme_auto.settings()),
+                                      lambda on: self.save_setting(screenshot_key=on)))
+        folder = screenshots.folder_from_settings(theme_auto.settings())
+        folder_row = Gtk.Box(spacing=6)
+        folder_label = Gtk.Label(label=str(folder), xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        folder_label.set_max_width_chars(30)
+        folder_label.set_tooltip_text(str(folder))
+        folder_row.append(folder_label)
+        if theme_auto.settings().get("screenshot_folder"):
+            default = Gtk.Button(label=_("Default"))
+            default.add_css_class("sc-small")
+            default.connect("clicked", lambda *_: (self.save_setting(screenshot_folder=None),
+                                                   GLib.idle_add(self.fill_settings)))
+            folder_row.append(default)
+        choose = Gtk.Button(icon_name="folder-open-symbolic")
+        choose.add_css_class("sc-small")
+        choose.set_tooltip_text(_("Choose folder…"))
+        choose.update_property([Gtk.AccessibleProperty.LABEL], [_('Choose screenshot folder')])
+        choose.connect("clicked", lambda *_: self.choose_screenshot_folder())
+        folder_row.append(choose)
+        self.setting_line(box, _("Screenshots go to"), str(folder), folder_row)
+        box = self.settings_section("ask-ai", _("Ask AI"))
+        ready = theme_ai.ready_helpers()
+        self.setting_line(box, _("Ask AI"), _(ask_page.DESCRIPTION),
+                          self.switch(ask_page.enabled(theme_auto.settings()), self.set_ask_ai))
+        found = ", ".join(item["name"] + (" (" + _("on this PC") + ")" if item.get("local") else "")
+                          for item in ready) if ready else _(ask_page.NO_HELPER)
+        note = Gtk.Label(label=_("Helpers: {0}").format(found), xalign=0, wrap=True, max_width_chars=1, hexpand=True)
+        note.add_css_class("tm-hint")
+        hints = ask_page.maprisma_hints(theme_auto.settings())
+        hint = self.maprisma_hint()
+        hint.set_visible(False)                  # on: the ? next to the helpers opens it; off: neither
+        line = Gtk.Box(spacing=6)
+        line.append(note)
+        if hints:
+            line.append(self.maprisma_help_button(lambda: hint))
+        box.append(line)
+        self.setting_line(box, _("Maprisma hints"),
+                          _("A ? here and on the Ask AI page opens the note on easy AI setup with Maprisma."),
+                          self.switch(hints, self.set_maprisma_hints))
+        box.append(hint)
+        box = self.settings_section("integration", _("Integration and backup"))
+        health = theme_health.inspect()
+        status = (_("Ready") if health["enabled"] and health["menu"] and health["hook"]
+                  and not health["leaked"] else _("Needs attention") if health["enabled"] else _("Off"))
+        problems = []
+        if health["enabled"]:
+            if not health["menu"]:
+                problems.append(_("Menu line missing"))
+            if not health["hook"]:
+                problems.append(_("Theme hook missing"))
+            if health["menu_custom"]:
+                problems.append(_("Your own style.theme override is in omarchy-menu.jsonc"))
+            if health["leaked"]:
+                problems.append(_("{0} hidden themes are still in the picker").format(len(health["leaked"])))
+        health_hint = "; ".join(problems) if problems else status
+        repair = Gtk.Button(label=_("Repair sync"))
+        repair.add_css_class("sc-small")
+        repair.set_sensitive(health["enabled"])
+        if not health["enabled"]:
+            repair.set_tooltip_text(_("Turn on ‘Hidden in Omarchy's pickers’ first."))
+        repair.connect("clicked", lambda *_: self.repair_sync())
+        self.setting_line(box, _("Omarchy picker sync"), health_hint, repair)
+        backup_actions = Gtk.Box(spacing=6)
+        export = Gtk.Button(label=_("Export…"))
+        export.add_css_class("sc-small")
+        export.connect("clicked", lambda *_: self.export_backup())
+        backup_actions.append(export)
+        restore = Gtk.Button(label=_("Restore…"))
+        restore.add_css_class("sc-small")
+        restore.connect("clicked", lambda *_: self.choose_backup())
+        backup_actions.append(restore)
+        self.setting_line(box, _("Backup and restore"),
+                          _("Includes settings, lists, workspace assignments, presets and shortcuts; themes and wallpapers remain in their folders."),
+                          backup_actions)
+        no_match = Gtk.Label(label=_("No setting matches your search."), xalign=0)
+        no_match.add_css_class("tm-hint")
+        self.settings_box.append(no_match)
+        self.settings_no_match = no_match
+        self.filter_settings()
         self.settings_ready = True
+
+    def repair_sync(self):
+        self._async(theme_health.repair, lambda _result, error: (
+            theme_core.notify(_("Sync repair failed") if error else _("Sync repaired"), str(error) if error else ""),
+            self.fill_settings()))
+
+    def export_backup(self):
+        dialog = Gtk.FileDialog(title=_("Export Theme Manager backup"), modal=False)
+        dialog.set_initial_name(theme_backup.default_export_name())
+        self.window.hide()
+        def chosen(source, result):
+            try:
+                saved = source.save_finish(result)
+            except GLib.Error:
+                self.window.present()
+                return
+            self.window.present()
+            if saved.get_path() is None:
+                theme_core.notify(_("Backup failed"), _("Choose a local folder"))
+                return
+            target = Path(saved.get_path())
+            self._async(lambda: theme_backup.export(target), lambda _value, error: theme_core.notify(
+                _("Backup failed") if error else _("Backup saved"), str(error) if error else str(target)))
+        dialog.save(None, None, chosen)
+
+    def choose_backup(self):
+        dialog = Gtk.FileDialog(title=_("Restore Theme Manager backup"), modal=False)
+        self.window.hide()
+        def chosen(source, result):
+            try:
+                opened = source.open_finish(result)
+            except GLib.Error:
+                self.window.present()
+                return
+            self.window.present()
+            if opened.get_path() is None:
+                theme_core.notify(_("Backup invalid"), _("Choose a local file"))
+                return
+            target = Path(opened.get_path())
+            try:
+                files = theme_backup.preview(target)
+            except (OSError, ValueError) as error:
+                theme_core.notify(_("Backup invalid"), self.backup_error_text(error))
+                return
+            try:
+                previous = theme_backup.safety_copy_path()
+            except OSError as error:
+                theme_core.notify(_("Backup failed"), str(error))
+                return
+            self.ask_confirm(_("Replace your settings, favorites, hidden themes, workspace assignments, presets and shortcuts with this backup? Your current state is saved first as {0}.").format(previous.name),
+                             _("Restore"), lambda: self.restore_backup(target, previous))
+        dialog.open(None, None, chosen)
+
+    @staticmethod
+    def backup_error_text(error):
+        known = {
+            'unsupported backup format': _('Unsupported backup format.'),
+            'invalid backup files': _('Invalid backup files.'),
+            'invalid presets': _('Invalid presets in backup.'),
+            'invalid shortcuts': _('Invalid shortcuts in backup.'),
+        }
+        return known.get(str(error), str(error))
+
+    def restore_backup(self, target, previous):
+        old_language = i18n.language_setting()
+        old_size = theme_core.window_size()
+        def done(previous, error):
+            theme_core.notify(_("Restore failed") if error else _("Backup restored"),
+                              self.backup_error_text(error) if error else str(previous))
+            if error is None and (old_language != i18n.language_setting() or old_size != theme_core.window_size()):
+                os.environ["THEME_MANAGER_PAGE"] = "settings"
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os.execv(sys.executable, [sys.executable, *sys.argv])
+            self.hidden = self.load_hidden_list()
+            self.save_header_order_live(header_order.normalize(theme_auto.settings().get("header_order")))
+            self.fill_settings()
+            self.refresh_themes()
+            self.refresh_presets()
+        self._async(lambda: theme_backup.restore(target, previous), done)
 
     def shortcut_setting_row(self, box, action: str, combo):
         line = Gtk.Box(spacing=6)
@@ -1195,13 +2122,7 @@ class ThemeManager(Gtk.Application):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.track_width(page)
         header = Gtk.Box(spacing=8)
-        back = Gtk.Button()
-        back.add_css_class("flat")
-        back.add_css_class("tm-header-btn")
-        back_box = Gtk.Box(spacing=6)
-        back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label=_("Back")))
-        back.set_child(back_box)
+        back = self.back_button()
         back.set_tooltip_text(_("Back (Esc)"))
         back.connect("clicked", lambda *_: self.close_shortcut_page())
         header.append(back)
@@ -1544,7 +2465,12 @@ class ThemeManager(Gtk.Application):
     def reset_settings(self):
         """Back to the defaults (see the button's tooltip). A new language
         restarts the popup (on this page), so it comes last."""
-        self.save_setting(sort="name", workspace_wallpapers=True, slideshow_minutes=0, corners="windows")
+        self.save_setting(sort="name", workspace_wallpapers=True, workspace_themes=False,
+                          slideshow_minutes=0, corners="windows",
+                          screenshot_key=True, screenshot_folder=None,
+                          header_order=list(header_order.DEFAULT))
+        self.header_order = list(header_order.DEFAULT)
+        self.rebuild_header_group()
         self.save_schedule(enabled=False, day_at=theme_auto.DEFAULT_SCHEDULE["day_at"],
                            night_at=theme_auto.DEFAULT_SCHEDULE["night_at"])
         if not theme_core.sync_enabled():
@@ -1554,6 +2480,48 @@ class ThemeManager(Gtk.Application):
             self.set_language("auto")
             return
         GLib.idle_add(self.fill_settings)  # Not from inside the button's own handler.
+
+    def choose_screenshot_folder(self):
+        dialog = Gtk.FileDialog(title=_("Choose screenshot folder"), modal=False)
+        folder = screenshots.folder_from_settings(theme_auto.settings())
+        if folder.is_dir():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(folder)))
+        self.window.hide()  # File dialogs sit below the layer-shell surface.
+
+        def done(_dialog, result):
+            try:
+                chosen = dialog.select_folder_finish(result)
+            except GLib.Error:
+                chosen = None
+            self.window.present()
+            if chosen is not None and chosen.get_path():
+                self.save_setting(screenshot_folder=chosen.get_path())
+                self.fill_settings()
+
+        dialog.select_folder(None, None, done)
+
+    def take_screenshot(self):
+        if getattr(self, "screenshot_busy", False) or not self.window.is_visible():
+            return
+        geo = self.monitor_geometry()
+        if geo is None:
+            theme_core.notify(_("Could not save screenshot"), _("The monitor position is unavailable."))
+            return
+        x, y = self.current_position()
+        rectangle = (geo.x + x, geo.y + y, self.window.get_width(), self.window.get_height())
+        self.screenshot_busy = True
+
+        def done(path, error):
+            self.screenshot_busy = False
+            if error is None:
+                if self.window.is_visible():
+                    self.show_screenshot_note(path)
+                else:
+                    theme_core.notify(_("Screenshot saved"), str(path))
+            else:
+                theme_core.notify(_("Could not save screenshot"), str(error))
+
+        self._async(lambda: screenshots.capture_to_settings(rectangle, theme_auto.settings()), done)
 
     def save_schedule(self, **values):
         try:
@@ -1573,13 +2541,7 @@ class ThemeManager(Gtk.Application):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.track_width(page)
         header = Gtk.Box(spacing=8)
-        back = Gtk.Button()
-        back.add_css_class("flat")
-        back.add_css_class("tm-header-btn")
-        back_box = Gtk.Box(spacing=6)
-        back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
-        back_box.append(Gtk.Label(label=_("Back")))
-        back.set_child(back_box)
+        back = self.back_button()
         back.set_tooltip_text(_("Back to themes without saving (Esc)"))
         back.connect("clicked", lambda *_: self.close_editor())
         header.append(back)
@@ -1589,16 +2551,23 @@ class ThemeManager(Gtk.Application):
         self.ed_title.add_css_class("tm-title")
         header.append(self.ed_title)
         page.append(header)
-        # The sample stays above the controls, so every change is seen at once.
+        # The sample stays in view next to the controls: above them in a
+        # narrow popup, large on the left of them in a wide one (ed_set_width).
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, vexpand=True)
         self.ed_sample_holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        page.append(self.ed_sample_holder)
+        self.ed_sample_holder.set_valign(Gtk.Align.START)
+        body.append(self.ed_sample_holder)
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
+        scroller.set_hexpand(True)
         self.ed_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.ed_box.add_css_class("tm-settings")
         scroller.set_child(self.ed_box)
-        page.append(scroller)
+        body.append(scroller)
+        page.append(body)
+        self.ed_body = body
+        self.ed_sample_size = (CARD_WIDTH, 150)
         self.ed_hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
         self.ed_hint.add_css_class("tm-hint")
         page.append(self.ed_hint)
@@ -1629,6 +2598,7 @@ class ThemeManager(Gtk.Application):
             return
         self.active_theme = None
         self.stop_preview()
+        self.ed_return_page = None          # Ask AI's Use sets it after opening
         font = theme_custom.font_of(base) if edit else None
         self.ed = {"base": base, "edit": edit, "palette": palette, "edited": set(), "font": font,
                    "entries": {}, "wallpapers": wallpaper is None, "fonts": theme_custom.list_fonts(),
@@ -1647,13 +2617,21 @@ class ThemeManager(Gtk.Application):
             self.ed_name.select_region(0, -1)
 
     def close_editor(self, keep: str | None = None):
+        """Back (or Esc) returns to where the editor was opened from: the Ask
+        AI page keeps its results; saving shows the theme in the list."""
         base = self.ed["base"].slug if self.ed else None
         self.ed = None
         if self.ed_provider is not None:
             Gtk.StyleContext.remove_provider_for_display(Gdk.Display.get_default(), self.ed_provider)
             self.ed_provider = None
-        self.stack.set_visible_child_name("themes")
+        back_to = getattr(self, "ed_return_page", None) if keep is None else None
+        self.ed_return_page = None
         self.refresh_themes(keep=keep or base)
+        if back_to == "ask":
+            self.stack.set_visible_child_name("ask")
+            self.ask_entry.grab_focus()
+            return
+        self.stack.set_visible_child_name("themes")
         self.select_row(self.rows.get_selected_row())
 
     def fill_editor(self):
@@ -1703,7 +2681,13 @@ class ThemeManager(Gtk.Application):
             # Which wallpapers the new theme gets: a compact row up here too.
             count = sum(1 for w in theme_core.list_backgrounds(None, ed["base"]) if not w.hidden)
             base = theme_core.plain_text(ed["base"].name)
-            if ed["wallpaper"] is not None:
+            if ed.get("ask_wallpaper") is not None and ed["wallpaper"] is None:
+                walls = self.switch(ed["wallpapers"], self.set_editor_wallpapers)
+                walls.set_tooltip_text(_("The picture from the Ask AI card is always included; on: also {0}'s {1} "
+                                         "wallpapers. Change them later on the new theme's wallpaper page.").format(
+                    base, count))
+                self.settings_row(box, _("Also {0}'s wallpapers").format(base), "", walls).add_css_class("tm-setting-compact")
+            elif ed["wallpaper"] is not None:
                 walls = self.switch(False, self.set_editor_wallpapers)
                 walls.set_tooltip_text(_("{0} is always included; on: also {1}'s other {2}. Change them later on the "
                                          "new theme's wallpaper page.").format(
@@ -1753,6 +2737,11 @@ class ThemeManager(Gtk.Application):
         ed = self.ed
         if ed["wallpaper"] is not None:
             return ed["wallpaper"].path
+        if ed.get("ask_wallpaper") is not None:
+            # The Ask AI card's picture: its thumbnail is already cached.
+            thumb = wallpaper_search.thumb_path(ed["ask_wallpaper"])
+            if thumb.is_file() and not thumb.is_symlink():
+                return thumb
         if ed["edit"] or ed["wallpapers"]:
             walls = [w.path for w in theme_core.list_backgrounds(None, ed["base"]) if not w.hidden]
             return walls[0] if walls else None
@@ -1770,10 +2759,11 @@ class ThemeManager(Gtk.Application):
         desk.set_overflow(Gtk.Overflow.HIDDEN)
         # One height whatever the width: a picture would otherwise grow with
         # the card and push the controls out of sight.
-        wall = FixedPicture(1, 150)
+        width, height = self.ed_sample_size
+        wall = FixedPicture(1 if width == CARD_WIDTH else width, height)
         path = self.editor_wallpaper()
         if path is not None:
-            self.decoder.request(wall, path, CARD_WIDTH, 150)
+            self.decoder.request(wall, path, width, height)
         desk.set_child(wall)
         front = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         bar = Gtk.Box(spacing=8)
@@ -1810,6 +2800,26 @@ class ThemeManager(Gtk.Application):
         desk.add_overlay(front)
         holder.append(desk)
         ed["sample"] = {"lines": lines, "prompt": prompt, "bar": workspaces}
+
+    def ed_set_width(self, card_w):
+        """Wide: the sample on the left, as large as 45 % of the card (16:9),
+        the controls on the right; narrow: the sample 150 px high above them."""
+        body = getattr(self, "ed_body", None)
+        if body is None:
+            return
+        wide = card_w >= WIDE_EDITOR_FROM
+        size = (round(card_w * 0.45), round(card_w * 0.45 * 9 / 16)) if wide else (CARD_WIDTH, 150)
+        body.set_orientation(Gtk.Orientation.HORIZONTAL if wide else Gtk.Orientation.VERTICAL)
+        body.set_spacing(18 if wide else 8)
+        self.ed_sample_holder.set_size_request(size[0] if wide else -1, -1)
+        if size != self.ed_sample_size:
+            self.ed_sample_size = size
+            self.ed_sample_dirty = True
+        if getattr(self, "ed_sample_dirty", False) and self.ed is not None \
+                and getattr(self, "resize_start", None) is None:
+            self.ed_sample_dirty = False   # once, after a grip drag is over
+            self.build_sample()
+            self.update_sample()
 
     def set_editor_wallpapers(self, on: bool):
         self.ed["wallpapers"] = on
@@ -1950,6 +2960,8 @@ class ThemeManager(Gtk.Application):
         if self.ed_hint.get_label():
             return
         palette, font, base = ed["palette"], ed["font"], ed["base"]
+        ask_wall = ed.get("ask_wallpaper")          # chosen on an Ask AI card
+        self.ed_ask_downloaded = None
         if ed["edit"]:
             name = self.ed_name.get_text()
             try:
@@ -1963,6 +2975,9 @@ class ThemeManager(Gtk.Application):
                 slug = theme_custom.rename_theme(base, name)
                 theme = next(t for t in theme_core.discover_themes() if t.slug == slug)
                 theme_custom.update_theme(theme, palette, font)
+                self.ed_ask_downloaded = self.download_ask_wallpaper(slug, ask_wall)
+                if self.ed_ask_downloaded is not None:      # its preview shows that picture
+                    theme_custom.make_preview(theme.path, palette, self.ed_ask_downloaded)
                 return slug
         else:
             name = self.ed_name.get_text()
@@ -1975,12 +2990,30 @@ class ThemeManager(Gtk.Application):
             extra = [ed["wallpaper"].path] if ed["wallpaper"] is not None else None
 
             def work():
-                return theme_custom.create_theme(base, name, palette, font, wallpapers,
-                                                 extra_wallpapers=extra).name
+                directory = theme_custom.create_theme(base, name, palette, font, wallpapers,
+                                                      extra_wallpapers=extra)
+                slug = directory.name
+                self.ed_ask_downloaded = self.download_ask_wallpaper(slug, ask_wall)
+                if self.ed_ask_downloaded is not None:      # its preview shows that picture
+                    theme_custom.make_preview(directory, palette, self.ed_ask_downloaded)
+                return slug
         self.ed_hint.set_label(_("Saving…"))
         self.ed_save.set_sensitive(False)
         self.ed_save_apply.set_sensitive(False)
         self._async(work, lambda slug, error: self.after_save_editor(slug, error, apply))
+
+    @staticmethod
+    def download_ask_wallpaper(slug, item):
+        """The wallhaven picture an Ask AI card showed, into the saved theme."""
+        if item is None:
+            return None
+        try:
+            return wallpaper_search.download(None, slug, item)
+        except FileExistsError:
+            return None
+        except (OSError, ValueError) as error:
+            GLib.idle_add(lambda: theme_core.notify(_("Could not download the wallpaper"), str(error)) and False)
+            return None
 
     def after_save_editor(self, slug, error, apply: bool):
         self.ed_save.set_sensitive(True)
@@ -1995,9 +3028,18 @@ class ThemeManager(Gtk.Application):
             self._async(lambda: theme_core.refresh_switcher_cache(SWITCHER_WRAPPER), lambda *_: None)
         self.close_editor(keep=slug)
         theme = next((t for t in theme_core.discover_themes() if t.slug == slug), None)
+        downloaded, self.ed_ask_downloaded = getattr(self, "ed_ask_downloaded", None), None
         # The theme in use is applied again (under its new name, if renamed),
         # so the new colors show everywhere.
-        if theme is not None and (apply or theme.current or was_current):
+        if theme is not None and apply and downloaded is not None:
+            # With the Ask AI card's wallpaper as its background.
+            def apply_with_wallpaper():
+                ok = theme_auto.apply_theme(theme.slug)
+                if ok and theme_core.set_desktop_background(downloaded):
+                    theme_auto.remember_base_wallpaper(theme.slug, downloaded)
+                return ok
+            self._async(apply_with_wallpaper, lambda ok, error: self.after_apply(theme, ok, error))
+        elif theme is not None and (apply or theme.current or was_current):
             self.apply_theme_action(theme)
 
     # --- add wallpapers with a file chooser -------------------------------------------------
@@ -2072,6 +3114,12 @@ class ThemeManager(Gtk.Application):
             GLib.source_remove(self.undo_timer)
             self.undo_timer = 0
         self.undo_bar.set_reveal_child(False)
+        changes = [r for r in receipts if callable(getattr(r, "undo", None))]
+        for change in changes:            # a workspace preview change, not a file
+            change.undo()
+        receipts = [r for r in receipts if r not in changes]
+        if not receipts:
+            return
         for receipt in receipts:
             try:
                 theme_core.restore_from_trash(receipt)
@@ -2183,11 +3231,92 @@ class ThemeManager(Gtk.Application):
         .tm-confirm {{ font-size: 18px; font-weight: 600; }}
         .tm-hint {{ color: {muted_hex}; font-size: 14px; }}
         .tm-header-btn {{ padding: 4px; min-width: 0; min-height: 0; margin-right: 4px; }}
+        .tm-header-group {{ background: alpha({fg_hex}, 0.05); border-radius: {radius}px;
+            padding: 2px 4px; }}
+        .tm-header-group button.tm-header-btn {{ margin-right: 0; }}
+        separator.tm-header-sep {{ background-color: alpha({fg_hex}, 0.18); background-image: none;
+            min-width: 1px; margin: 5px 0; }}
+        /* Buttons and tabs as in Maprisma: outlined, accent for state and icons. */
+        .tm-card button.tm-tab, .tm-card button.tm-ws-group, .tm-card button.tm-ws-choice,
+        .tm-card button.tm-ws-preset, .tm-card button.tm-action, .tm-card button.tm-paste,
+        .tm-card button.tm-settings-nav-button, .tm-card button.tm-settings-chip {{
+            background: transparent; background-image: none; box-shadow: none;
+            border: 1px solid alpha({fg_hex}, 0.25); border-radius: {radius}px; color: {fg_hex}; }}
+        .tm-card button.tm-tab, .tm-card button.tm-action, .tm-card button.tm-paste {{ padding: 6px 12px; min-height: 0; }}
+        .tm-card button.tm-ws-group {{ padding: 3px 10px; min-height: 0; font-size: 13px; }}
+        .tm-card button.tm-tab:hover, .tm-card button.tm-ws-group:hover, .tm-card button.tm-ws-choice:hover,
+        .tm-card button.tm-ws-preset:hover, .tm-card button.tm-action:hover, .tm-card button.tm-paste:hover,
+        .tm-card button.tm-settings-nav-button:hover, .tm-card button.tm-settings-chip:hover {{
+            background: alpha({accent_hex}, 0.08); }}
+        .tm-card button.tm-tab:checked, .tm-card button.tm-ws-group:checked,
+        .tm-card button.tm-ws-choice.tm-nav-active, .tm-card button.tm-ws-preset.tm-nav-active,
+        .tm-card button.tm-settings-nav-button.tm-nav-active, .tm-card button.tm-settings-chip.tm-nav-active {{
+            border: 2px solid {accent_hex}; color: {accent_hex}; background: alpha({accent_hex}, 0.08); }}
+        .tm-card button.tm-tab image, .tm-card button.tm-action image, .tm-card button.tm-paste image {{ color: {accent_hex}; }}
+        .tm-card button.sc-small {{ background: transparent; background-image: none; box-shadow: none;
+            border: 1px solid alpha({fg_hex}, 0.25); border-radius: {radius}px; color: {fg_hex}; }}
+        .tm-card button.sc-small:hover {{ background: alpha({accent_hex}, 0.08); }}
+        .tm-card button.tm-action.tm-destructive:hover, .tm-card button.tm-paste.tm-destructive:hover {{
+            border-color: {red_hex}; color: {red_hex}; background: alpha({red_hex}, 0.08); }}
+        .tm-card button.tm-action.tm-destructive:hover image, .tm-card button.tm-paste.tm-destructive:hover image {{
+            color: {red_hex}; }}
+        .tm-card button.tm-action:disabled, .tm-card button.tm-paste:disabled, .tm-card button.sc-small:disabled {{
+            opacity: 0.45; }}
+        .tm-card button.tm-back {{ color: {accent_hex}; padding: 4px 6px; min-height: 0; border: none; }}
+        .tm-card button.tm-back:hover {{ background: alpha({accent_hex}, 0.10); }}
+        flowboxchild.tm-ws-card {{ padding: 6px; border-radius: {radius}px; border: 1px solid alpha({fg_hex}, 0.12); }}
+        flowboxchild.tm-ws-card:selected {{ background: alpha({accent_hex}, 0.16); border-color: {accent_hex}; }}
+        flowboxchild.tm-ws-card:hover {{ border-color: alpha({accent_hex}, 0.6); }}
+        .tm-ws-title {{ font-weight: 600; font-size: 12px; }}
+        .tm-ws-title.tm-ws-current {{ color: {accent_hex}; }}
+        .tm-ws-look {{ border-radius: 5px; }}
+        .tm-ws-look-name {{ background: alpha({bg_hex}, 0.75); color: {fg_hex}; font-size: 10px;
+            padding: 1px 4px; border-radius: 0 0 5px 5px; }}
+        .tm-ws-heading {{ font-size: 11px; letter-spacing: 1px; color: {muted_hex}; margin-top: 4px; }}
+        button.tm-ws-choice, button.tm-ws-preset {{ padding: 4px 6px; min-height: 0; }}
+        .tm-ws-preset-name {{ font-size: 10px; }}
+        .tm-ws-banner {{ background: alpha({accent_hex}, 0.10); border: 1px solid alpha({accent_hex}, 0.4);
+            border-radius: {radius}px; padding: 8px; }}
+        flowboxchild.tm-ws-card:selected .tm-hint {{ color: alpha({fg_hex}, 0.8); }}
+        .tm-ws-banner label {{ font-size: 12px; }}
+        .tm-ws-error {{ color: {red_hex}; }}
+        .tm-ws-chip {{ background: alpha({fg_hex}, 0.07); border-radius: 999px; padding: 2px 4px 2px 8px; }}
+        .tm-ws-chip.tm-ws-chip-failed {{ box-shadow: inset 0 0 0 1px {red_hex}; }}
+        button.tm-ws-chip-remove {{ padding: 0 4px; min-height: 0; min-width: 0; }}
+        .tm-ws-hover {{ background: {bg_hex}; border: 1px solid {accent_hex}; border-radius: {radius}px;
+            padding: 8px; box-shadow: 0 6px 24px alpha(#000000, 0.45); }}
+        .tm-ws-hover {{ margin: 24px; }}
+        button.tm-ws-zoom {{ padding: 2px; min-height: 0; min-width: 0; margin: 3px;
+            background: alpha({bg_hex}, 0.8); border-radius: 999px; }}
+        button.tm-ws-zoom:hover {{ background: {accent_hex}; color: {bg_hex}; }}
+        .tm-ws-hover-caption {{ font-size: 11px; color: {fg_hex}; }}
+        flowboxchild.tm-ws-card.tm-ws-all {{ border: 1px dashed alpha({accent_hex}, 0.8);
+            background: alpha({accent_hex}, 0.06); }}
+        flowboxchild.tm-ws-card.tm-ws-drop {{ border: 2px dashed {accent_hex}; background: alpha({accent_hex}, 0.12); }}
+        .tm-group-card {{ border: 1px solid alpha({fg_hex}, 0.16); border-radius: {radius}px; padding: 10px 12px;
+            background: alpha({fg_hex}, 0.025); }}
+        .tm-ask-glyph {{ font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace; font-size: 15px; }}
+        .tm-ask-glyph.tm-ask-ready {{ color: {accent_hex}; }}
+        .tm-ask-glyph.tm-ask-off {{ color: {dim_hex}; }}
+        .tm-ask-dot {{ background: {accent_hex}; border-radius: 999px; min-width: 6px; min-height: 6px; }}
+        .tm-card button.tm-action.tm-action-primary {{ border-color: {accent_hex}; color: {accent_hex}; }}
+        .tm-ask-card {{ border: 1px solid alpha({fg_hex}, 0.18); border-radius: {radius}px; padding: 10px; }}
+        .tm-ask-prompts {{ padding: 4px; }}
+        .tm-ask-prompt {{ min-height: 34px; border-radius: {radius}px; }}
+        .tm-ask-prompt button {{ min-height: 30px; padding: 2px 8px; }}
+        .tm-ask-handle {{ color: {dim_hex}; padding: 0 6px; }}
+        .tm-ask-prompt.tm-ask-dragging {{ background: alpha({accent_hex}, 0.12); }}
+        .tm-ask-prompt.tm-ask-drop-above {{ box-shadow: inset 0 2px {accent_hex}; }}
+        .tm-ask-prompt.tm-ask-drop-below {{ box-shadow: inset 0 -2px {accent_hex}; }}
+        .tm-ask-busy {{ background: alpha({bg_hex}, 0.85); color: {fg_hex}; border: 1px solid {accent_hex};
+                        border-radius: 999px; padding: 6px 14px; }}
+        .tm-dialog-backdrop {{ background: alpha(#000000, 0.45); border-radius: {radius}px; }}
+        .tm-dialog {{ background: {bg_hex}; border: 1px solid {accent_hex}; border-radius: {radius}px;
+            padding: 18px; }}
+        .tm-header-drop-marker {{ background: {sel_hex}; border-radius: 2px; min-width: 3px; }}
         .tm-card button.tm-gear-btn {{ border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px;
             padding: 1px 6px; margin-right: 0; }}
         .tm-gear {{ font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace; font-size: 13px; }}
-        .tm-card button.tm-back-bordered {{ border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px;
-            padding: 4px 10px; }}
         .tm-section-title {{ font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
         separator.tm-settings-rule {{ background-color: alpha({fg_hex}, 0.12); background-image: none;
             min-height: 1px; margin: 0; }}
@@ -2200,8 +3329,8 @@ class ThemeManager(Gtk.Application):
         .tm-line button.sc-small {{ font-size: 11px; min-height: 0; padding: 2px 8px;
             border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px; background: transparent; }}
         .tm-list {{ background: transparent; }}
-        .tm-list flowboxchild {{ border-radius: {radius}px; padding: 6px 2px 6px 6px; min-height: 92px;
-            outline: none; }}
+        .tm-list flowboxchild {{ border-radius: {radius}px; padding: 2px; outline: none; }}
+        .tm-list .tm-tile {{ padding: 3px; }}
         .tm-list flowboxchild:hover {{ background: alpha({fg_hex}, 0.06); }}
         .tm-list flowboxchild:selected {{ background: {sel_hex}; color: {sel_fg}; }}
         .tm-row-name {{ font-size: 15px; font-weight: 600; }}
@@ -2237,7 +3366,7 @@ class ThemeManager(Gtk.Application):
         .tm-tile-badge:not(.current):not(.workspace) label {{ color: #ffffff; }}
         .tm-grid flowboxchild {{ border-radius: {radius}px; padding: 0; outline: none; }}
         .tm-grid flowboxchild:focus .tm-tile {{ border-color: {accent_hex}; background: alpha({accent_hex}, 0.12); }}
-        .tm-paste {{ font-weight: 600; font-size: 15px; padding: 8px 16px; }}
+        .tm-paste {{ font-weight: 500; font-size: 14px; }}
         button.tm-paste.danger {{ background: {red_hex}; color: #ffffff; }}
         button.tm-paste.danger:hover {{ background: shade({red_hex}, 1.1); }}
         popover.tm-popover contents {{ background-color: {bg_hex}; color: {fg_hex};
@@ -2260,9 +3389,22 @@ class ThemeManager(Gtk.Application):
         .tm-undo {{ background: {sel_hex}; color: {sel_fg}; border: 1px solid {accent_hex};
             border-radius: {radius}px; padding: 6px 6px 6px 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6); }}
         .tm-ws-on label {{ color: {accent_hex}; font-weight: 700; }}
+        .tm-menu-item.tm-ws-here {{ box-shadow: inset 0 0 0 2px {accent_hex}; }}
         .tm-ws-other label {{ color: {muted_hex}; }}
         .tm-undo button {{ padding: 4px 14px; }}
         .tm-settings {{ padding: 2px 4px 12px 0; }}
+        .tm-settings-nav {{ background: alpha({fg_hex}, 0.04); border-radius: {radius}px;
+            padding: 8px; }}
+        .tm-settings-nav-button {{ font-size: 12px; min-height: 0; padding: 8px 10px;
+            border-radius: {radius}px; text-align: left; }}
+        .tm-settings-nav-button.tm-nav-active {{ background: {sel_hex}; color: {sel_fg};
+            font-weight: 700; }}
+        .tm-settings-chips {{ padding: 2px 2px 6px 0; }}
+        .tm-settings-chip {{ font-size: 11px; min-height: 0; padding: 4px 9px;
+            border-radius: {radius}px; }}
+        .tm-settings-chip.tm-nav-active {{ background: {sel_hex}; color: {sel_fg};
+            font-weight: 700; }}
+        .tm-settings-search {{ margin: 2px 4px 6px 0; }}
         .tm-setting {{ background: alpha({fg_hex}, 0.05); border-radius: {radius}px; padding: 10px 12px; }}
         .tm-setting-title {{ font-size: 14px; font-weight: 600; }}
         .tm-setting.tm-setting-compact {{ padding: 3px 4px 3px 12px; }}
@@ -2343,6 +3485,7 @@ class ThemeManager(Gtk.Application):
         self.favorites = theme_auto.load_favorites()
         self.theme_keys = {shortcuts.theme_of(a): c for a, c in shortcuts.load_state().items()
                            if shortcuts.theme_of(a)}
+        self.workspace_theme_map = theme_auto.load_workspace_themes()
         ordered = theme_auto.order_themes(self.theme_list, self.favorites, theme_auto.load_recent(),
                                           theme_auto.sort_order())
         for theme in ordered:
@@ -2402,8 +3545,6 @@ class ThemeManager(Gtk.Application):
     def set_omarchy_sync(self, on: bool):
         def apply():
             theme_core.set_sync_enabled(on, SWITCHER_WRAPPER, SYNC_SCRIPT)
-            if on:
-                theme_core.prune_switcher_previews(theme_core.load_hidden())
         self._async(apply, lambda _r, error: theme_core.notify(
             _("Could not change the Omarchy sync"), str(error)) if error else theme_core.notify(
             _("Omarchy sync on") if on else _("Omarchy sync off"),
@@ -2483,6 +3624,12 @@ class ThemeManager(Gtk.Application):
             badge.add_css_class("hidden-badge")
             badge.append(Gtk.Label(label=_("hidden")))
             badges.append(badge)
+        assigned_workspaces = [ws for ws, slug in self.workspace_theme_map.items() if slug == theme.slug]
+        if assigned_workspaces:
+            badge = Gtk.Box()
+            badge.add_css_class("tm-badge")
+            badge.append(Gtk.Label(label=_("ws {0}").format(" · ".join(map(str, assigned_workspaces)))))
+            badges.append(badge)
         key = self.theme_keys.get(theme.slug)
         if key:
             row.set_tooltip_text(_("{0} applies this theme").format(shortcuts.combo_label(key)))
@@ -2511,11 +3658,11 @@ class ThemeManager(Gtk.Application):
         tile.add_css_class("tm-tile")
         if is_hidden:
             tile.add_css_class("tm-row-hidden")
-        picture = Gtk.Picture()
-        picture.set_content_fit(Gtk.ContentFit.COVER)
-        picture.set_size_request(TILE, TILE * 9 // 16)
+        # One size whatever the badges and the name (a plain picture would
+        # grow with its image and widen the card).
+        picture = FixedPicture(self.theme_tile_w, self.theme_tile_w * 9 // 16)
         if theme.preview:
-            self.decoder.request(picture, theme.preview, TILE, TILE * 9 // 16)
+            self.decoder.request(picture, theme.preview, self.theme_tile_w, self.theme_tile_w * 9 // 16)
         frame = Gtk.Overlay()
         frame.set_child(picture)
         actions = Gtk.Button(icon_name="open-menu-symbolic")
@@ -2541,6 +3688,13 @@ class ThemeManager(Gtk.Application):
                     badge.add_css_class(kind)
                 badge.append(Gtk.Label(label=_(text)))
                 badges.append(badge)
+        assigned_workspaces = [ws for ws, slug in self.workspace_theme_map.items() if slug == theme.slug]
+        if assigned_workspaces:
+            badge = Gtk.Box()
+            badge.add_css_class("tm-badge")
+            badge.add_css_class("tm-tile-badge")
+            badge.append(Gtk.Label(label=_("ws {0}").format(" · ".join(map(str, assigned_workspaces)))))
+            badges.append(badge)
         frame.add_overlay(badges)
         tile.append(frame)
         caption = Gtk.Box(spacing=4)
@@ -2563,6 +3717,12 @@ class ThemeManager(Gtk.Application):
         caption.set_hexpand(True)
         caption.append(name)
         tile.append(caption)
+        if key:      # its shortcut, as the list rows showed it
+            keyhint = Gtk.Label(label=shortcuts.combo_label(key).replace(" + ", "+"), xalign=0.5)
+            keyhint.add_css_class("tm-keyhint")
+            keyhint.set_ellipsize(Pango.EllipsizeMode.END)
+            keyhint.set_max_width_chars(1)
+            tile.append(keyhint)
         child = Gtk.FlowBoxChild()
         child.set_child(tile)
         child.tm_theme = theme
@@ -2609,9 +3769,13 @@ class ThemeManager(Gtk.Application):
         keys.connect("key-pressed", lambda _c, key, _code, _state: self.close_actions_on_key(popover, key))
         popover.add_controller(keys)
         self.menu_anchor = button
+        popover.tm_focus = None              # a builder may name the entry to start on
         popover.set_child(build(popover))
         popover.popup()
-        self.focus_first_entry(popover.get_child())
+        if popover.tm_focus is not None:
+            self.focus_entry(popover.tm_focus)
+        else:
+            self.focus_first_entry(popover.get_child())
 
     def on_actions_closed(self, popover):
         if self.actions_popover is popover:
@@ -2628,6 +3792,8 @@ class ThemeManager(Gtk.Application):
             return False
         if self.typing_in(popover):
             return False   # editing text inside the menu (the color chooser's hex field)
+        if key in (Gdk.KEY_Left, Gdk.KEY_KP_Left) and self.left_moves_in_grid(popover):
+            return False   # a workspace grid: ← moves to the button on the left
         popover.popdown()
         if self.stack.get_visible_child_name() == "wallpapers" and self.menu_anchor is not None:
             self.focus_tile_of(self.menu_anchor)
@@ -2636,6 +3802,17 @@ class ThemeManager(Gtk.Application):
             if row is not None:
                 row.grab_focus()
         return True
+
+    @staticmethod
+    def left_moves_in_grid(popover) -> bool:
+        """The focus is on a grid button that has a neighbour on its left."""
+        focus = popover.get_root().get_focus() if popover.get_root() is not None else None
+        while focus is not None and not isinstance(focus.get_parent(), Gtk.Grid):
+            focus = focus.get_parent()
+        if focus is None:
+            return False
+        column = focus.get_parent().query_child(focus)[0]
+        return column > 0
 
     @classmethod
     def typing_in(cls, widget) -> bool:
@@ -2703,6 +3880,12 @@ class ThemeManager(Gtk.Application):
             item(_("Apply theme"), lambda: self.apply_theme_action(theme), "media-playback-start-symbolic")
         item(_("Wallpapers"), lambda: self.open_wallpapers_for(theme), "image-x-generic-symbolic",
              end_icon="go-next-symbolic")
+        item(_("Use on workspace…"), lambda: self.show_theme_workspace_menu(theme),
+             "view-grid-symbolic", tooltip=_("Switches the global theme when that workspace gains focus"))
+        if theme.current and theme_auto.load_workspace_themes():
+            item(_("Use on all workspaces"), lambda: self.use_theme_everywhere(), "view-app-grid-symbolic",
+                 tooltip=_("Removes the other workspaces' own themes: this one everywhere "
+                           "(until the next day/night switch)"))
         item(_("New theme from this…"), lambda: self.open_editor(theme), "list-add-symbolic",
              tooltip=_("Your own copy with other colors, a font and these wallpapers"))
         if theme_custom.is_custom(theme):
@@ -2752,6 +3935,82 @@ class ThemeManager(Gtk.Application):
             button.set_tooltip_text(_("System themes are owned by root and cannot be deleted; hide them instead"))
         return box
 
+    def show_theme_workspace_menu(self, theme):
+        anchor = self.menu_anchor
+        if anchor is not None:
+            self.show_menu(anchor, lambda popover: self.build_theme_workspace_menu(popover, theme))
+
+    def build_theme_workspace_menu(self, popover, theme):
+        box = self.menu_box()
+        box.append(Gtk.Label(label=_("Use theme on workspace"), xalign=0))
+        grid = Gtk.Grid(column_spacing=2, row_spacing=2, column_homogeneous=True)
+        mapping = theme_auto.load_workspace_themes()
+        current = theme_auto.active_workspace()
+        for ws in range(1, 11):
+            mine = mapping.get(ws) == theme.slug
+            other = ws in mapping and not mine
+            name = theme_core.display_name(mapping[ws]) if other else ""
+            button = Gtk.Button()
+            label = Gtk.Label(label=("✓ " if mine else "") + str(ws) + (" · " + name if other else ""),
+                              ellipsize=Pango.EllipsizeMode.END)
+            label.set_max_width_chars(14)
+            button.set_child(label)
+            button.add_css_class('tm-menu-item')
+            if mine:
+                button.add_css_class('tm-ws-on')
+            elif other:
+                button.add_css_class('tm-ws-other')
+                button.set_tooltip_text(_('Replaces {0}').format(name))
+            self.focus_follows_pointer(button)
+            self.mark_current_workspace(popover, button, ws, current)
+            button.connect('clicked', lambda _b, w=ws, on=mine: (
+                popover.popdown(), self.assign_theme_workspace(theme, w, not on)))
+            grid.attach(button, (ws - 1) % 5, (ws - 1) // 5, 1, 1)
+        box.append(grid)
+        return box
+
+    def use_theme_everywhere(self):
+        """The current theme on every workspace, with Undo."""
+        try:
+            saved = theme_auto.use_everywhere()
+        except (OSError, ValueError) as error:
+            theme_core.notify(_("Could not change the workspaces"), str(error))
+            return
+        if saved is None:
+            return
+        name = theme_core.display_name(saved["theme"]) if saved["theme"] else ""
+        self.refresh_themes(keep=saved["theme"])
+        app = self
+
+        class Receipt:
+            def undo(self):
+                try:
+                    restored = theme_auto.undo_use_everywhere(saved)
+                except (OSError, ValueError) as error:
+                    theme_core.notify(_("Could not undo"), str(error))
+                    return
+                if not restored:
+                    theme_core.notify(_("Could not undo"), _("The workspaces' themes changed meanwhile."))
+                    return
+                app.refresh_themes(keep=saved["theme"])
+                active = theme_auto.active_workspace()
+                if active is not None:
+                    app.refresh_focused_workspace(active)    # its own theme again, if it has one
+        self.offer_undo(_("Every workspace uses {0}").format(name), [Receipt()])
+
+    def assign_theme_workspace(self, theme, workspace, on):
+        try:
+            theme_auto.set_workspace_theme(workspace, theme.slug if on else None)
+            if on and not theme_auto.workspace_themes_enabled():
+                theme_auto.update_settings(workspace_themes=True)
+        except (OSError, ValueError) as error:
+            theme_core.notify(_("Could not assign workspace"), str(error))
+            return
+        theme_core.notify((_("Workspace {0} assigned") if on else _("Workspace {0} cleared")).format(workspace),
+                          theme.name if on else "")
+        self.refresh_themes(keep=theme.slug)
+        self.refresh_focused_workspace(workspace)
+
     @staticmethod
     def focus_follows_pointer(item):
         """Pointing at a menu entry focuses it, so what looks selected is what
@@ -2766,6 +4025,30 @@ class ThemeManager(Gtk.Application):
         motion.connect("enter", follow)
         motion.connect("motion", follow)
         item.add_controller(motion)
+
+    @staticmethod
+    def focus_entry(button):
+        """Open a menu with the keyboard on this entry (again after popup():
+        a new popover moves the focus itself)."""
+        def focus():
+            if button.get_sensitive():
+                button.grab_focus()
+            return GLib.SOURCE_REMOVE
+        focus()
+        GLib.idle_add(focus)
+
+    @staticmethod
+    def mark_current_workspace(popover, button, ws, current):
+        """The workspace you are on: outlined, named in the tooltip, and where
+        the menu starts (Enter uses it). Not known (another monitor's special
+        workspace, above 10, no Hyprland answer): the menu starts on 1."""
+        if ws == 1 and current not in range(1, 11):
+            popover.tm_focus = button
+        if ws != current:
+            return
+        button.add_css_class("tm-ws-here")
+        button.set_tooltip_text(((button.get_tooltip_text() or "") + " " + _("(current workspace)")).strip())
+        popover.tm_focus = button
 
     @staticmethod
     def focus_first_entry(box):
@@ -2807,10 +4090,11 @@ class ThemeManager(Gtk.Application):
         self.show_hidden = not self.show_hidden
         if self.show_hidden:
             self.hidden_button.set_icon_name("view-conceal-symbolic")
-            self.hidden_button.set_tooltip_text(_("Hide hidden themes and wallpapers"))
+            self.header_tooltips["hidden"] = _("Hide hidden themes and wallpapers")
         else:
             self.hidden_button.set_icon_name("view-reveal-symbolic")
-            self.hidden_button.set_tooltip_text(_("Show hidden themes and wallpapers"))
+            self.header_tooltips["hidden"] = _("Show hidden themes and wallpapers")
+        self.set_header_tooltip("hidden")
         self.refresh_themes()
         self.refresh_wallpapers()
 
@@ -2829,12 +4113,14 @@ class ThemeManager(Gtk.Application):
         """Mirror the hidden list into Omarchy's own theme picker (opt-in)."""
         if not theme_core.sync_enabled():
             return
-        theme_core.prune_switcher_previews(self.hidden)
-        if unhidden:
-            # Rebuild the picker cache so the theme returns; the wrapper
-            # prunes the still-hidden ones again after the rebuild.
-            theme_core.invalidate_switcher_cache()
-            theme_core.preload_switcher(SWITCHER_WRAPPER)
+        hidden = set(self.hidden)
+        def refresh():
+            if unhidden:
+                theme_core.invalidate_switcher_cache()
+            theme_core.prune_switcher_previews(hidden)
+            return theme_core.refresh_switcher_cache(SWITCHER_WRAPPER)
+        self._async(refresh, lambda _ok, error: error and theme_core.notify(
+            _("Could not change the Omarchy sync"), str(error)))
 
     def open_wallpapers_for(self, theme: theme_core.ThemeInfo):
         if theme is None:
@@ -2853,11 +4139,26 @@ class ThemeManager(Gtk.Application):
 
     def show_themes(self):
         self.stop_preview()
+        if getattr(self, "ask_busy", None) is not None:
+            self.ask_release()                      # leaving Ask AI: its local model's GPU memory back
+        if getattr(self, "ask_prompt_drag", None) is not None:
+            self.ask_prompt_drag_cancel()           # leaving Ask AI mid-drag: nothing moves
         back_to = self.active_theme.slug if self.active_theme else None
         self.active_theme = None
         self.stack.set_visible_child_name("themes")
+        self.restore_settings_size()
         self.refresh_themes(keep=back_to)
         self.select_row(self.rows.get_selected_row())
+
+    def restore_settings_size(self):
+        previous = self.settings_previous_size
+        if previous is not None:
+            self.settings_previous_size = None
+            self.resize_to(*previous)
+            if self.position == self.settings_adjusted_position:
+                self.move_to(self.settings_previous_position)
+            self.settings_previous_position = None
+            self.settings_adjusted_position = None
 
     # --- wallpapers from the web (wallhaven.cc) ----------------------------------------
 
@@ -2893,11 +4194,28 @@ class ThemeManager(Gtk.Application):
         self.web_last_page = 1
         self.web_generation += 1
         self.web_pictures = {}
+        self.web_items = []
         child = self.web_grid.get_first_child()
         while child is not None:
             self.web_grid.remove(child)
             child = self.web_grid.get_first_child()
         self.load_more_web_results()
+
+    def rebuild_web_tiles(self):
+        """The search results shown so far, again at the current tile size."""
+        items = getattr(self, "web_items", [])
+        if not items:
+            return
+        child = self.web_grid.get_first_child()
+        while child is not None:
+            self.web_grid.remove(child)
+            child = self.web_grid.get_first_child()
+        self.web_pictures = {}
+        theme = self.active_theme
+        for item in items:
+            added = theme is not None and wallpaper_search.already_added(None, theme.slug, item)
+            self.web_grid.append(self.build_web_tile(item, added))
+        self.load_web_thumbs([r for r in items if r.id in self.web_pictures], self.web_generation)
 
     def load_more_web_results(self):
         if self.web_loading or not self.web_query or self.web_page_no >= self.web_last_page:
@@ -2921,6 +4239,7 @@ class ThemeManager(Gtk.Application):
         for item in results:
             added = theme is not None and wallpaper_search.already_added(None, theme.slug, item)
             self.web_grid.append(self.build_web_tile(item, added))
+            self.web_items = getattr(self, "web_items", []) + [item]
         shown = len(self.children_of(self.web_grid))
         if not shown:
             status = _("Nothing found for “{0}”. Try other words.").format(self.web_query)
@@ -2943,7 +4262,7 @@ class ThemeManager(Gtk.Application):
         tile.add_css_class("tm-tile")
         picture = Gtk.Picture()
         picture.set_content_fit(Gtk.ContentFit.COVER)
-        picture.set_size_request(TILE, TILE * 9 // 16)
+        picture.set_size_request(self.tile_w, self.tile_w * 9 // 16)
         self.web_pictures[item.id] = picture
         frame = Gtk.Overlay()
         frame.set_child(picture)
@@ -2997,7 +4316,7 @@ class ThemeManager(Gtk.Application):
     def show_web_thumb(self, wid: str, path: str):
         picture = self.web_pictures.pop(wid, None)
         if picture is not None:
-            self.decoder.request(picture, path, TILE, TILE * 9 // 16)
+            self.decoder.request(picture, path, self.tile_w, self.tile_w * 9 // 16)
         return GLib.SOURCE_REMOVE
 
     def show_web_menu(self, button, item):
@@ -3108,10 +4427,10 @@ class ThemeManager(Gtk.Application):
         tile.add_css_class("tm-tile")
         picture = Gtk.Picture()
         picture.set_content_fit(Gtk.ContentFit.COVER)
-        picture.set_size_request(TILE, TILE * 9 // 16)
+        picture.set_size_request(self.tile_w, self.tile_w * 9 // 16)
         cached = theme_catalog.preview_path(entry)
         if cached.is_file():
-            self.decoder.request(picture, cached, TILE, TILE * 9 // 16)
+            self.decoder.request(picture, cached, self.tile_w, self.tile_w * 9 // 16)
         else:
             self.catalog_pictures[entry.slug] = picture
         frame = Gtk.Overlay()
@@ -3173,7 +4492,7 @@ class ThemeManager(Gtk.Application):
     def show_preview(self, slug: str, path: str):
         picture = self.catalog_pictures.pop(slug, None)
         if picture is not None:
-            self.decoder.request(picture, path, TILE, TILE * 9 // 16)
+            self.decoder.request(picture, path, self.tile_w, self.tile_w * 9 // 16)
         return GLib.SOURCE_REMOVE
 
     def show_catalog_menu(self, button, entry):
@@ -3250,18 +4569,12 @@ class ThemeManager(Gtk.Application):
                 theme_core.unhide_theme(theme.slug)
             except OSError:
                 pass
-        self._async(lambda: theme_core.apply_theme(theme.slug),
+        self._async(lambda: theme_auto.apply_theme(theme.slug),
                     lambda ok, error: self.after_apply(theme, ok, error))
 
     def after_apply(self, theme: theme_core.ThemeInfo, ok: bool, error: Exception | None):
         if ok:
             theme_core.notify(_("Theme applied"), theme.name)
-            try:
-                theme_auto.record_recent(theme.slug)
-            except OSError:
-                pass
-            self._async(lambda: theme_custom.apply_theme_font(theme.slug),
-                        lambda font, _e: font and theme_core.notify(_("Font"), _("Now using {0}").format(font)))
         else:
             theme_core.notify(_("Could not apply theme"),
                               f"{theme.name}: {error or _('omarchy theme set failed')}")
@@ -3414,7 +4727,7 @@ class ThemeManager(Gtk.Application):
         tile.add_css_class("tm-tile")
         tile.add_css_class("tm-add-tile")
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        inner.set_size_request(TILE, TILE * 9 // 16)
+        inner.set_size_request(self.tile_w, self.tile_w * 9 // 16)
         inner.set_valign(Gtk.Align.CENTER)
         icon = Gtk.Image.new_from_icon_name("list-add-symbolic")
         icon.set_pixel_size(32)
@@ -3475,9 +4788,9 @@ class ThemeManager(Gtk.Application):
             tile.add_css_class("tm-row-hidden")
 
         picture = Gtk.Picture()
-        self.decoder.request(picture, wallpaper.path, TILE, TILE * 9 // 16)
+        self.decoder.request(picture, wallpaper.path, self.tile_w, self.tile_w * 9 // 16)
         picture.set_content_fit(Gtk.ContentFit.COVER)
-        picture.set_size_request(TILE, TILE * 9 // 16)  # wallpapers are 16:9
+        picture.set_size_request(self.tile_w, self.tile_w * 9 // 16)  # wallpapers are 16:9
         picture.set_valign(Gtk.Align.CENTER)
 
         frame = Gtk.Overlay()
@@ -3576,6 +4889,7 @@ class ThemeManager(Gtk.Application):
         box = self.menu_box()
         mapping = theme_auto.load_workspace_map().get(theme.slug, {}) if theme else {}
         grid = Gtk.Grid(column_spacing=2, row_spacing=2, column_homogeneous=True)
+        current = theme_auto.active_workspace()
         for ws in range(1, 11):
             mine = mapping.get(ws) == wallpaper.name
             other = ws in mapping and not mine
@@ -3591,6 +4905,7 @@ class ThemeManager(Gtk.Application):
                                     _("shows {0} (click to use this one)").format(mapping[ws]) if other else
                                     _("use this wallpaper")))
             self.focus_follows_pointer(button)
+            self.mark_current_workspace(popover, button, ws, current)
             button.connect("clicked", lambda _b, w=ws, m=mine: (
                 popover.popdown(), self.assign_workspace(wallpaper, w, not m)))
             grid.attach(button, (ws - 1) % 5, (ws - 1) // 5, 1, 1)
@@ -3669,10 +4984,12 @@ class ThemeManager(Gtk.Application):
                          _("Delete wallpaper"),
                          lambda: self.perform_delete_wallpaper(wallpaper))
 
-    def ask_confirm(self, message: str, button_label: str, on_confirm):
+    def ask_confirm(self, message: str, button_label: str, on_confirm, detail: str = ""):
         self.confirm_return = self.stack.get_visible_child_name() or "themes"
         self.confirm_action = on_confirm
         self.confirm_label.set_label(message)
+        self.confirm_detail.set_label(detail)
+        self.confirm_detail.set_visible(bool(detail))
         self.confirm_button.set_label(button_label)
         self.stack.set_visible_child_name("confirm")
 
@@ -3746,7 +5063,7 @@ class ThemeManager(Gtk.Application):
         self.add_files(paths)
 
     def drop_allowed(self) -> bool:
-        return self.active_theme is not None and \
+        return self.header_drag_id is None and self.active_theme is not None and \
             self.stack.get_visible_child_name() == "wallpapers"
 
     def on_drag_motion(self, _target, _drop, _x, _y):
@@ -3919,10 +5236,49 @@ class ThemeManager(Gtk.Application):
         threading.Thread(target=worker, daemon=True).start()
 
     def on_key(self, _controller, keyval, _keycode, state):
+        if state & Gdk.ModifierType.ALT_MASK and not state & (Gdk.ModifierType.CONTROL_MASK |
+                                                             Gdk.ModifierType.SUPER_MASK):
+            focused = self.window.get_focus()
+            for button_id, button in self.header_buttons.items():
+                if focused is button or (focused is not None and button.is_ancestor(focused)):
+                    if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_Right, Gdk.KEY_KP_Right):
+                        self.move_header_button(button_id, -1 if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left) else 1)
+                        return True
         page = self.stack.get_visible_child_name()
         back = keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_BackSpace)
         if page == "shortcut":
             return self.on_shortcut_key(_controller, keyval, _keycode, state)
+        if self.ws_app_list_open():
+            # The app list of an App Preset: its search field gets the keys; Esc closes only the list.
+            if keyval == Gdk.KEY_Escape:
+                self.ws_app_popover.popdown()
+                return True
+            return False
+        if keyval == Gdk.KEY_Escape and self.ws_drag_cancel():
+            return True        # Esc cancels a drag on the Workspaces tab, nothing else
+        if keyval == Gdk.KEY_Escape and page == "ask" and self.ask_prompt_drag_cancel():
+            return True        # Esc cancels dragging a suggestion, nothing else
+        if keyval == Gdk.KEY_Escape and page == "ask" and self.ask_finish_edit(False):
+            return True        # Esc cancels editing a suggestion, nothing else
+        if page == "ask" and self.ask_prompt_key(keyval, state):
+            return True        # Alt+↑/↓ moves the focused suggestion
+        if self.ws_preview_open() and keyval in (Gdk.KEY_Escape, Gdk.KEY_BackSpace, Gdk.KEY_space, Gdk.KEY_Return):
+            self.ws_hover_hide()
+            return True
+        if self.shot_dialog_open():
+            if keyval == Gdk.KEY_Escape:
+                self.finish_screenshot_note(False)
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                self.finish_screenshot_note(True)
+                return True
+            return False
+        if keyval == Gdk.KEY_F12 and not state & (Gdk.ModifierType.CONTROL_MASK |
+                                                  Gdk.ModifierType.ALT_MASK |
+                                                  Gdk.ModifierType.SUPER_MASK):
+            if screenshots.key_enabled(theme_auto.settings()):
+                GLib.idle_add(self.take_screenshot)
+                return True
         if self.actions_menu_open() and keyval != Gdk.KEY_Escape:
             return False  # the menu handles its own keys
         if keyval in (Gdk.KEY_z, Gdk.KEY_Z) and state & Gdk.ModifierType.CONTROL_MASK and self.undo_receipts:
@@ -3943,7 +5299,7 @@ class ThemeManager(Gtk.Application):
                 self.set_wp_filter("")
             elif page == "editor":
                 self.close_editor()
-            elif page in ("wallpapers", "import", "settings", "info"):
+            elif page in ("wallpapers", "import", "settings", "info", "presets", "ask"):
                 self.show_themes()
             elif self.filter_query:
                 self.set_filter("")
@@ -3957,7 +5313,66 @@ class ThemeManager(Gtk.Application):
             return False  # Left/Right move between Cancel and Delete
         if page == "editor":
             return False   # typing goes to the name and color fields
-        if page in ("settings", "info"):
+        if page == "ask":
+            focus = self.window.get_focus()
+            in_text = isinstance(focus, (Gtk.Text, Gtk.Entry))
+            in_prompt = focus is not None and (focus is self.ask_entry or focus.is_ancestor(self.ask_entry))
+            # Backspace goes back, except while typing (in the prompt: once it is empty).
+            if keyval == Gdk.KEY_BackSpace and (not in_text or (in_prompt and not self.ask_entry.get_text())):
+                self.show_themes()
+                return True
+            # Enter asks: in the prompt and anywhere on the page but a refine field
+            # (which sends its own words) or a button (Enter presses it).
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter) and \
+                    (in_prompt or not (in_text or isinstance(focus, Gtk.Button))):
+                self.ask_now()
+                return True
+            if in_text:
+                return False
+            char = self.typed_char(keyval, state)
+            if char:
+                self.ask_entry.grab_focus()
+                self.ask_entry.set_text(self.ask_entry.get_text() + char)
+                self.ask_entry.set_position(-1)
+                return True
+            return False
+        if page == "presets":
+            focus = self.window.get_focus()
+            in_name = focus is not None and (focus is self.preset_name or focus.is_ancestor(self.preset_name))
+            if in_name:
+                if keyval == Gdk.KEY_BackSpace and not self.preset_name.get_text():
+                    self.show_themes()
+                    return True
+                return False
+            if keyval == Gdk.KEY_BackSpace:
+                self.show_themes()
+                return True
+            char = self.typed_char(keyval, state) if self.presets_tab == "themes" else None
+            if char:   # type-to-name only on the Save/Load tab, where the field is
+                self.preset_name.grab_focus()
+                self.preset_name.set_text(self.preset_name.get_text() + char)
+                self.preset_name.set_position(-1)
+                return True
+            return False
+        if page == "settings":
+            focus = self.window.get_focus()
+            in_search = focus is not None and (focus is self.settings_search or focus.is_ancestor(self.settings_search))
+            if in_search:
+                if keyval == Gdk.KEY_BackSpace and not self.settings_search.get_text():
+                    self.show_themes()
+                    return True
+                return False
+            if keyval == Gdk.KEY_BackSpace:
+                self.show_themes()
+                return True
+            char = self.typed_char(keyval, state)
+            if char:
+                self.settings_search.grab_focus()
+                self.settings_search.set_text(self.settings_search.get_text() + char)
+                self.settings_search.set_position(-1)
+                return True
+            return False
+        if page == "info":
             if keyval == Gdk.KEY_BackSpace:
                 self.show_themes()
                 return True
@@ -4151,6 +5566,9 @@ class ThemeManager(Gtk.Application):
         # have changed while the singleton slept.
         self.hidden = self.load_hidden_list()
         self.filter_query = ""
+        # A header drag that never reported its end must not block drops.
+        self.header_drag_id = self.header_press = self.header_drop_slot = None
+        self.header_drop_marker.set_visible(False)
         try:
             theme_auto.note_current_theme()
         except OSError:
@@ -4166,6 +5584,9 @@ class ThemeManager(Gtk.Application):
         self.window.present()
         self.layer_watch.start()
         self.select_row(self.rows.get_selected_row())
+        # Reopened on the Presets page: again on the workspace you are on now.
+        if self.stack.get_visible_child_name() == 'presets' and self.ws_choose_current():
+            self.ws_reload()
         # Restarted after a language change: back on the settings page.
         if os.environ.pop("THEME_MANAGER_PAGE", "") == "settings":
             GLib.idle_add(self.open_settings)
@@ -4210,6 +5631,13 @@ class ThemeManager(Gtk.Application):
                 pass
 
     def on_move_begin(self, _gesture, _x, _y):
+        picked = self.main_header.pick(_x, _y, Gtk.PickFlags.DEFAULT)
+        while picked is not None and picked is not self.main_header:
+            if picked in self.header_buttons.values():
+                _gesture.set_state(Gtk.EventSequenceState.DENIED)
+                self.moving = False
+                return
+            picked = picked.get_parent()
         # Seen here rather than by a click gesture, which the drag can win:
         # a second press within the double-click time resets the popup.
         now = time.monotonic()
@@ -4314,18 +5742,30 @@ class ThemeManager(Gtk.Application):
     def close(self):
         self.layer_watch.stop()
         self.stop_preview()
+        self.ws_drag_reset()          # a preview drag never survives closing
+        if getattr(self, "ask_prompt_drag", None) is not None:
+            self.ask_prompt_drag_cancel()            # nor does a suggestion drag
+        if getattr(self, "ask_busy", None) is not None:
+            self.ask_release()                       # hidden: the local model's GPU memory back
         if self.stack.get_visible_child_name() == "shortcut":
             self.close_shortcut_page()
         if self.actions_menu_open():
             self.actions_popover.popdown()
         if self.stack.get_visible_child_name() == "confirm":
             self.cancel_confirm()  # never reopen onto a stale question
+        if self.shot_dialog_open():
+            self.finish_screenshot_note(False)
+        self.ws_hover_hide()
+        if self.settings_previous_size is not None:
+            self.stack.set_visible_child_name("themes")
+        self.restore_settings_size()
         self.window.hide()
 
 
 def main():
     app = ThemeManager()
     atexit.register(cleanup_pid)
+    atexit.register(theme_ai.release_local)   # ended (also by a signal): unload what Ask AI loaded
     return app.run()
 
 

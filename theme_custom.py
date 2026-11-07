@@ -573,6 +573,8 @@ def rename_theme(theme, new_name: str, roots: theme_core.Roots | None = None) ->
         walls[new] = walls.pop(old)
         theme_core.save_hidden_wallpapers(walls)
     theme_auto.rename_state(old, new)
+    import theme_presets
+    theme_presets.rename_theme(old, new)
     try:
         import theme_shortcuts
         theme_shortcuts.rename_theme(old, new)
@@ -597,10 +599,13 @@ def cover_crop(src_w: int, src_h: int, width: int, height: int) -> tuple[int, in
     return (src_w - w) // 2, (src_h - h) // 2, w, h
 
 
-def make_preview(directory: Path, palette: Palette) -> Path | None:
+def make_preview(directory: Path, palette: Palette, wallpaper: Path | None = None) -> Path | None:
     """preview.png: the theme's first wallpaper with a window drawn in the
     theme's colors (background, title in the accent, text lines, the
-    palette), so the theme can be told apart in every picker."""
+    palette), so the theme can be told apart in every picker. The wallpaper
+    is `wallpaper` if given, else the first of the theme's own backgrounds,
+    else the first of the user's backgrounds for it
+    (~/.config/omarchy/backgrounds/<slug>/, which Omarchy merges in)."""
     try:
         import gi
         gi.require_version("GdkPixbuf", "2.0")
@@ -615,9 +620,15 @@ def make_preview(directory: Path, palette: Palette) -> Path | None:
 
     canvas = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, width, height)
     canvas.fill(rgba(colors["darker_background"]))
-    walls = sorted((p for p in (directory / "backgrounds").glob("*")
-                    if p.is_file() and not p.is_symlink() and p.suffix.lower() in theme_core.IMAGE_EXTS),
-                   key=lambda p: p.name.casefold()) if (directory / "backgrounds").is_dir() else []
+    def images(folder: Path):
+        if not folder.is_dir():
+            return []
+        return sorted((p for p in folder.glob("*")
+                       if p.is_file() and not p.is_symlink() and p.suffix.lower() in theme_core.IMAGE_EXTS),
+                      key=lambda p: p.name.casefold())
+    walls = [Path(wallpaper)] if wallpaper is not None else \
+        (images(directory / "backgrounds") or
+         images(Path.home() / ".config/omarchy/backgrounds" / directory.name))
     for wall in walls[:1]:
         if theme_core.image_size_problem(wall):
             continue

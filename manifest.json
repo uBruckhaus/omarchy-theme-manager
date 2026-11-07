@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.theme-manager",
   "name": "Theme Manager",
-  "version": "1.8.1",
+  "version": "2.0.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
-  "description": "Every Omarchy theme in one place: apply, favorite, hide or delete with undo, and give any theme its own key. Make your own themes from any theme or wallpaper: pick colors and a font with a live preview. Manage wallpapers: drop, paste, choose or search the web, preview them on the desktop, give each workspace its own or let them rotate. Day and night themes, next wallpaper by scrolling the bar icon, favorites on right-click, themes from omarchy.org.",
+  "description": "Every Omarchy theme in one place: apply, favorite, hide or delete with undo, and give any theme its own key. Ask AI for a theme in a few words with your coding agent or a local model, and see each suggestion as it would look. Make your own themes from any theme or wallpaper: pick colors and a font with a live preview. Manage wallpapers: drop, paste, choose or search the web, preview them on the desktop, give each workspace its own theme or wallpaper or let them rotate. Workspace presets, day and night themes, backups, themes from omarchy.org.",
   "kinds": [
     "bar-widget"
   ],

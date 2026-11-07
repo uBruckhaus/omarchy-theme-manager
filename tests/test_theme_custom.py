@@ -389,6 +389,38 @@ class PreviewTests(unittest.TestCase):
                 header = (theme / "preview.png").read_bytes()[16:24]
                 self.assertEqual(struct.unpack(">II", header), theme_custom.PREVIEW_SIZE)
 
+    def test_preview_shows_the_given_or_the_users_wallpaper(self):
+        """2026-11-07 (Uwe's F12 note on Scarlet Pup): a theme made from an Ask AI card got a black
+        preview, because the card's picture lands in ~/.config/omarchy/backgrounds/<slug>/ after
+        the preview was drawn from the theme's own (empty) backgrounds."""
+        import os
+        from unittest.mock import patch
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+
+        def solid(path, rgba):
+            pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 64, 36)
+            pixbuf.fill(rgba)
+            pixbuf.savev(str(path), "png", [], [])
+
+        def corner(theme):
+            pixels = GdkPixbuf.Pixbuf.new_from_file(str(theme / "preview.png")).get_pixels()
+            return tuple(pixels[:3])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+            theme = Path(tmp) / ".config/omarchy/themes/scarlet-pup"
+            theme.mkdir(parents=True)
+            palette = theme_custom.parse_colors(RISTRETTO)
+            user = Path(tmp) / ".config/omarchy/backgrounds/scarlet-pup"
+            user.mkdir(parents=True)
+            solid(user / "wallhaven-x.png", 0xFF0000FF)
+            self.assertIsNotNone(theme_custom.make_preview(theme, palette))      # the user's folder
+            self.assertEqual(corner(theme), (255, 0, 0))
+            blue = Path(tmp) / "blue.png"
+            solid(blue, 0x0000FFFF)
+            theme_custom.make_preview(theme, palette, blue)                      # the given picture
+            self.assertEqual(corner(theme), (0, 0, 255))
+
 
 if __name__ == "__main__":
     unittest.main()

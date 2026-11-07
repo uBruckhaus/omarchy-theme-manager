@@ -11,4 +11,10 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 OMARCHY_BIN="${OMARCHY_PATH:-/usr/share/omarchy}/bin"
 
+# Omarchy 4.5 no longer forwards --preload to omarchy-menu-images. Carry
+# the intent through its stock switcher without changing its normal mode.
+if [[ ${1:-} == "--preload" ]]; then
+    export THEME_MANAGER_PRELOAD=1
+fi
+
 PATH="${DIR}/shim:${PATH}" exec "${OMARCHY_BIN}/omarchy-theme-switcher" "$@"

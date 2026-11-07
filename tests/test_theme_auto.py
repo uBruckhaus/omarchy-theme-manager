@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,6 +35,7 @@ class AutoTestCase(unittest.TestCase):
         self.patch(theme_core, "hidden_file", lambda: root / "config" / "hidden.json")
         self.patch(theme_core, "hidden_wallpapers_file", lambda: root / "config" / "hidden-wallpapers.json")
         self.patch(theme_auto, "state_file", lambda: root / "cache" / "auto-state.json")
+        self.patch(theme_auto, "workspace_theme_state_file", lambda: root / "cache" / "workspace-theme-state.json")
         self.shown: list[str] = []
 
         def set_background(path):
@@ -376,6 +378,112 @@ class CommandLineTests(AutoTestCase):
         theme_core.save_hidden({"alpha"})
         theme_auto.apply_theme("alpha")
         self.assertNotIn("alpha", theme_core.load_hidden())
+
+    def test_workspace_theme_is_opt_in_and_switches_on_focus(self):
+        self.make_theme("nord", current=True)
+        self.make_theme("alpha")
+        theme_auto.set_workspace_theme(2, "alpha")
+        self.assertEqual(theme_auto.load_workspace_themes(), {2: "alpha"})
+        theme_auto.apply_workspace(2)
+        self.assertEqual(self.applied, [])
+        theme_auto.update_settings(workspace_themes=True)
+        theme_auto.apply_workspace(2)
+        self.assertEqual(self.applied, ["alpha"])
+        theme_auto.apply_workspace(2)
+        self.assertEqual(self.applied, ["alpha"])
+        theme_auto.apply_workspace(1)
+        self.assertEqual(self.applied, ["alpha", "nord"])
+        theme_auto.set_workspace_theme(2, None)
+        self.assertEqual(theme_auto.load_workspace_themes(), {})
+
+    def test_use_everywhere_clears_the_workspace_themes_with_a_safe_undo(self):
+        self.make_theme("nord", current=True)
+        self.make_theme("alpha")
+        self.make_theme("beta")
+        theme_auto.update_settings(workspace_themes=True)
+        theme_auto.set_workspace_theme(2, "alpha")
+        theme_auto.set_workspace_theme(3, "beta")
+        self.workspace = 2
+        theme_auto.apply_workspace(2)                        # on ws 2: alpha is applied
+        saved = theme_auto.use_everywhere()
+        self.assertEqual(saved["theme"], "alpha")
+        self.assertEqual(theme_auto.load_workspace_themes(), {})
+        theme_auto.apply_workspace(1)                        # alpha stays everywhere now
+        self.assertEqual(self.applied, ["alpha"])
+        self.assertTrue(theme_auto.workspace_themes_enabled())
+        self.assertIsNone(theme_auto.use_everywhere())       # nothing left to clear
+        self.assertTrue(theme_auto.undo_use_everywhere(saved))
+        self.assertEqual(theme_auto.load_workspace_themes(), {2: "alpha", 3: "beta"})
+        # Changed meanwhile (a new assignment): Undo leaves it alone.
+        saved = theme_auto.use_everywhere()
+        theme_auto.set_workspace_theme(5, "beta")
+        self.assertFalse(theme_auto.undo_use_everywhere(saved))
+        self.assertEqual(theme_auto.load_workspace_themes(), {5: "beta"})
+        with patch.object(theme_core, "current_theme", return_value=""):
+            self.assertIsNone(theme_auto.use_everywhere())          # no current theme: nothing cleared
+        self.assertEqual(theme_auto.load_workspace_themes(), {5: "beta"})
+
+    def test_workspace_theme_rejects_missing_theme_and_bad_workspace(self):
+        with self.assertRaises(FileNotFoundError):
+            theme_auto.set_workspace_theme(2, "missing")
+        with self.assertRaises(ValueError):
+            theme_auto.set_workspace_theme(0, None)
+
+    def test_schedule_change_supersedes_workspace_theme_on_leave(self):
+        self.make_theme("base", current=True)
+        self.make_theme("nord")
+        self.make_theme("night")
+        theme_auto.set_workspace_theme(3, "nord")
+        theme_auto.update_settings(workspace_themes=True)
+        theme_auto.apply_workspace(3)
+        self.assertEqual(self.applied, ["nord"])
+        theme_auto.apply_theme("night")  # schedule or user choice while on workspace 3
+        theme_auto.apply_workspace(1)
+        self.assertEqual(self.applied, ["nord", "night"])
+        state = theme_auto._read_json(theme_auto.workspace_theme_state_file(), {})
+        self.assertEqual(state["base_theme"], "night")
+
+    def test_manual_change_survives_switch_between_assigned_workspaces(self):
+        self.make_theme("base", current=True)
+        self.make_theme("north")
+        self.make_theme("south")
+        self.make_theme("manual")
+        theme_auto.set_workspace_theme(2, "north")
+        theme_auto.set_workspace_theme(3, "south")
+        theme_auto.update_settings(workspace_themes=True)
+        theme_auto.apply_workspace(2)
+        theme_auto.apply_theme("manual")
+        theme_auto.apply_workspace(3)
+        theme_auto.apply_workspace(1)
+        self.assertEqual(self.applied, ["north", "manual", "south", "manual"])
+
+    def test_wallpaper_workspace_reset_keeps_schedule_and_slideshow_state(self):
+        self.make_theme("nord", current=True)
+        self.make_theme("other")
+        theme_auto.update_settings(workspace_wallpapers=True)
+        theme_auto._write_json(theme_auto.state_file(), {"theme": "other", "period": "day", "slide_at": 123})
+        theme_auto.on_workspace(2)
+        state = theme_auto._read_json(theme_auto.state_file(), {})
+        self.assertEqual(state["period"], "day")
+        self.assertEqual(state["slide_at"], 123)
+        self.assertEqual(state["theme"], "nord")
+
+    def test_night_boundary_updates_base_but_keeps_assigned_theme(self):
+        self.make_theme("day", current=True)
+        self.make_theme("night")
+        self.make_theme("assigned")
+        theme_auto.set_workspace_theme(2, "assigned")
+        theme_auto.update_settings(workspace_themes=True)
+        self.workspace = 2
+        theme_auto.apply_workspace(2)
+        theme_auto.save_schedule(enabled=True, day="day", night="night", day_at="07:00", night_at="19:00")
+        theme_auto._write_json(theme_auto.state_file(), {"period": "day"})
+        night_time = time.mktime((2026, 11, 6, 20, 0, 0, 0, 0, -1))
+        theme_auto.tick(night_time)
+        self.assertEqual(self.applied, ["assigned"])
+        self.assertEqual(theme_auto._read_json(theme_auto.workspace_theme_state_file(), {})["base_theme"], "night")
+        theme_auto.apply_workspace(1)
+        self.assertEqual(self.applied, ["assigned", "night"])
 
 
 if __name__ == "__main__":

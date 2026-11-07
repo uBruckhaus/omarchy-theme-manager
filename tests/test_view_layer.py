@@ -13,6 +13,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import gi
@@ -286,7 +287,7 @@ class ViewLayerTest(unittest.TestCase):
         visible = {row.tm_theme.slug for row in self.rows_list()}
         self.assertEqual(visible, {"alpha", "beta"})
         beta_row = next(r for r in self.rows_list() if r.tm_theme.slug == "beta")
-        self.assertTrue(beta_row.has_css_class("tm-row-hidden"))
+        self.assertTrue(beta_row.get_child().has_css_class("tm-row-hidden"))
 
         # Eye toggles back off: hidden row disappears again.
         self.app.toggle_show_hidden()
@@ -773,10 +774,12 @@ class ViewLayerTest(unittest.TestCase):
         for slug in ("alpha", "beta", "delta"):
             self.make_theme("user", slug)
         self.app.refresh_themes()
-        self.app.on_key(None, Gdk.KEY_Down, 0, 0)
+        # Two columns already at the default size: alpha beta / delta.
         self.app.on_key(None, Gdk.KEY_Down, 0, 0)
         self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "delta")
         self.app.on_key(None, Gdk.KEY_Up, 0, 0)
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "alpha")
+        self.app.on_key(None, Gdk.KEY_Right, 0, 0)
         self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "beta")
 
     def test_wallpaper_page_is_no_wider_than_theme_list(self):
@@ -1186,8 +1189,9 @@ class ViewLayerTest(unittest.TestCase):
             sizes.append((picture.measure(Gtk.Orientation.HORIZONTAL, -1)[:2],
                           picture.measure(Gtk.Orientation.VERTICAL, -1)[:2]))
         self.assertEqual(sizes[0], sizes[1])
-        self.assertEqual(sizes[0], ((theme_popup.PREVIEW_W, theme_popup.PREVIEW_W),
-                                    (theme_popup.PREVIEW_H, theme_popup.PREVIEW_H)))
+        w = self.app.theme_tile_w
+        self.assertEqual(sizes[0], ((w, w), (w * 9 // 16, w * 9 // 16)))
+        self.assertGreater(w, theme_popup.PREVIEW_W)   # larger than the old list rows' previews
 
 
     def test_sync_off_leaves_omarchy_alone(self):
@@ -1301,10 +1305,11 @@ class ViewLayerTest(unittest.TestCase):
         theme = self.make_theme("system", "gamma", tuple(f"w{i}.png" for i in range(6)))
         self.app.open_wallpapers_for(theme)
         self.assertEqual(self.app.wp_grid.get_max_children_per_line(), 2)
-        self.app.resize_to(820, 700, save=True)
+        self.app.resize_to(1300, 700, save=True)   # columns about TILE_TARGET wide
         self.assertEqual(self.app.columns, 4)
         self.assertEqual(self.app.wp_grid.get_max_children_per_line(), 4)
-        self.assertEqual(theme_core.window_size(), (820, 700))
+        self.assertGreater(self.app.tile_w, theme_popup.TILE)   # larger previews, not only more
+        self.assertEqual(theme_core.window_size(), (1300, 700))
         # Left from the middle column moves left instead of leaving the page.
         tiles = self.children(self.app.wp_grid)
         tiles[2].grab_focus()
@@ -1344,14 +1349,620 @@ class ViewLayerTest(unittest.TestCase):
         self.assertIsNone(theme_core.window_position())
         self.assertIsNone(theme_core.window_size())
 
+    def test_preview_changes_offer_undo(self):
+        from contextlib import nullcontext
+        import workspace_state
+        import workspace_tiling
+        store_file = Path(self.tmp.name) / "workspaces.json"
+        with patch.object(workspace_tiling, "store_path", return_value=store_file), \
+                patch.object(workspace_tiling, "runtime_lock", lambda: nullcontext()), \
+                patch.object(workspace_tiling, "wp_on_bar", return_value=False), \
+                patch.object(workspace_tiling, "apply_layout_preset", return_value={"status": "ok"}) as apply, \
+                patch.object(workspace_tiling, "hypr", return_value="[]"), \
+                patch.object(workspace_tiling, "omarchy_workspace_modes", return_value={}):
+            workspace_tiling.save_store({"maxWindows": 3})
+            self.app.ws_store = workspace_tiling.load_store()
+            self.app.ws_commit("Max 3 · Stacked", 2, workspace_state.set_preset, 2, "stacked")
+            self.assertEqual(workspace_tiling.load_store()["workspaceAutoPresets"], {"2": "stacked"})
+            self.assertTrue(self.app.undo_bar.get_reveal_child())
+            self.app.undo_delete()                                   # the bar's Undo (and Ctrl+Z)
+            self.assertNotIn("2", workspace_tiling.load_store().get("workspaceAutoPresets", {}))
+            self.assertEqual(apply.call_args_list[-1].args[:2], (2, "master-left"))   # laid out again
+
+    def test_narrow_large_preview_adds_a_window_and_stays_open(self):
+        from contextlib import nullcontext
+        import workspace_tiling
+        store_file = Path(self.tmp.name) / "workspaces.json"
+        with patch.object(workspace_tiling, "store_path", return_value=store_file), \
+                patch.object(workspace_tiling, "runtime_lock", lambda: nullcontext()), \
+                patch.object(workspace_tiling, "wp_on_bar", return_value=False), \
+                patch.object(workspace_tiling, "apply_layout_preset", return_value={"status": "ok"}), \
+                patch.object(workspace_tiling, "hypr", return_value="[]"), \
+                patch.object(workspace_tiling, "omarchy_workspace_modes", return_value={}):
+            workspace_tiling.save_store({"maxWindows": 2})
+            self.app.ws_store, self.app.ws_modes = workspace_tiling.load_store(), {}
+            self.app.presets_tab = "workspaces"
+            rects, dashed = self.app.ws_card_rects(3, "workspaces")
+            self.app.ws_zoom(3, "workspaces", None, rects, dashed)        # narrow: the large preview
+            self.assertTrue(self.app.ws_preview_open())
+            self.assertEqual(self.app.ws_selected, 3)                     # it edits that workspace
+            picture = self.app.ws_hover[1]
+            self.assertTrue(picture.plus_visible)
+            cx, cy, _r = picture.plus_box()
+            self.app.ws_panel_begin(picture, "workspaces", cx, cy)        # a click on +
+            self.assertEqual(self.app.ws_drag["mode"], "add")
+            self.app.ws_panel_end(picture, "workspaces", 0, 0)
+            self.assertEqual(workspace_tiling.load_store()["workspaceCaps"], {"3": 3})
+            self.assertTrue(self.app.ws_preview_open())                   # drawn again, not closed
+            self.assertEqual(len(self.app.ws_hover[1].rects), 3)
+            # Dragged into the left 30 %: Master Left for 4 windows.
+            picture = self.app.ws_hover[1]
+            cx, cy, _r = picture.plus_box()
+            self.app.ws_panel_begin(picture, "workspaces", cx, cy)
+            width = picture.get_width() or picture.get_content_width()
+            top, area_h = picture.area()
+            self.app.ws_drag["moved"] = True
+            self.app.ws_add_update(picture, self.app.ws_drag, width * 0.1, top + area_h * 0.5)
+            self.assertEqual(self.app.ws_drag["preset"], "master-left")
+            self.app.ws_panel_end(picture, "workspaces", 0, 0)
+            store = workspace_tiling.load_store()
+            self.assertEqual((store["workspaceCaps"]["3"], store["workspaceAutoPresets"]["3"]), (4, "master-left"))
+            self.assertFalse(self.app.ws_hover[1].plus_visible)          # 4 is the most
+            # Dropped outside the preview: nothing changes.
+            self.app.ws_store["workspaceCaps"]["3"] = 2
+            workspace_tiling.save_store(self.app.ws_store)
+            store_before = workspace_tiling.load_store()
+            picture.plus_visible = True
+            self.app.ws_panel_begin(picture, "workspaces", cx, cy)
+            self.app.ws_drag["moved"] = True
+            self.app.ws_add_update(picture, self.app.ws_drag, -50, -50)
+            self.app.ws_panel_end(picture, "workspaces", 0, 0)
+            self.assertEqual(workspace_tiling.load_store(), store_before)
+
+    def test_minus_takes_one_window_away_then_the_default_limit(self):
+        from contextlib import nullcontext
+        import workspace_tiling
+        store_file = Path(self.tmp.name) / "workspaces.json"
+        with patch.object(workspace_tiling, "store_path", return_value=store_file), \
+                patch.object(workspace_tiling, "runtime_lock", lambda: nullcontext()), \
+                patch.object(workspace_tiling, "wp_on_bar", return_value=False), \
+                patch.object(workspace_tiling, "apply_layout_preset", return_value={"status": "ok"}), \
+                patch.object(workspace_tiling, "hypr", return_value="[]"), \
+                patch.object(workspace_tiling, "omarchy_workspace_modes", return_value={}):
+            workspace_tiling.save_store({"maxWindows": 3, "workspaceCaps": {"4": 2}})
+            self.app.ws_store, self.app.ws_modes = workspace_tiling.load_store(), {}
+            self.app.presets_tab = "workspaces"
+            rects, dashed = self.app.ws_card_rects(4, "workspaces")
+            self.app.ws_zoom(4, "workspaces", None, rects, dashed)
+            for expected in ({"4": 1}, {}):
+                picture = self.app.ws_hover[1]
+                self.assertTrue(picture.minus_visible)
+                cx, cy, _r = picture.minus_box()
+                self.assertFalse(picture.plus_hit(cx, cy))
+                self.app.ws_panel_begin(picture, "workspaces", cx, cy)
+                self.assertEqual(self.app.ws_drag["mode"], "minus")
+                self.app.ws_panel_end(picture, "workspaces", 0, 0)
+                self.assertEqual(workspace_tiling.load_store().get("workspaceCaps", {}), expected)
+
+    def test_app_preset_preview_resizes_and_adds_apps(self):
+        from contextlib import nullcontext
+        import workspace_tiling
+        store_file = Path(self.tmp.name) / "workspaces.json"
+        windows = [{"class": "a", "at": [0, 0], "size": [950, 1000], "floating": False},
+                   {"class": "b", "at": [960, 0], "size": [960, 1000], "floating": False},
+                   {"class": "f", "at": [300, 300], "size": [400, 300], "floating": True}]
+        with patch.object(workspace_tiling, "store_path", return_value=store_file), \
+                patch.object(workspace_tiling, "runtime_lock", lambda: nullcontext()), \
+                patch.object(workspace_tiling, "wp_on_bar", return_value=False), \
+                patch.object(workspace_tiling, "apply_layout_preset", return_value={"status": "ok"}), \
+                patch.object(workspace_tiling, "hypr", return_value="[]"), \
+                patch.object(workspace_tiling, "omarchy_workspace_modes", return_value={}):
+            workspace_tiling.save_store({"maxWindows": 2, "workspaceModes": {"6": "manual"},
+                                         "workspaceLayouts": {"6": {"mode": "manual", "apps": [{"class": "a"}],
+                                                                    "windows": windows, "count": 3}}})
+            self.app.ws_store, self.app.ws_modes = workspace_tiling.load_store(), {}
+            self.app.presets_tab = "apps"
+            rects, dashed = self.app.ws_card_rects(6, "apps")
+            self.app.ws_zoom(6, "apps", None, rects, dashed)
+            picture = self.app.ws_hover[1]
+            self.assertTrue(picture.plus_visible)                         # + adds an app here
+            width = picture.get_width() or picture.get_content_width()
+            top, area_h = picture.area()
+            scale = 1 - 2 * 0.04
+            line_x = (955 / 1920 * scale + 0.04) * width
+            handle = self.app.ws_saved_handle(picture, 6, line_x, top + area_h * 0.9)   # below the floating one
+            self.assertEqual(handle, ("cut", 0, 950, 960))
+            self.app.ws_panel_begin(picture, "apps", line_x, top + area_h * 0.9)
+            self.app.ws_drag["moved"] = True
+            target_x = ((1155 / 1920) * scale + 0.04) * width
+            self.app.ws_saved_update(picture, self.app.ws_drag, target_x, top + area_h * 0.9)
+            self.app.ws_panel_end(picture, "apps", 0, 0)
+            saved = workspace_tiling.load_store()["workspaceLayouts"]["6"]["windows"]
+            self.assertAlmostEqual(saved[0]["size"][0], 1150, delta=15)
+            self.assertEqual(saved[0]["size"][0] + 10, saved[1]["at"][0])     # the other side moved along
+            self.assertEqual(saved[2], windows[2])
+            self.assertTrue(self.app.undo_bar.get_reveal_child())               # offered for Undo
+            # The floating window's corner.
+            picture = self.app.ws_hover[1]
+            r = picture.rects[2]
+            cx, cy = (r[0] + r[2]) * width, top + (r[1] + r[3]) * area_h
+            self.assertEqual(self.app.ws_saved_handle(picture, 6, cx, cy), ("corner", 2))
+            # + on an App Preset opens the app list (nothing is saved before a choice).
+            picked = []
+            with patch.object(self.app, "ws_pick_app", side_effect=lambda *a: picked.append(a[1:])):
+                px, py, _r = picture.plus_box()
+                self.app.ws_panel_begin(picture, "apps", px, py)
+                self.app.ws_panel_end(picture, "apps", 0, 0)
+            self.assertEqual(picked, [(6, None)])
+
+    def test_app_list_keeps_its_keys_and_esc_closes_only_it(self):
+        class FakePopover:
+            closed = 0
+
+            def get_visible(self):
+                return True
+
+            def popdown(self):
+                FakePopover.closed += 1
+        self.app.ws_app_popover = FakePopover()
+        with patch.object(self.app, "ws_hover_hide") as hide:
+            for key in (Gdk.KEY_space, Gdk.KEY_BackSpace, Gdk.KEY_Return, Gdk.KEY_a):
+                self.assertFalse(self.app.on_key(None, key, 0, 0))     # to the search field
+            self.assertTrue(self.app.on_key(None, Gdk.KEY_Escape, 0, 0))
+        self.assertEqual(FakePopover.closed, 1)
+        hide.assert_not_called()                                         # the preview stays
+        self.app.ws_app_popover = None
+
+    def test_presets_page_chooses_the_current_workspace(self):
+        import theme_auto
+        self.app.ws_selected = 2
+        with patch.object(theme_auto, "active_workspace", return_value=7), \
+                patch.object(self.app, "ws_reload"), patch.object(self.app, "refresh_presets"):
+            self.app.open_presets("workspaces")
+        self.assertEqual((self.app.ws_selected, self.app.ws_group), (7, 1))
+        with patch.object(theme_auto, "active_workspace", return_value=None), \
+                patch.object(self.app, "ws_reload"), patch.object(self.app, "refresh_presets"):
+            self.app.open_presets("workspaces")                 # no Hyprland answer: the choice stays
+        self.assertEqual(self.app.ws_selected, 7)
+        # Closed and opened again from the bar on another workspace: that one.
+        with patch.object(theme_auto, "active_workspace", return_value=3), \
+                patch.object(self.app, "ws_reload") as reload, \
+                patch.object(self.app.stack, "get_visible_child_name", return_value="presets"), \
+                patch.object(self.app, "grab_keyboard"), patch.object(self.app.window, "present"):
+            self.app.open()
+        self.assertEqual((self.app.ws_selected, self.app.ws_group), (3, 0))
+        reload.assert_called()
+
+    def test_ask_wallpaper_button_opens_searches_and_closes(self):
+        Gtk = gi.repository.Gtk
+        walls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        candidate = {"query": "dog night city"}
+        made = []
+        with patch.object(self.app, "ask_wallpaper_row", side_effect=lambda c, *_a: made.append(c["query"]) or Gtk.Label()):
+            self.app.ask_wallpaper_search(walls, candidate, None)          # opens the field
+            self.assertIsNotNone(walls.tm_entry)
+            walls.tm_entry.set_text("husky snow")
+            self.app.ask_wallpaper_search(walls, candidate, None)          # new words: searched
+            self.assertEqual(made, ["husky snow"])
+            self.app.ask_wallpaper_search(walls, candidate, None)          # same words: closed again
+        self.assertIsNone(walls.tm_entry)
+        self.assertEqual(len(self.children(walls)), 1)                     # only the pictures row
+
+    def test_ask_card_follows_your_own_wallpaper_search(self):
+        import ask_page
+        import wallpaper_search
+        theme = self.make_theme("system", "gamma")
+        colors = {"background": "#101820", "foreground": "#e0e0e0", "accent": "#1e66f5",
+                  "selection": "#334455", "muted": "#778899", "red": "#ff0000"}
+        new = {"kind": "new", "base": "gamma", "base_name": "Gamma", "name": "Blue Pup", "colors": colors,
+               "font": None, "query": "dog night city", "reason": "only needs a dog wallpaper"}
+        edit = dict(new, kind="edit", name="Gamma")
+        searched = []
+
+        busy_seen = []
+
+        def search(phrase, _page):
+            searched.append(phrase)
+            busy_seen.append(any(c.get_child().tm_busy.get_visible()
+                                 for c in self.children(self.app.ask_results)))
+            return ([{"id": "x"}], 1) if phrase == "cute girl" else ([], 0)
+        with patch.object(wallpaper_search, "search", side_effect=search), \
+                patch.object(self.app, "_async", side_effect=lambda work, done: done(work(), None)), \
+                patch.object(wallpaper_search, "fetch_thumb", return_value=None):
+            self.app.ask_candidates = [new, edit]
+            self.app.ask_show()
+            cards = [c.get_child() for c in self.children(self.app.ask_results)]
+            card = cards[0]
+            self.assertEqual(card.tm_title.get_label(), "Blue Pup")
+            self.app.ask_refine_row(card, new)
+            self.assertIn("dog night city", card.tm_refine.get_placeholder_text())
+            walls = card.tm_reason.get_prev_sibling()
+            self.app.ask_wallpaper_search(walls, new, None, card)
+            walls.tm_entry.set_text("cute girl portrait dark")
+            busy_seen.clear()
+            walls.tm_run()
+            self.assertTrue(busy_seen and all(busy_seen))                   # a spinner on the card while searching
+            self.assertFalse(card.tm_busy.get_visible())                    # and gone when done
+            self.assertEqual(new["query"], "cute girl portrait dark")      # the fallback does not shorten it
+            self.assertEqual(new["found_query"], "cute girl")
+            self.assertTrue(new["query_by_user"])
+            self.assertEqual(card.tm_title.get_label(), "Cute girl portrait dark")
+            self.assertEqual(new["name"], "Cute girl portrait dark")        # the editor's name for a new theme
+            self.assertIn("cute girl portrait dark", card.tm_reason.get_label())
+            self.assertNotIn("dog", card.tm_refine.get_placeholder_text())
+            self.assertIn("cute girl portrait dark", card.tm_refine.get_placeholder_text())
+            card = cards[1]                                                  # edit: the theme keeps its name
+            walls = card.tm_reason.get_prev_sibling()
+            self.app.ask_wallpaper_search(walls, edit, None, card)
+            walls.tm_entry.set_text("husky snow")
+            walls.tm_run()
+            self.assertEqual(edit["name"], "Gamma")
+            self.assertEqual(card.tm_title.get_label(), "Husky snow")
+            self.assertEqual(card.tm_kind.get_label(), "Edit Gamma")
+            card = [c.get_child() for c in self.children(self.app.ask_results)][0]
+            walls = card.tm_reason.get_prev_sibling()
+            walls.tm_entry.set_text("猫 夜")                                   # no letters for a slug: the agent's name
+            walls.tm_run()
+            self.assertEqual(new["query"], "猫 夜")
+            self.assertEqual(new["name"], "Blue Pup")
+            self.assertEqual(card.tm_title.get_label(), "Blue Pup")
+            self.app.ask_rejected = []
+            self.app.ask_reject(new)                                          # your search is not "rejected"
+            self.assertEqual(self.app.ask_rejected, ["Blue Pup"])
+        self.assertEqual(ask_page.AskPageMixin.ask_refine_example({"query": ""}).count("{0}"), 0)
+
+    def test_refine_keeps_the_card_when_nothing_visible_changed_and_reopens_its_field(self):
+        import theme_ai
+        self.make_theme("system", "gamma")
+        colors = {"background": "#101820", "foreground": "#e0e0e0", "accent": "#1e66f5"}
+        parent = {"kind": "edit", "base": "gamma", "base_name": "Gamma", "name": "Gamma", "colors": colors,
+                  "font": None, "query": "", "reason": "r"}
+        self.app.ask_ready = [{"id": "codex", "name": "Codex"}]
+        self.app.ask_candidates = [parent]
+        self.app.ask_show()
+        same = dict(parent, colors=dict(colors, background="#121a22"))
+        darker = dict(parent, colors=dict(colors, background="#000000"))
+        focused = []
+        with patch.object(self.app, "ask_helper_id", return_value="codex"), \
+                patch.object(self.app, "_async", side_effect=lambda work, done: done(work(), None)), \
+                patch.object(theme_ai, "ask", return_value=("s", [same])) as ask:
+            self.app.ask_now(parent, "darker")
+            self.assertIs(ask.call_args.args[4], parent)                 # the card goes along as parent
+            self.assertIn("Nothing visible changed", self.app.ask_status.get_label())
+            self.assertEqual(self.app.ask_candidates, [parent])
+            card = self.children(self.app.ask_results)[0].get_child()
+            self.assertIsNotNone(card.tm_refine)                         # its field is there again
+            ask.return_value = ("s", [])                                 # verify dropped the no-op
+            self.app.ask_now(parent, "darker")
+            self.assertIn("Nothing visible changed", self.app.ask_status.get_label())
+            card = self.children(self.app.ask_results)[0].get_child()
+            self.assertFalse(card.tm_busy.get_visible())                 # the no-op ended its spinner
+            seen = []
+            ask.side_effect = lambda *a: seen.append((card.tm_busy.get_visible(), card.tm_busy_label.get_label())) \
+                or ("Made darker.", [darker])
+            self.app.ask_now(parent, "much darker")
+            self.assertEqual(seen, [(True, "Refining with Codex…")])
+        self.assertEqual(self.app.ask_candidates, [darker])
+        card = self.children(self.app.ask_results)[0].get_child()
+        self.assertIsNotNone(card.tm_refine)                             # refine again right there
+        with patch.object(gi.repository.Gtk.Entry, "grab_focus") as grab:
+            self.app.ask_refine_row(card, darker)                        # open already: focused again
+        grab.assert_called_once()
+
+    def test_ask_helper_hint_has_its_own_line_and_long_names_shorten(self):
+        import theme_ai
+        long_name = {"id": "pi:llama/Qwen3.8-27B-Q4_K_M", "name": "pi · Qwen3.8-27B-Q4_K_M", "local": True}
+        with patch.object(theme_ai, "ready_helpers", return_value=[long_name]):
+            self.app.set_ask_ai(True)
+            self.app.open_ask()
+        self.assertIs(self.app.ask_cost.get_parent(), self.app.ask_helper_drop.get_parent().get_parent())
+        self.assertIn("On this PC", self.app.ask_cost.get_label())
+        self.assertEqual(self.app.ask_helper_drop.get_valign(), gi.repository.Gtk.Align.CENTER)
+        self.assertIsNotNone(self.app.ask_helper_drop.get_list_factory())
+        self.app.set_ask_ai(False)
+
+    def test_local_model_memory_is_given_back_on_switch_close_and_after_a_running_ask(self):
+        import theme_ai
+        qwen = {"provider": "llama", "model": "qwen", "host": "127.0.0.1", "port": 8080}
+        released = []
+        with patch.object(theme_ai, "owned_models", return_value=[("127.0.0.1", 8080, "qwen")]), \
+                patch.object(theme_ai, "local_model", side_effect=lambda h: qwen if h == "pi:llama/qwen" else None), \
+                patch.object(theme_ai, "release_local", side_effect=lambda keep=None: released.append(keep)), \
+                patch.object(self.app, "_async", side_effect=lambda work, done: done(work(), None)):
+            self.app.ask_busy = False
+            self.app.ask_release("pi:llama/qwen")                       # the same model again: kept
+            self.app.ask_release("claude")                              # an online agent: all of it back
+            self.assertEqual(released, [("127.0.0.1", 8080, "qwen"), None])
+            released.clear()
+            self.app.ask_busy = True                                    # thinking: after the answer
+            self.app.ask_release(None)
+            self.assertEqual(released, [])
+            self.assertEqual(self.app.ask_release_pending, (None,))
+            self.app.ask_busy = False
+            with patch.object(self.app, "grab_keyboard", create=True):
+                self.app.close()                                        # hidden: memory back
+            self.assertEqual(released, [None])
+        with patch.object(theme_ai, "owned_models", return_value=[]), \
+                patch.object(theme_ai, "release_local") as nothing:
+            self.app.ask_release(None)                                  # nothing loaded: no work at all
+            self.app.ask_busy = True                                    # a first Ask still loading: queued
+            self.app.ask_release(None)
+            self.assertEqual(self.app.ask_release_pending, (None,))
+            self.app.ask_busy = False
+            self.app.ask_release_pending = None
+        nothing.assert_not_called()
+
+    def test_ask_clear_button_empties_the_results(self):
+        self.make_theme("system", "gamma")
+        colors = {"background": "#101820", "foreground": "#e0e0e0", "accent": "#1e66f5"}
+        card = {"kind": "edit", "base": "gamma", "base_name": "Gamma", "name": "Gamma", "colors": colors,
+                "font": None, "query": "", "reason": "r"}
+        self.app.ask_busy = False
+        self.app.ask_show()
+        self.assertFalse(self.app.ask_clear.get_visible())              # nothing to clear
+        self.app.ask_candidates = [card]
+        self.app.ask_rejected = ["old"]
+        self.app.ask_status.set_label("Here are three options.")
+        self.app.ask_show()
+        self.assertTrue(self.app.ask_clear.get_visible())
+        self.app.ask_busy = True
+        self.app.ask_clear_results()                                    # not while an Ask runs
+        self.assertEqual(len(self.children(self.app.ask_results)), 1)
+        self.app.ask_busy = False
+        self.app.ask_clear.emit("clicked")
+        self.assertEqual((self.app.ask_candidates, self.app.ask_rejected, self.app.ask_status.get_label()), ([], [], ""))
+        self.assertEqual(self.children(self.app.ask_results), [])
+        self.assertFalse(self.app.ask_clear.get_visible())
+        self.app.ask_status.set_label("No answer: timeout")              # an error alone can be cleared too
+        self.assertTrue(self.app.ask_clear.get_visible())
+        self.app.ask_clear_results()
+        self.assertFalse(self.app.ask_clear.get_visible())
+
+    def test_use_on_workspace_menus_start_on_the_current_workspace(self):
+        import theme_auto
+        from types import SimpleNamespace
+        Gtk = gi.repository.Gtk
+        theme = self.make_theme("user", "alpha", ("a1.png",))
+        self.app.refresh_themes()
+        self.app.open_wallpapers_for(theme)
+        tiles = self.wallpaper_tiles()
+        self.assertEqual(len(tiles), 1)
+        popover = SimpleNamespace(tm_focus=None, popdown=lambda: None)
+        with patch.object(theme_auto, "active_workspace", return_value=3), \
+                patch.object(theme_auto, "load_workspace_themes", return_value={}):
+            self.app.build_theme_workspace_menu(popover, theme)
+            self.assertIn("3", popover.tm_focus.get_child().get_label())
+            self.assertTrue(popover.tm_focus.has_css_class("tm-ws-here"))
+            self.assertIn("(current workspace)", popover.tm_focus.get_tooltip_text())
+            popover.tm_focus = None
+            self.app.build_workspace_menu(popover, tiles[0].tm_wallpaper)   # the wallpaper's menu too
+            self.assertEqual(popover.tm_focus.get_label(), "3")
+        with patch.object(theme_auto, "active_workspace", return_value=None), \
+                patch.object(theme_auto, "load_workspace_themes", return_value={}):
+            popover.tm_focus = None
+            self.app.build_theme_workspace_menu(popover, theme)
+            self.assertEqual(popover.tm_focus.get_child().get_label(), "1")   # not known: starts on 1
+            self.assertFalse(popover.tm_focus.has_css_class("tm-ws-here"))
+        # ← moves left inside the grid; on the first column it still closes the menu.
+        grid = Gtk.Grid()
+        left, right = Gtk.Button(), Gtk.Button()
+        grid.attach(left, 0, 0, 1, 1)
+        grid.attach(right, 1, 0, 1, 1)
+        for focus, moves in ((right, True), (left, False)):
+            root = SimpleNamespace(get_focus=lambda f=focus: f)
+            self.assertEqual(self.app.left_moves_in_grid(SimpleNamespace(get_root=lambda r=root: r)), moves)
+        # show_menu starts on the named entry instead of the first one.
+        button = Gtk.Button()
+        with patch.object(Gtk.Popover, "popup"), patch.object(Gtk.Popover, "set_parent"), \
+                patch.object(self.app, "focus_entry") as entry, patch.object(self.app, "focus_first_entry") as first:
+            self.app.show_menu(Gtk.Button(), lambda pop: (setattr(pop, "tm_focus", button), Gtk.Box())[1])
+            entry.assert_called_once_with(button)
+            first.assert_not_called()
+        self.app.actions_popover = None
+
+    def test_current_theme_menu_offers_use_on_all_workspaces_with_undo(self):
+        import theme_auto
+        from types import SimpleNamespace
+        Gtk = gi.repository.Gtk
+        alpha = self.make_theme("user", "alpha")                         # the current theme
+        beta = self.make_theme("user", "beta")
+
+        def labels(theme):
+            box = self.app.build_theme_menu(SimpleNamespace(popdown=lambda: None), theme)
+            return [l.get_label() for l in self.descendants(box) if isinstance(l, Gtk.Label)]
+        self.assertNotIn("Use on all workspaces", labels(alpha))         # no workspace themes yet
+        theme_auto.set_workspace_theme(2, "beta")
+        self.assertIn("Use on all workspaces", labels(alpha))
+        self.assertNotIn("Use on all workspaces", labels(beta))          # only on the current theme
+        theme_auto.set_workspace_theme(2, "alpha")
+        self.assertIn("Use on all workspaces", labels(alpha))            # its own slug mapped: still clearable
+        theme_auto.set_workspace_theme(2, "beta")
+        self.app.use_theme_everywhere()
+        self.assertEqual(theme_auto.load_workspace_themes(), {})
+        self.assertIn("alpha", self.app.undo_label.get_label().lower())
+        with patch.object(theme_auto, "active_workspace", return_value=1):
+            self.app.undo_delete()
+        self.assertEqual(theme_auto.load_workspace_themes(), {2: "beta"})
+        theme_auto.set_workspace_theme(2, None)
+
+    def test_maprisma_hints_setting_puts_the_note_behind_a_help_button_or_removes_it(self):
+        import theme_ai
+        with patch.object(theme_ai, "ready_helpers", return_value=[]):
+            self.app.open_ask()
+            self.assertFalse(self.app.ask_maprisma.get_visible())        # default on: behind the ?
+            self.assertTrue(self.app.ask_help.get_visible())
+            self.app.ask_help.set_active(True)
+            self.assertTrue(self.app.ask_maprisma.get_visible())
+            self.app.open_ask()                                           # opened again: closed
+            self.assertFalse(self.app.ask_maprisma.get_visible())
+            self.app.set_maprisma_hints(False)
+            self.app.open_ask()
+        self.assertFalse(self.app.ask_maprisma.get_visible())            # off: no ? and no note
+        self.assertFalse(self.app.ask_help.get_visible())
+        self.app.set_maprisma_hints(True)
+
+    def test_ask_suggestions_can_be_saved_edited_and_removed(self):
+        import ask_page
+        import theme_ai
+        import theme_auto
+        with patch.object(theme_ai, "ready_helpers", return_value=[]):
+            self.app.open_ask()
+        groups = lambda: self.children(self.app.ask_examples)
+        self.assertEqual(len(groups()), len(ask_page.EXAMPLES))          # built-in, no reset button
+        self.assertFalse(self.app.ask_prompt_reset.get_visible())
+        self.app.ask_entry.set_text("  A   pink  theme ")
+        self.app.ask_save_prompt()
+        prompts = theme_auto.settings()["ask_prompts"]
+        self.assertEqual(prompts[-1], "A pink theme")
+        self.assertEqual(len(groups()), len(ask_page.EXAMPLES) + 1)      # + the new row
+        self.assertTrue(self.app.ask_prompt_reset.get_visible())          # ↺ below the list
+        self.app.ask_save_prompt()                                        # twice: not again
+        self.assertEqual(len(theme_auto.settings()["ask_prompts"]), len(prompts))
+        last = len(prompts) - 1
+        self.app.ask_edit_prompt(last, groups()[last])
+        index, entry = self.app.ask_prompt_edit
+        entry.set_text("A pink light theme")
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)                       # Esc cancels the edit only
+        self.assertEqual(self.app.stack.get_visible_child_name(), "ask")
+        self.assertEqual(theme_auto.settings()["ask_prompts"][last], "A pink theme")
+        self.app.ask_edit_prompt(last, groups()[last])
+        self.app.ask_prompt_edit[1].set_text("A pink light theme")
+        self.app.ask_finish_edit(True)
+        self.assertEqual(theme_auto.settings()["ask_prompts"][last], "A pink light theme")
+        self.app.ask_remove_prompt(0)
+        self.assertNotIn(ask_page._(ask_page.EXAMPLES[0]), theme_auto.settings()["ask_prompts"])
+        self.app.ask_store_prompts(None)                                  # reset
+        self.assertEqual(ask_page.saved_prompts(theme_auto.settings()), [ask_page._(t) for t in ask_page.EXAMPLES])
+        self.assertFalse(theme_ai.valid_prompts(["a", "a"]))
+        self.assertFalse(theme_ai.valid_prompts(["x"] * 13))
+        self.assertFalse(theme_ai.valid_prompts(["two\nlines"]))
+
+    def test_ask_suggestions_reorder_by_drag_and_alt_arrows_in_a_two_row_card(self):
+        import ask_page
+        import theme_ai
+        import theme_auto
+        with patch.object(theme_ai, "ready_helpers", return_value=[]):
+            self.app.open_ask()
+        defaults = [ask_page._(t) for t in ask_page.EXAMPLES]
+        self.app.card_w = 550
+        self.app.ask_prompt_height()                                      # narrow: two rows tall
+        two = 2 * ask_page.PROMPT_ROW + ask_page.PROMPT_GAP
+        self.assertEqual(self.app.ask_prompt_scroller.get_max_content_height(), two)
+        with patch.object(self.app, "size_limits", return_value=(3000, 2000)):
+            self.app.resize_to(1400, 800)                                 # widened: four rows
+        self.assertEqual(self.app.ask_prompt_scroller.get_max_content_height(),
+                         4 * ask_page.PROMPT_ROW + 3 * ask_page.PROMPT_GAP)
+
+        class Gesture:
+            def __init__(self):
+                self.reset_called = False
+
+            def set_state(self, _state):
+                pass
+
+            def reset(self):
+                self.reset_called = True
+        # A drag that ends elsewhere moves the row; the refill waits for the drop.
+        gesture = Gesture()
+        rows = self.app.ask_prompt_rows
+        self.app.ask_prompt_drag_begin(gesture, 1, 1, 0, rows[0].get_first_child())
+        self.assertIsNotNone(self.app.ask_prompt_drag)
+        self.app.ask_fill_prompts()                                       # held while dragging
+        self.assertIs(self.app.ask_prompt_rows, rows)
+        self.app.ask_prompt_drag["to"] = 2
+        self.app.ask_prompt_drag_end(gesture, 0, 0)
+        self.assertEqual(theme_auto.settings()["ask_prompts"], [defaults[1], defaults[2], defaults[0], defaults[3]])
+        # Esc cancels a drag and nothing moves.
+        self.app.ask_prompt_drag_begin(gesture, 1, 1, 0, self.app.ask_prompt_rows[0].get_first_child())
+        self.app.ask_prompt_drag["to"] = 3
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)
+        self.assertTrue(gesture.reset_called)
+        self.assertIsNone(self.app.ask_prompt_drag)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "ask")
+        self.assertEqual(theme_auto.settings()["ask_prompts"][0], defaults[1])
+        # Alt+↓ on a focused row moves it one down.
+        chip = self.app.ask_prompt_rows[0].get_first_child().get_next_sibling()
+        with patch.object(self.app.window, "get_focus", return_value=chip):
+            self.assertTrue(self.app.on_key(None, Gdk.KEY_Down, 0, Gdk.ModifierType.ALT_MASK))
+        self.assertEqual(theme_auto.settings()["ask_prompts"][:2], [defaults[2], defaults[1]])
+        self.app.ask_store_prompts(None)
+
+    def test_ask_ai_cards_and_use_open_the_editor_prefilled(self):
+        import ask_page
+        import theme_ai
+        theme = self.make_theme("system", "gamma")
+        with patch.object(theme_ai, "ready_helpers", return_value=[{"id": "codex", "name": "Codex"}]):
+            self.app.open_ask()                                   # off by default: it explains
+            self.assertTrue(self.app.ask_off_box.get_visible())
+            self.assertFalse(self.app.ask_button.get_sensitive())
+            self.app.set_ask_ai(True)
+            self.app.open_ask()
+        self.assertEqual(self.app.stack.get_visible_child_name(), "ask")
+        self.assertFalse(self.app.ask_off_box.get_visible())
+        self.assertTrue(self.app.ask_button.get_sensitive())
+        colors = {"background": "#101820", "foreground": "#e0e0e0", "accent": "#1e66f5",
+                  "selection": "#334455", "muted": "#778899", "red": "#ff0000"}
+        self.app.ask_candidates = [{"kind": "new", "base": "gamma", "base_name": "Gamma", "name": "Blue Dog",
+                                    "colors": colors, "font": None, "query": "", "reason": "blue borders"}]
+        self.app.ask_show()
+        self.assertEqual(len(self.children(self.app.ask_results)), 1)
+        card = self.children(self.app.ask_results)[0].get_child()
+        buttons = [b for b in self.descendants(card) if isinstance(b, gi.repository.Gtk.Button)]
+        labels = [l.get_label() for b in buttons for l in self.descendants(b) if isinstance(l, gi.repository.Gtk.Label)]
+        self.assertEqual([l for l in labels if l in ("Use", "Not this", "Refine…", "Wallpaper…")],
+                         ["Use", "Not this", "Refine…", "Wallpaper…"])
+        asked = []
+        with patch.object(self.app, "ask_now", side_effect=lambda *a, **k: asked.append(True)):
+            self.app.ask_entry.grab_focus()
+            self.app.on_key(None, Gdk.KEY_Return, 0, 0)       # Enter asks
+        self.assertEqual(asked, [True])
+        self.app.ask_use(self.app.ask_candidates[0], None)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "editor")
+        self.assertEqual(self.app.ed["palette"].colors["accent"], "#1e66f5")
+        self.assertEqual(self.app.ed["palette"].colors["red"], "#ff0000")
+        self.assertIn("Blue Dog", self.app.ed_name.get_text())
+        self.assertFalse(self.app.ed["edit"])             # a system theme is never changed: a copy
+        # Saving downloads the picture the card showed into the new theme.
+        import wallpaper_search
+        self.app.ed["ask_wallpaper"] = "ITEM"
+        fetched = []
+        with patch.object(wallpaper_search, "download", side_effect=lambda roots, slug, item: fetched.append((slug, item))):
+            self.app.save_editor(apply=False)
+        self.assertEqual(fetched[0][1], "ITEM")
+        self.assertTrue(fetched[0][0].startswith("blue-dog"))
+        # Use with a card picture: the sample shows it (not the base theme's
+        # wallpaper) and the base theme's wallpapers are only an extra.
+        thumb = Path(self.tmp.name) / "card-thumb.jpg"
+        thumb.write_bytes(jpeg())
+        with patch.object(wallpaper_search, "thumb_path", return_value=thumb):
+            self.app.ask_use(dict(self.app.ask_candidates[0], wallpaper="CARD"), None)
+            self.assertEqual(self.app.ed["ask_wallpaper"], "CARD")
+            self.assertFalse(self.app.ed["wallpapers"])
+            self.assertEqual(self.app.editor_wallpaper(), thumb)
+        self.app.close_editor()
+        self.app.ask_use(self.app.ask_candidates[0], None)
+        self.app.close_editor()                           # Back: to the Ask AI page, results kept
+        self.assertEqual(self.app.stack.get_visible_child_name(), "ask")
+        self.assertEqual(len(self.children(self.app.ask_results)), 1)
+        # Not this: the card goes, and it is never suggested again in this ask.
+        candidate = {"kind": "new", "base": "gamma", "base_name": "Gamma", "name": "Other",
+                     "colors": colors, "font": None, "query": "", "reason": ""}
+        self.app.ask_candidates = [candidate]
+        self.app.ask_rejected = []
+        self.app.ask_reject(candidate)
+        self.assertEqual(self.app.ask_rejected, ["Other"])
+        self.assertEqual(self.children(self.app.ask_results), [])
+        self.assertFalse(ask_page.enabled({}))             # off by default
+        self.assertTrue(self.app.ask_header_glyph.get_label())  # the sparkle is always in the header
+
     def test_wider_popup_shows_theme_cards_in_columns(self):
         Gdk = gi.repository.Gdk
         for slug in ("alpha", "beta", "gamma", "delta", "eps"):
             self.make_theme("system", slug)
         self.app.refresh_themes()
-        self.assertEqual(self.app.rows.get_max_children_per_line(), 1)
-        self.assertFalse(self.rows_list()[0].get_child().has_css_class("tm-tile"))   # the list
-        self.app.resize_to(900, 600)
+        self.assertEqual(self.app.rows.get_max_children_per_line(), 2)            # tiles already at the default
+        self.assertTrue(self.rows_list()[0].get_child().has_css_class("tm-tile"))
+        self.app.resize_to(1300, 600)
         self.assertEqual(self.app.rows.get_max_children_per_line(), 4)            # like the wallpapers
         self.assertTrue(self.rows_list()[0].get_child().has_css_class("tm-tile"))
         self.app.resize_to(480, 600)
@@ -1368,9 +1979,9 @@ class ViewLayerTest(unittest.TestCase):
         self.app.on_key(None, Gdk.KEY_Menu, 0, 0)                # the menu key still opens the menu
         self.assertIsNotNone(self.app.actions_popover)
         self.app.actions_popover.popdown()
-        self.app.resize_to(theme_popup.CARD_WIDTH, 600)          # default width: the list again
-        self.assertEqual(self.app.rows.get_max_children_per_line(), 1)
-        self.assertFalse(self.rows_list()[0].get_child().has_css_class("tm-tile"))
+        self.app.resize_to(theme_popup.CARD_WIDTH, 600)          # default width: two columns of tiles
+        self.assertEqual(self.app.rows.get_max_children_per_line(), 2)
+        self.assertTrue(self.rows_list()[0].get_child().has_css_class("tm-tile"))
 
     def test_delete_wallpaper_offers_undo_from_the_trash(self):
         trash = Path(self.tmp.name) / "Trash"

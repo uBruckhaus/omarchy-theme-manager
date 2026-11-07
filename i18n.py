@@ -2969,3 +2969,8 @@ STRINGS = {
   "● taken (can be rebound)": "● ocupada (pode ser reatribuída)"
  }
 }
+
+# New settings and screenshot texts live in a small companion table while the
+# shared i18n source checkout is unavailable for regeneration.
+from extra_i18n import install as _install_extra
+_install_extra(STRINGS)

@@ -6,6 +6,8 @@
 - `switcher_sync.py wallpapers`: called by the theme-set hook; removes hidden
   wallpapers from Omarchy's copy of the theme just applied and rebuilds the
   theme picker cache through the filtering wrapper.
+- `switcher_sync.py startup`: called by the bar widget after shell startup;
+  filters the cache before asking Omarchy 4.5's in-process picker to reload.
 """
 import sys
 from pathlib import Path
@@ -19,6 +21,11 @@ import theme_custom  # noqa: E402
 def main(argv: list[str]) -> int:
     if not theme_core.sync_enabled():
         return 0  # the user has not switched on syncing with Omarchy's pickers
+    if argv[1:] == ["startup"]:
+        wrapper = Path(__file__).resolve().parent / "theme-switcher"
+        theme_core.prune_switcher_previews(theme_core.load_hidden())
+        theme_core.refresh_switcher_cache(wrapper)
+        return 0
     if argv[1:] == ["wallpapers"]:
         # Called by the theme-set hook after `omarchy theme set`, before
         # Omarchy preloads its theme picker: hide wallpapers in the theme just
