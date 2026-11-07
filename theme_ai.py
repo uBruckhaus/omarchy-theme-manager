@@ -271,56 +271,72 @@ def _port_open(host: str, port: int, timeout: float = 0.5) -> bool:
 SYSTEM_UID_MAX = 999        # below this: system services (root, a packaged ollama user), not people
 
 
-PROC_TABLE_MAX = 16 * 1024 * 1024     # a /proc/net/tcp* table read whole, or not trusted at all
-
-
-# One row of /proc/net/tcp or tcp6, exactly as the kernel writes it (sl, local and remote
-# address:port, state, queues, timer, retransmits, uid, timeout, inode, then free fields).
-PROC_ROW = re.compile(r"^ *[0-9]+: ([0-9A-F]{8}|[0-9A-F]{32}):([0-9A-F]{4}) (?:[0-9A-F]{8}|[0-9A-F]{32}):[0-9A-F]{4} "
-                      r"([0-9A-F]{2}) [0-9A-F]{8}:[0-9A-F]{8} [0-9A-F]{2}:[0-9A-F]{8} [0-9A-F]{8} +([0-9]+) +"
-                      r"[0-9]+ [0-9]+(?: [ -~]*)?$")
+NETLINK_DEADLINE = 2.0              # seconds for both listener dumps together
+NETLINK_MAX_SOCKETS = 200_000       # a dump longer than this is not trusted
 
 
 def _listeners(port: int):
-    """(address hex, owner uid) of every listening TCP socket on `port`, from
-    /proc/net/tcp and tcp6, or None unless both tables are read to their end
-    and every row parses exactly (a malformed or cut-off table is never
-    trusted: a listener of another account could hide in it)."""
-    found = []
-    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(table, "rb") as stream:
-                raw = stream.read(PROC_TABLE_MAX + 1)
-        except FileNotFoundError:
-            if table.endswith("6"):
-                continue                       # no IPv6 in this kernel: nothing listens there
-            return None
-        except OSError:
-            return None
-        if len(raw) > PROC_TABLE_MAX or not raw.endswith(b"\n") or not raw.isascii():
-            return None
-        lines = raw.decode("ascii").split("\n")[:-1]
-        if not lines or not lines[0].lstrip().startswith("sl "):
-            return None
-        for line in lines[1:]:
-            row = PROC_ROW.match(line)
-            if row is None:
+    """(family, owner uid) of every listening TCP socket on `port`, asked from
+    the kernel over netlink (sock_diag, as `ss` does), for IPv4 and IPv6. The
+    kernel marks the end of each dump (NLMSG_DONE), so the list is provably
+    complete; any error, timeout or missing end returns None (never trusted)."""
+    import socket
+    import struct
+    found, deadline = [], time.monotonic() + NETLINK_DEADLINE
+    try:
+        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, 4)          # NETLINK_SOCK_DIAG
+    except OSError:
+        return None
+    with sock:
+        for seq, family in enumerate((socket.AF_INET, socket.AF_INET6), start=1):
+            # inet_diag_req_v2: family, TCP, no extensions, states = LISTEN only, empty socket id.
+            request = struct.pack("=BBBxI48x", family, socket.IPPROTO_TCP, 0, 1 << 10)
+            header = struct.pack("=IHHII", 16 + len(request), 20, 0x1 | 0x300, seq, 0)  # SOCK_DIAG_BY_FAMILY, REQUEST|DUMP
+            try:
+                sock.sendto(header + request, (0, 0))
+            except OSError:
                 return None
-            address, hex_port, state, uid = row.groups()
-            if state == "0A" and int(hex_port, 16) == port:            # 0A: LISTEN
-                found.append((address, int(uid)))
+            done, count = False, 0
+            while not done:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                sock.settimeout(left)
+                try:
+                    data = sock.recv(65536)
+                except OSError:
+                    return None
+                offset = 0
+                while offset + 16 <= len(data):
+                    length, kind, _flags, got_seq, _pid = struct.unpack_from("=IHHII", data, offset)
+                    if length < 16 or offset + length > len(data) or got_seq != seq:
+                        return None
+                    if kind == 3:                                            # NLMSG_DONE
+                        done = True
+                        break
+                    if kind != 20 or length < 16 + 72:                       # an error or anything unexpected
+                        return None
+                    msg = offset + 16
+                    sport = struct.unpack_from("!H", data, msg + 4)[0]
+                    uid = struct.unpack_from("=I", data, msg + 64)[0]
+                    count += 1
+                    if count > NETLINK_MAX_SOCKETS:
+                        return None
+                    if data[msg + 1] == 10 and sport == port:                # TCP_LISTEN on this port
+                        found.append((family, uid))
+                    offset += (length + 3) & ~3
     return found
 
 
 def port_is_trusted(port: int) -> bool | None:
-    """Whether every socket listening on this port, on any address (also an
-    IPv4-mapped one), is yours or a system service's: None when no listener
-    can be seen, False when one belongs to another person's account (it could
-    read the prompt or answer for the model), True otherwise."""
+    """Whether every socket listening on this port, on any address, IPv4 or
+    IPv6, is yours or a system service's: None when nothing listens, False
+    when one belongs to another person's account (it could read the prompt or
+    answer for the model) or the kernel's list was not complete, True otherwise."""
     listeners = _listeners(port)
     if listeners is None:
-        return False                    # the tables could not be read whole: not trusted
-    mine, owners = os.getuid(), [uid for _address, uid in listeners]
+        return False                    # no complete answer from the kernel: not trusted
+    mine, owners = os.getuid(), [uid for _family, uid in listeners]
     if not owners:
         return None
     return all(uid == mine or uid <= SYSTEM_UID_MAX for uid in owners)

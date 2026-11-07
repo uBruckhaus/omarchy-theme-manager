@@ -465,94 +465,82 @@ class HostileLimitsTests(unittest.TestCase):
 
 
 class PortOwnerTests(unittest.TestCase):
-    """Codex round 2 (High): a loopback port held by another person's account is never used."""
+    """A loopback port held by another person's account is never used (owners via netlink sock_diag)."""
 
-    TABLE = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
-             "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  {uid}        0 1\n")
-
-    def owners(self, uid):
-        import io
-        table = self.TABLE.format(uid=uid).encode()
-        real_open = open
-
-        def fake_open(path, mode="r", *a, **k):
-            if str(path) == "/proc/net/tcp":
-                return io.BytesIO(table)
-            if str(path) == "/proc/net/tcp6":
-                return io.BytesIO(b"  sl  local_address remote_address st\n")
-            return real_open(path, mode, *a, **k)
-        return patch("builtins.open", side_effect=fake_open)
+    def owners(self, *uids):
+        import socket
+        return patch.object(theme_ai, "_listeners", return_value=[(socket.AF_INET, uid) for uid in uids])
 
     def test_another_accounts_listener_is_refused_everywhere(self):
         model = {"provider": "llama", "model": "m", "host": "127.0.0.1", "port": 8080}
-        with self.owners(os.getuid() + 1 if os.getuid() >= 1000 else 4242):
+        other = os.getuid() + 1 if os.getuid() >= 1000 else 4242
+        with self.owners(os.getuid(), other):                          # one of them foreign: not trusted
             self.assertIs(theme_ai.port_is_trusted(8080), False)
-            with patch.object(theme_ai, "_port_open", return_value=True):
-                with self.assertRaises(RuntimeError):
-                    theme_ai.ensure_local_server(model)
+            with patch.object(theme_ai, "_port_open", return_value=True), self.assertRaises(RuntimeError):
+                theme_ai.ensure_local_server(model)
             with patch("socket.create_connection", side_effect=AssertionError("connected")):
                 self.assertIsNone(theme_ai._http_json("GET", "127.0.0.1", 8080, "/models"))
         with self.owners(os.getuid()):
             self.assertIs(theme_ai.port_is_trusted(8080), True)
-        with self.owners(965):                                           # a system service (packaged ollama)
+        with self.owners(965, 0):                                       # system services (packaged ollama, root)
             self.assertIs(theme_ai.port_is_trusted(8080), True)
-        self.assertIsNone(theme_ai.port_is_trusted(1))                   # nothing listens there
+        with patch.object(theme_ai, "_listeners", return_value=None):  # no complete kernel answer
+            self.assertIs(theme_ai.port_is_trusted(8080), False)
         with patch.object(theme_ai, "_port_open", return_value=True), \
                 patch.object(theme_ai, "port_is_trusted", return_value=None), self.assertRaises(RuntimeError):
             theme_ai.ensure_local_server(model)                          # not provably yours: fail closed
 
-    def test_a_malformed_or_cut_off_table_is_not_trusted(self):
-        import io
-        good = self.TABLE.format(uid=os.getuid())
-        bad_row = "   1: GARBAGE 0B\n"
-        real_open = open
-        for tcp in (good + bad_row, good.rstrip("\n"), good.replace("  sl", "  xx"), good + "   2: \xe4\n"):
-            def fake_open(path, mode="r", *a, tcp=tcp, **k):
-                if str(path) == "/proc/net/tcp":
-                    return io.BytesIO(tcp.encode("utf-8"))
-                if str(path) == "/proc/net/tcp6":
-                    return io.BytesIO(b"  sl  local_address remote_address st\n")
-                return real_open(path, mode, *a, **k)
-            with patch("builtins.open", side_effect=fake_open):
-                self.assertIs(theme_ai.port_is_trusted(8080), False, repr(tcp[-20:]))
-
-    def test_a_real_listener_of_yours_is_trusted(self):
+    def test_the_kernel_lists_real_listeners_with_their_owner(self):
         import socket
-        with socket.socket() as server:
-            server.bind(("127.0.0.1", 0))
-            server.listen(1)
-            self.assertIs(theme_ai.port_is_trusted(server.getsockname()[1]), True)
+        with socket.socket() as v4, socket.socket(socket.AF_INET6) as v6:
+            v4.bind(("127.0.0.1", 0))
+            v4.listen(1)
+            v6.bind(("::1", 0))
+            v6.listen(1)
+            for port, family in ((v4.getsockname()[1], socket.AF_INET), (v6.getsockname()[1], socket.AF_INET6)):
+                self.assertEqual(theme_ai._listeners(port), [(family, os.getuid())])
+                self.assertIs(theme_ai.port_is_trusted(port), True)
+        free = socket.socket()
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+        free.close()
+        self.assertEqual(theme_ai._listeners(port), [])
+        self.assertIsNone(theme_ai.port_is_trusted(port))
 
-    def test_a_table_that_cannot_be_read_whole_is_not_trusted(self):
-        import io
-        real_open = open
+    def test_a_netlink_failure_or_a_dump_without_its_end_is_not_trusted(self):
+        import socket
+        with patch("socket.socket", side_effect=OSError("no netlink")):
+            self.assertIsNone(theme_ai._listeners(8080))
 
-        def fake_open(path, mode="r", *a, **k):
-            if str(path) == "/proc/net/tcp":
-                return io.BytesIO(self.TABLE.format(uid=os.getuid()).encode())
-            if str(path) == "/proc/net/tcp6":
-                raise PermissionError("denied")
-            return real_open(path, mode, *a, **k)
-        with patch("builtins.open", side_effect=fake_open):
-            self.assertIs(theme_ai.port_is_trusted(8080), False)        # half a picture: not trusted
-        with patch.object(theme_ai, "PROC_TABLE_MAX", 10), self.owners(os.getuid()):
-            self.assertIs(theme_ai.port_is_trusted(8080), False)        # longer than read: not trusted
+        class Silent:
+            """Answers with one listener row but never with NLMSG_DONE."""
+            def __init__(self, *a):
+                self.seq = 0
 
-    def test_a_listener_on_any_address_counts(self):
-        import io
-        other = os.getuid() + 1 if os.getuid() >= 1000 else 4242
-        tcp6 = ("  sl  local_address remote_address st\n   0: 0000000000000000FFFF00000100007F:1F90 00000000000000000000000000000000:0000 0A "
-                "00000000:00000000 00:00000000 00000000  %d        0 1\n" % other).encode()
-        real_open = open
+            def __enter__(self):
+                return self
 
-        def fake_open(path, mode="r", *a, **k):
-            if str(path) == "/proc/net/tcp":
-                return io.BytesIO(self.TABLE.format(uid=os.getuid()).encode())
-            if str(path) == "/proc/net/tcp6":
-                return io.BytesIO(tcp6)
-            return real_open(path, mode, *a, **k)
-        with patch("builtins.open", side_effect=fake_open):
-            self.assertIs(theme_ai.port_is_trusted(8080), False)        # ::ffff:127.0.0.1 of another account
+            def __exit__(self, *a):
+                return False
+
+            def sendto(self, data, _addr):
+                import struct
+                self.seq = struct.unpack_from("=IHHII", data)[3]
+
+            def settimeout(self, value):
+                if value <= 0:
+                    raise OSError("timeout")
+
+            def recv(self, _n):
+                import struct
+                time.sleep(0.01)
+                body = bytearray(72)
+                body[1] = 10
+                struct.pack_into("!H", body, 4, 8080)
+                return struct.pack("=IHHII", 16 + 72, 20, 2, self.seq, 0) + bytes(body)
+        with patch("socket.socket", Silent), patch.object(theme_ai, "NETLINK_DEADLINE", 0.2):
+            self.assertIsNone(theme_ai._listeners(8080))            # no end marker before the deadline
+
 
     def test_chunked_bodies_parse_by_offsets_with_a_chunk_cap(self):
         many = b"1\r\nx\r\n" * 5000 + b"0\r\n\r\n"
