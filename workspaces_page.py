@@ -233,6 +233,8 @@ class WorkspacesPageMixin:
         (a restore, a theme preset, the bar's helper), off the main loop so a
         long restore holding it never freezes the popup; then show it and do
         the desktop part."""
+        autostart = self.ws_autostart_changes(rule, *args)
+
         def work():
             with tiling.runtime_lock():
                 store = tiling.load_store()
@@ -245,11 +247,40 @@ class WorkspacesPageMixin:
                 return
             self.ws_store, action = result
             self.ws_render()
+            for ws, layout in autostart:
+                self.ws_approve(ws, layout is not None, layout)
             if action:
                 self.ws_run(action, then)
             elif then:
                 then()
         self._async(work, done)
+
+    def ws_autostart_changes(self, rule, *args):
+        """What a change means for autostart, worked out on the layouts the page
+        shows (never on a store reread meanwhile): [(ws, layout to keep as the
+        private copy, or None to forget it)]. A workspace whose autostart is on
+        and whose apps or windows change (or whose autostart is switched on)
+        gets the result the user sees as its copy."""
+        shown = json.loads(json.dumps(self.ws_store or {}))
+        expected = json.loads(json.dumps(shown))
+        try:
+            rule(expected, *args)
+        except Exception:  # noqa: BLE001 - the real change reports its own error
+            return []
+        before = shown.get("workspaceLayouts") if isinstance(shown.get("workspaceLayouts"), dict) else {}
+        after = expected.get("workspaceLayouts") if isinstance(expected.get("workspaceLayouts"), dict) else {}
+        changes = []
+        for key in sorted(set(before) | set(after)):
+            if not key.isdigit():
+                continue
+            old, new = before.get(key), after.get(key)
+            on_before = isinstance(old, dict) and old.get("autostart") is True
+            on_after = isinstance(new, dict) and new.get("autostart") is True
+            if on_after and (not on_before or any(old.get(k) != new.get(k) for k in ("apps", "windows", "saveApps"))):
+                changes.append((int(key), new))
+            elif on_before and not on_after:
+                changes.append((int(key), None))
+        return changes
 
     def ws_run(self, action, then=None):
         def work():
@@ -1955,9 +1986,7 @@ class WorkspacesPageMixin:
                 self.ws_render()
                 return
             self.ws_failed.pop(ws, None)
-            keep = state.autostart_on(self.ws_store, ws)          # re-saved with autostart on: the new apps start
-            self.ws_change(state.save_capture, ws, capture,
-                           then=lambda: self.ws_approve(ws, keep, dict(capture, saveApps=state.save_apps_on(self.ws_store, ws))))
+            self.ws_change(state.save_capture, ws, capture)   # a new capture switches autostart off (copy forgotten)
             self.ws_message = _("Saved App Preset for Workspace {0} ({1} windows)").format(ws, capture.get("count") or 0)
             self.ws_render()
         self._async(lambda: tiling.capture_workspace(ws), done)
@@ -1965,9 +1994,7 @@ class WorkspacesPageMixin:
     def ws_toggle_flag(self, ws, key, was):
         """A switch of an App Preset. For autostart, the layout shown right now
         (when the switch was clicked) is what will start at login."""
-        shown = json.loads(json.dumps(state.layout_for(self.ws_store, ws) or {})) if key == "autostart" else None
-        self.ws_change(state.toggle_layout_flag, ws, key,
-                       then=(lambda: self.ws_approve(ws, not was, shown)) if key == "autostart" else None)
+        self.ws_change(state.toggle_layout_flag, ws, key)     # ws_change keeps or forgets the copy
 
     def ws_approve(self, ws, on, shown):
         """Switched on here (or saved with it on): keep a private copy of `shown`,

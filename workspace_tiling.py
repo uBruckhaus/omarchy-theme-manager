@@ -1112,8 +1112,11 @@ def _restore_workspace(ws_id, dry_run=False, conflict_action="ask", layout=None)
         raise ValueError("invalid workspace id")
     if conflict_action not in ("ask", "move", "close", "keep"):
         raise ValueError("invalid conflict action: %s" % conflict_action)
+    # Every saved layout (to know which windows elsewhere belong to another App Preset);
+    # the one restored is the store's (a click) or autostart's confirmed copy.
+    layouts = read_settings().get("workspace_layouts", {})
     if layout is None:
-        layout = read_settings().get("workspace_layouts", {}).get(ws_id)
+        layout = layouts.get(ws_id)
     if not layout:
         return {"status": "no_layout", "workspace": ws_id}
     apps = layout.get("apps", [])

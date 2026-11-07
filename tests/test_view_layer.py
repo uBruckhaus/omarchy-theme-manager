@@ -1785,6 +1785,21 @@ class ViewLayerTest(unittest.TestCase):
         self.assertEqual(theme_auto.load_workspace_themes(), {2: "beta"})
         theme_auto.set_workspace_theme(2, None)
 
+    def test_autostart_copy_follows_what_the_page_shows(self):
+        import workspace_state as state
+        apps = [{"desktop_id": "foot", "class": "foot"}, {"desktop_id": "gimp", "class": "gimp"}]
+        windows = [{"class": "foot", "at": [0, 0], "size": [900, 1000]}, {"class": "gimp", "at": [910, 0], "size": [900, 1000]}]
+        layout = {"mode": "manual", "autostart": False, "apps": apps, "windows": windows}
+        self.app.ws_store = {"workspaceLayouts": {"3": layout}, "workspaceModes": {"3": "manual"}}
+        on = self.app.ws_autostart_changes(state.toggle_layout_flag, 3, "autostart")
+        self.assertEqual([(ws, l["apps"]) for ws, l in on], [(3, apps)])          # switched on: the shown apps
+        self.app.ws_store["workspaceLayouts"]["3"]["autostart"] = True
+        removed = self.app.ws_autostart_changes(state.remove_app, 3, 1)
+        self.assertEqual([(ws, [a["desktop_id"] for a in l["apps"]]) for ws, l in removed], [(3, ["foot"])])
+        off = self.app.ws_autostart_changes(state.toggle_layout_flag, 3, "autostart")
+        self.assertEqual(off, [(3, None)])                                         # switched off: forgotten
+        self.assertEqual(self.app.ws_autostart_changes(state.set_split, 3, 0.6), [])  # nothing about apps
+
     def test_maprisma_hints_setting_puts_the_note_behind_a_help_button_or_removes_it(self):
         import theme_ai
         with patch.object(theme_ai, "ready_helpers", return_value=[]):

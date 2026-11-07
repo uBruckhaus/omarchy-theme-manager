@@ -422,7 +422,7 @@ def save_capture(store, ws, capture):
     _map(store, "workspaceLayouts")[str(ws)] = {
         "mode": "manual",
         "saveApps": existing.get("saveApps", True) is not False,
-        "autostart": existing.get("autostart") is True,     # new App Presets: off until switched on
+        "autostart": False,     # every new capture: off until switched on after seeing its apps
         "apps": capture.get("apps") or [],
         "windows": capture.get("windows") or [],
         "count": capture.get("count") or 0,
