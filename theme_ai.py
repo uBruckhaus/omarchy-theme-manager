@@ -271,26 +271,39 @@ def _port_open(host: str, port: int, timeout: float = 0.5) -> bool:
 SYSTEM_UID_MAX = 999        # below this: system services (root, a packaged ollama user), not people
 
 
-def _listeners(port: int) -> list[tuple[str, int]]:
+PROC_TABLE_MAX = 16 * 1024 * 1024     # a /proc/net/tcp* table read whole, or not trusted at all
+
+
+def _listeners(port: int):
     """(address hex, owner uid) of every listening TCP socket on `port`, from
-    /proc/net/tcp and tcp6 (bounded reads)."""
+    /proc/net/tcp and tcp6, or None when either table cannot be read to its
+    end and parsed (then nothing on any port counts as trusted)."""
     found = []
     for table in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
             with open(table, "rb") as stream:
-                text = stream.read(8 * 1024 * 1024).decode("ascii", "replace")
+                raw = stream.read(PROC_TABLE_MAX + 1)
+        except FileNotFoundError:
+            if table.endswith("6"):
+                continue                       # no IPv6 in this kernel: nothing listens there
+            return None
         except OSError:
-            continue
-        for line in text.splitlines()[1:]:
+            return None
+        if len(raw) > PROC_TABLE_MAX:
+            return None
+        for line in raw.decode("ascii", "replace").splitlines()[1:]:
             fields = line.split()
-            if len(fields) < 8 or fields[3] != "0A":          # 0A: LISTEN
+            if len(fields) < 8:
+                return None
+            if fields[3] != "0A":                                      # 0A: LISTEN
                 continue
-            address, _sep, hex_port = fields[1].partition(":")
+            address, sep, hex_port = fields[1].partition(":")
             try:
-                if int(hex_port, 16) == port:
-                    found.append((address, int(fields[7])))
+                if not sep or int(hex_port, 16) != port:
+                    continue
+                found.append((address, int(fields[7])))
             except ValueError:
-                continue
+                return None
     return found
 
 
@@ -299,7 +312,10 @@ def port_is_trusted(port: int) -> bool | None:
     IPv4-mapped one), is yours or a system service's: None when no listener
     can be seen, False when one belongs to another person's account (it could
     read the prompt or answer for the model), True otherwise."""
-    mine, owners = os.getuid(), [uid for _address, uid in _listeners(port)]
+    listeners = _listeners(port)
+    if listeners is None:
+        return False                    # the tables could not be read whole: not trusted
+    mine, owners = os.getuid(), [uid for _address, uid in listeners]
     if not owners:
         return None
     return all(uid == mine or uid <= SYSTEM_UID_MAX for uid in owners)

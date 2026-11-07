@@ -501,6 +501,21 @@ class PortOwnerTests(unittest.TestCase):
                 patch.object(theme_ai, "port_is_trusted", return_value=None), self.assertRaises(RuntimeError):
             theme_ai.ensure_local_server(model)                          # not provably yours: fail closed
 
+    def test_a_table_that_cannot_be_read_whole_is_not_trusted(self):
+        import io
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **k):
+            if str(path) == "/proc/net/tcp":
+                return io.BytesIO(self.TABLE.format(uid=os.getuid()).encode())
+            if str(path) == "/proc/net/tcp6":
+                raise PermissionError("denied")
+            return real_open(path, mode, *a, **k)
+        with patch("builtins.open", side_effect=fake_open):
+            self.assertIs(theme_ai.port_is_trusted(8080), False)        # half a picture: not trusted
+        with patch.object(theme_ai, "PROC_TABLE_MAX", 10), self.owners(os.getuid()):
+            self.assertIs(theme_ai.port_is_trusted(8080), False)        # longer than read: not trusted
+
     def test_a_listener_on_any_address_counts(self):
         import io
         other = os.getuid() + 1 if os.getuid() >= 1000 else 4242

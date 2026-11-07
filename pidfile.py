@@ -69,11 +69,12 @@ def read():
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
-    with os.fdopen(fd) as f:
+    with os.fdopen(fd, "rb") as f:
         info = os.fstat(f.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 128:
             return None
-        parts = f.readline().strip().split(":")
+        parts = f.read(129)[:128].decode("ascii", "replace").splitlines()[:1] or [""]
+        parts = parts[0].strip().split(":")
     if not parts[0].isdigit():
         return None
     return int(parts[0]), parts[1] if len(parts) > 1 else ""

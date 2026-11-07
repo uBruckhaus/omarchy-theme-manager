@@ -171,9 +171,7 @@ def load_state() -> dict:
 
 def _bounded_read(path: Path) -> str:
     try:
-        if path.stat().st_size > MAX_CONFIG_BYTES:
-            return ""
-        return path.read_text("utf-8", "replace")
+        return theme_core.read_small(path, MAX_CONFIG_BYTES, errors="replace")
     except OSError:
         return ""
 

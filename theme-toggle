@@ -117,9 +117,12 @@ main() {
     pid_file="$(resolve_pid_file)"
 
     # Check recorded PID (only from a regular file this user owns)
-    if [[ -n "$pid_file" && -f "$pid_file" && ! -L "$pid_file" && -O "$pid_file" ]]; then
+    if [[ -n "$pid_file" && -f "$pid_file" && ! -L "$pid_file" && -O "$pid_file" ]] \
+            && (( $(stat -c %s "$pid_file" 2>/dev/null || echo 999) <= 128 )); then
         local rec_pid rec_st
-        IFS=":" read -r rec_pid rec_st _ < "$pid_file" || true
+        local line
+        line="$(head -c 128 "$pid_file" 2>/dev/null || true)"
+        IFS=":" read -r rec_pid rec_st _ <<< "${line%%$'\n'*}" || true
         if is_theme_manager_process "$rec_pid" "$rec_st"; then
             kill -USR1 "$rec_pid" 2>/dev/null || true
             exit 0

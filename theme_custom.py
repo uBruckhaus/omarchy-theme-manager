@@ -181,11 +181,12 @@ def render_colors(palette: Palette, name: str, base: str) -> str:
 def load_palette(theme) -> Palette:
     path = Path(theme.path) / "colors.toml"
     try:
-        if path.stat().st_size > MAX_COLORS_BYTES:
-            raise ValueError(_("colors.toml is too large"))
-        return parse_colors(path.read_text("utf-8", "replace"))
+        text = theme_core.read_small(path, MAX_COLORS_BYTES, errors="replace")
     except FileNotFoundError:
         return parse_colors("")
+    except OSError as error:
+        raise ValueError(_("colors.toml is too large") if path.is_file() else str(error)) from None
+    return parse_colors(text)
 
 
 # --- colors from a wallpaper ------------------------------------------------------
@@ -450,9 +451,9 @@ def _write_marker(directory: Path, base: str, font: str | None, created: float) 
 def _copy_icons(base_dir: Path, directory: Path) -> None:
     source = base_dir / "icons.theme"
     try:
-        if source.is_symlink() or source.stat().st_size > 200:
+        if source.is_symlink():
             return
-        text = source.read_text("utf-8", "replace").strip().splitlines()[0]
+        text = theme_core.read_small(source, 200, errors="replace").strip().splitlines()[0]
     except (OSError, IndexError):
         return
     if re.match(r"^[A-Za-z0-9._+-]{1,80}$", text):

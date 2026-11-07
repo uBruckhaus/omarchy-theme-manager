@@ -402,7 +402,7 @@ def settings_file() -> Path:
 SMALL_FILE_MAX = 4 * 1024 * 1024    # settings, state and config files we read
 
 
-def read_small(path, limit: int = SMALL_FILE_MAX) -> str:
+def read_small(path, limit: int = SMALL_FILE_MAX, errors: str = "strict") -> str:
     """Text of a small regular file (a link to one is fine, e.g. a dotfiles
     setup), opened without blocking and checked on the open file: a FIFO,
     device or a file over `limit` bytes raises OSError and is never waited on
@@ -420,7 +420,7 @@ def read_small(path, limit: int = SMALL_FILE_MAX) -> str:
             data += more
         if len(data) > limit:
             raise OSError(f"file too large: {path}")
-        return data.decode("utf-8")
+        return data.decode("utf-8", errors)
     except UnicodeDecodeError as error:
         raise OSError(str(error)) from None
     finally:
