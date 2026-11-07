@@ -1110,5 +1110,14 @@ class HostileOutputTests(unittest.TestCase):
         self.assertNotIn("&", body)
         self.assertNotIn("\n", body)
 
+
+class MalformedShellJsonTests(unittest.TestCase):
+    def test_wp_entry_never_raises_on_odd_types(self):
+        for config in ({"bar": "x"}, {"bar": {"layout": []}}, {"bar": {"layout": {"left": "x"}}},
+                       {"bar": {"layout": {"left": [1, None, "s"]}}}, [], {"bar": None}):
+            self.assertIsNone(tile.wp_entry(config))
+        entry = {"id": tile.WP_PLUGIN_ID}
+        self.assertIs(tile.wp_entry({"bar": {"layout": {"right": [7, entry]}}}), entry)
+
 if __name__ == "__main__":
     unittest.main()

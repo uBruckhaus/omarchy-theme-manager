@@ -236,5 +236,17 @@ class PresetBackupTests(unittest.TestCase):
                         self.assertNotIn(term, translations.get(code, ""), f"{code}: {key}")
 
 
+
+class BackupFifoTests(unittest.TestCase):
+    def test_a_fifo_chosen_as_backup_is_refused_without_blocking(self):
+        import os
+        import tempfile
+        import theme_backup
+        with tempfile.TemporaryDirectory() as tmp:
+            fifo = Path(tmp) / "backup.json"
+            os.mkfifo(fifo)
+            with self.assertRaises(ValueError):
+                theme_backup.preview(fifo)
+
 if __name__ == "__main__":
     unittest.main()

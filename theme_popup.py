@@ -2047,18 +2047,20 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 theme_core.notify(_("Backup invalid"), _("Choose a local file"))
                 return
             target = Path(opened.get_path())
-            try:
-                files = theme_backup.preview(target)
-            except (OSError, ValueError) as error:
-                theme_core.notify(_("Backup invalid"), self.backup_error_text(error))
-                return
-            try:
-                previous = theme_backup.safety_copy_path()
-            except OSError as error:
-                theme_core.notify(_("Backup failed"), str(error))
-                return
-            self.ask_confirm(_("Replace your settings, favorites, hidden themes, workspace assignments, presets and shortcuts with this backup? Your current state is saved first as {0}.").format(previous.name),
-                             _("Restore"), lambda: self.restore_backup(target, previous))
+
+            def previewed(_files, error):
+                # Read and checked on a worker thread: a FIFO or a large file never holds the popup.
+                if error is not None:
+                    theme_core.notify(_("Backup invalid"), self.backup_error_text(error))
+                    return
+                try:
+                    previous = theme_backup.safety_copy_path()
+                except OSError as failure:
+                    theme_core.notify(_("Backup failed"), str(failure))
+                    return
+                self.ask_confirm(_("Replace your settings, favorites, hidden themes, workspace assignments, presets and shortcuts with this backup? Your current state is saved first as {0}.").format(previous.name),
+                                 _("Restore"), lambda: self.restore_backup(target, previous))
+            self._async(lambda: theme_backup.preview(target), previewed)
         dialog.open(None, None, chosen)
 
     @staticmethod

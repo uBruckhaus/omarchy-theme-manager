@@ -171,7 +171,7 @@ CONFIG_MAX = 1024 * 1024
 def _read_config(path: Path) -> bytes | None:
     """A small config file of this user (regular, no symlink), or None."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
     try:
@@ -278,11 +278,56 @@ def _port_open(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+SYSTEM_UID_MAX = 999        # below this: system services (root, a packaged ollama user), not people
+
+
+def _listeners(port: int) -> list[tuple[str, int]]:
+    """(address hex, owner uid) of every listening TCP socket on `port`, from
+    /proc/net/tcp and tcp6 (bounded reads)."""
+    found = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table, "rb") as stream:
+                text = stream.read(8 * 1024 * 1024).decode("ascii", "replace")
+        except OSError:
+            continue
+        for line in text.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 8 or fields[3] != "0A":          # 0A: LISTEN
+                continue
+            address, _sep, hex_port = fields[1].partition(":")
+            try:
+                if int(hex_port, 16) == port:
+                    found.append((address, int(fields[7])))
+            except ValueError:
+                continue
+    return found
+
+
+LOOPBACK_ADDRESSES = {"0100007F", "00000000",                      # 127.0.0.1, 0.0.0.0
+                      "00000000000000000000000001000000",          # ::1
+                      "00000000000000000000000000000000"}          # ::
+
+
+def port_is_trusted(port: int) -> bool | None:
+    """Whether the server listening on this loopback port is yours (or a
+    system service's): None when nothing listens, False when any loopback
+    listener on it belongs to another person's account (it could read the
+    prompt or answer for the model), True otherwise."""
+    mine, owners = os.getuid(), [uid for address, uid in _listeners(port) if address in LOOPBACK_ADDRESSES]
+    if not owners:
+        return None
+    return all(uid == mine or uid <= SYSTEM_UID_MAX for uid in owners)
+
+
 def ensure_local_server(model: dict, wait: float = 60.0) -> None:
-    """The local model's server answers, or is started (its user unit) and
-    waited for. Raises RuntimeError with a short reason."""
+    """The local model's server answers and is yours (or a system service's),
+    or is started (its user unit) and waited for. Raises RuntimeError with a
+    short reason."""
     host, port = model["host"], model["port"]
     if _port_open(host, port):
+        if port_is_trusted(port) is False:
+            raise RuntimeError(f"port {port} belongs to another account: not used")
         return
     unit = LOCAL_UNITS.get(port)
     if unit is None or shutil.which("systemctl") is None:
@@ -295,6 +340,8 @@ def ensure_local_server(model: dict, wait: float = 60.0) -> None:
     waited = 0.0
     while waited < wait:
         if _port_open(host, port):
+            if port_is_trusted(port) is False:
+                raise RuntimeError(f"port {port} belongs to another account: not used")
             return
         time.sleep(0.5)
         waited += 0.5
@@ -326,6 +373,8 @@ def _http_json(method: str, host: str, port: int, path: str, body=None, timeout:
     import socket
     if host not in LOOPBACK or type(port) is not int or not 0 < port < 65536:
         return None
+    if port_is_trusted(port) is not True:
+        return None                    # nobody, or another person's account, listens there
     deadline = time.monotonic() + timeout
     data = json.dumps(body).encode() if body is not None else b""
     request = (f"{method} {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\n"
@@ -366,23 +415,28 @@ def _http_json(method: str, host: str, port: int, path: str, body=None, timeout:
         return None
 
 
-def _unchunk(payload: bytes):
-    """A chunked body (some servers send one even to HTTP/1.0); None if malformed."""
-    out, rest = bytearray(), payload
-    while True:
-        size_line, sep, rest = rest.partition(b"\r\n")
+def _unchunk(payload: bytes, max_chunks: int = 4096):
+    """A chunked body (some servers send one even to HTTP/1.0), parsed by
+    offsets (no copying per chunk) and with a chunk count cap; None if malformed."""
+    out, pos = bytearray(), 0
+    for _n in range(max_chunks):
+        end = payload.find(b"\r\n", pos)
+        if end < 0:
+            return None
         try:
-            size = int(size_line.split(b";")[0].strip() or b"x", 16)
+            size = int(payload[pos:end].split(b";")[0].strip() or b"x", 16)
         except ValueError:
             return None
-        if not sep or size < 0:
+        if size < 0:
             return None
         if size == 0:
             return bytes(out)
-        if len(rest) < size + 2:
+        start = end + 2
+        if len(payload) < start + size + 2:
             return None
-        out += rest[:size]
-        rest = rest[size + 2:]
+        out += payload[start:start + size]
+        pos = start + size + 2
+    return None
 
 
 def local_state(model: dict):

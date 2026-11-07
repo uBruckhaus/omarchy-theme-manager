@@ -248,9 +248,14 @@ def wp_entry(config=None):
             config, _mode = read_shell_config()
         except (OSError, ValueError):
             return None
-    layout = config.get("bar", {}).get("layout", {}) if isinstance(config, dict) else {}
+    # Every level is checked for its type: a malformed shell.json never raises here.
+    bar = config.get("bar") if isinstance(config, dict) else None
+    layout = bar.get("layout") if isinstance(bar, dict) else None
+    if not isinstance(layout, dict):
+        return None
     for section in ("left", "center", "right"):
-        for entry in layout.get(section, []) if isinstance(layout, dict) else []:
+        entries = layout.get(section)
+        for entry in entries if isinstance(entries, list) else []:
             if isinstance(entry, dict) and entry.get("id") == WP_PLUGIN_ID:
                 return entry
     return None

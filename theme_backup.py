@@ -64,7 +64,7 @@ FILES = {
 
 def _read_private(path: Path, limit: int = MAX_BACKUP) -> bytes | None:
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
         return None
     try:

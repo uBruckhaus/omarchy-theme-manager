@@ -91,11 +91,29 @@ def state_file() -> Path:
     return Path.home() / ".cache/theme-manager/auto-state.json"
 
 
+STATE_MAX = 4 * 1024 * 1024     # a settings or state file larger than this is not read
+
+
 def _read_json(path: Path, default):
+    """A JSON file of ours: a regular file (a dotfiles link to one is fine; a
+    FIFO or device never), at most STATE_MAX bytes, opened without blocking;
+    else the default."""
     try:
-        data = json.loads(path.read_text())
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return default
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > STATE_MAX:
+            return default
+        raw = os.read(fd, STATE_MAX + 1)
+        if len(raw) > STATE_MAX:
+            return default
+        data = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError):
         return default
+    finally:
+        os.close(fd)
     return data if isinstance(data, type(default)) else default
 
 

@@ -86,6 +86,23 @@ class AutoTestCase(unittest.TestCase):
         link.symlink_to(path)
 
 
+class BoundedStateTests(unittest.TestCase):
+    """Codex round 2: state files are read bounded, never from a FIFO."""
+
+    def test_read_json_refuses_fifo_and_oversized_files(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "ok.json").write_text('{"a": 1}')
+            self.assertEqual(theme_auto._read_json(base / "ok.json", {}), {"a": 1})
+            (base / "link.json").symlink_to(base / "ok.json")             # a dotfiles link is fine
+            self.assertEqual(theme_auto._read_json(base / "link.json", {}), {"a": 1})
+            os.mkfifo(base / "fifo.json")
+            self.assertEqual(theme_auto._read_json(base / "fifo.json", {}), {})
+            (base / "big.json").write_bytes(b" " * (theme_auto.STATE_MAX + 1))
+            self.assertEqual(theme_auto._read_json(base / "big.json", []), [])
+
+
 class FavoritesTests(AutoTestCase):
     def test_favorites_keep_their_order_and_reject_bad_slugs(self):
         theme_auto.set_favorite("nord", True)

@@ -1,5 +1,6 @@
 """Ask AI: what goes to the agent, and what of its answer is kept."""
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -467,6 +468,47 @@ class HostileLimitsTests(unittest.TestCase):
         big = [b"HTTP/1.1 200 OK\r\n\r\n"] + [b"x" * 65536] * 20         # more than the cap
         self.assertIsNone(theme_ai._http_json("GET", "127.0.0.1", self.serve(big), "/x"))
         self.assertIsNone(theme_ai._http_json("GET", "10.0.0.1", 80, "/x"))  # never off this machine
+
+
+class PortOwnerTests(unittest.TestCase):
+    """Codex round 2 (High): a loopback port held by another person's account is never used."""
+
+    TABLE = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+             "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  {uid}        0 1\n")
+
+    def owners(self, uid):
+        import io
+        table = self.TABLE.format(uid=uid).encode()
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **k):
+            if str(path) == "/proc/net/tcp":
+                return io.BytesIO(table)
+            if str(path) == "/proc/net/tcp6":
+                return io.BytesIO(b"header\n")
+            return real_open(path, mode, *a, **k)
+        return patch("builtins.open", side_effect=fake_open)
+
+    def test_another_accounts_listener_is_refused_everywhere(self):
+        model = {"provider": "llama", "model": "m", "host": "127.0.0.1", "port": 8080}
+        with self.owners(os.getuid() + 1 if os.getuid() >= 1000 else 4242):
+            self.assertIs(theme_ai.port_is_trusted(8080), False)
+            with patch.object(theme_ai, "_port_open", return_value=True):
+                with self.assertRaises(RuntimeError):
+                    theme_ai.ensure_local_server(model)
+            with patch("socket.create_connection", side_effect=AssertionError("connected")):
+                self.assertIsNone(theme_ai._http_json("GET", "127.0.0.1", 8080, "/models"))
+        with self.owners(os.getuid()):
+            self.assertIs(theme_ai.port_is_trusted(8080), True)
+        with self.owners(965):                                           # a system service (packaged ollama)
+            self.assertIs(theme_ai.port_is_trusted(8080), True)
+        self.assertIsNone(theme_ai.port_is_trusted(1))                   # nothing listens there
+
+    def test_chunked_bodies_parse_by_offsets_with_a_chunk_cap(self):
+        many = b"1\r\nx\r\n" * 5000 + b"0\r\n\r\n"
+        self.assertIsNone(theme_ai._unchunk(many))                       # over the chunk cap
+        self.assertEqual(theme_ai._unchunk(b"1\r\nx\r\n" * 10 + b"0\r\n\r\n"), b"x" * 10)
+        self.assertIsNone(theme_ai._unchunk(b"zz\r\nx"))
 
 
 class LocalModelTests(unittest.TestCase):
