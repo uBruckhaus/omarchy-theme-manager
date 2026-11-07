@@ -274,10 +274,18 @@ SYSTEM_UID_MAX = 999        # below this: system services (root, a packaged olla
 PROC_TABLE_MAX = 16 * 1024 * 1024     # a /proc/net/tcp* table read whole, or not trusted at all
 
 
+# One row of /proc/net/tcp or tcp6, exactly as the kernel writes it (sl, local and remote
+# address:port, state, queues, timer, retransmits, uid, timeout, inode, then free fields).
+PROC_ROW = re.compile(r"^ *[0-9]+: ([0-9A-F]{8}|[0-9A-F]{32}):([0-9A-F]{4}) (?:[0-9A-F]{8}|[0-9A-F]{32}):[0-9A-F]{4} "
+                      r"([0-9A-F]{2}) [0-9A-F]{8}:[0-9A-F]{8} [0-9A-F]{2}:[0-9A-F]{8} [0-9A-F]{8} +([0-9]+) +"
+                      r"[0-9]+ [0-9]+(?: [ -~]*)?$")
+
+
 def _listeners(port: int):
     """(address hex, owner uid) of every listening TCP socket on `port`, from
-    /proc/net/tcp and tcp6, or None when either table cannot be read to its
-    end and parsed (then nothing on any port counts as trusted)."""
+    /proc/net/tcp and tcp6, or None unless both tables are read to their end
+    and every row parses exactly (a malformed or cut-off table is never
+    trusted: a listener of another account could hide in it)."""
     found = []
     for table in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
@@ -289,21 +297,18 @@ def _listeners(port: int):
             return None
         except OSError:
             return None
-        if len(raw) > PROC_TABLE_MAX:
+        if len(raw) > PROC_TABLE_MAX or not raw.endswith(b"\n") or not raw.isascii():
             return None
-        for line in raw.decode("ascii", "replace").splitlines()[1:]:
-            fields = line.split()
-            if len(fields) < 8:
+        lines = raw.decode("ascii").split("\n")[:-1]
+        if not lines or not lines[0].lstrip().startswith("sl "):
+            return None
+        for line in lines[1:]:
+            row = PROC_ROW.match(line)
+            if row is None:
                 return None
-            if fields[3] != "0A":                                      # 0A: LISTEN
-                continue
-            address, sep, hex_port = fields[1].partition(":")
-            try:
-                if not sep or int(hex_port, 16) != port:
-                    continue
-                found.append((address, int(fields[7])))
-            except ValueError:
-                return None
+            address, hex_port, state, uid = row.groups()
+            if state == "0A" and int(hex_port, 16) == port:            # 0A: LISTEN
+                found.append((address, int(uid)))
     return found
 
 

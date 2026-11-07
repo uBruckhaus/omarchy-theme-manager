@@ -479,7 +479,7 @@ class PortOwnerTests(unittest.TestCase):
             if str(path) == "/proc/net/tcp":
                 return io.BytesIO(table)
             if str(path) == "/proc/net/tcp6":
-                return io.BytesIO(b"header\n")
+                return io.BytesIO(b"  sl  local_address remote_address st\n")
             return real_open(path, mode, *a, **k)
         return patch("builtins.open", side_effect=fake_open)
 
@@ -501,6 +501,28 @@ class PortOwnerTests(unittest.TestCase):
                 patch.object(theme_ai, "port_is_trusted", return_value=None), self.assertRaises(RuntimeError):
             theme_ai.ensure_local_server(model)                          # not provably yours: fail closed
 
+    def test_a_malformed_or_cut_off_table_is_not_trusted(self):
+        import io
+        good = self.TABLE.format(uid=os.getuid())
+        bad_row = "   1: GARBAGE 0B\n"
+        real_open = open
+        for tcp in (good + bad_row, good.rstrip("\n"), good.replace("  sl", "  xx"), good + "   2: \xe4\n"):
+            def fake_open(path, mode="r", *a, tcp=tcp, **k):
+                if str(path) == "/proc/net/tcp":
+                    return io.BytesIO(tcp.encode("utf-8"))
+                if str(path) == "/proc/net/tcp6":
+                    return io.BytesIO(b"  sl  local_address remote_address st\n")
+                return real_open(path, mode, *a, **k)
+            with patch("builtins.open", side_effect=fake_open):
+                self.assertIs(theme_ai.port_is_trusted(8080), False, repr(tcp[-20:]))
+
+    def test_a_real_listener_of_yours_is_trusted(self):
+        import socket
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            self.assertIs(theme_ai.port_is_trusted(server.getsockname()[1]), True)
+
     def test_a_table_that_cannot_be_read_whole_is_not_trusted(self):
         import io
         real_open = open
@@ -519,7 +541,7 @@ class PortOwnerTests(unittest.TestCase):
     def test_a_listener_on_any_address_counts(self):
         import io
         other = os.getuid() + 1 if os.getuid() >= 1000 else 4242
-        tcp6 = ("header\n   0: 0000000000000000FFFF00000100007F:1F90 00000000000000000000000000000000:0000 0A "
+        tcp6 = ("  sl  local_address remote_address st\n   0: 0000000000000000FFFF00000100007F:1F90 00000000000000000000000000000000:0000 0A "
                 "00000000:00000000 00:00000000 00000000  %d        0 1\n" % other).encode()
         real_open = open
 
