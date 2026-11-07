@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -1085,6 +1086,33 @@ class StoreTests(unittest.TestCase):
                                        "windows": []}},          # no valid size: not kept
         })
 
+
+
+class HostileOutputTests(unittest.TestCase):
+    """Marketplace review 2.0.0: hyprctl output and notification text."""
+
+    def test_bounded_run_caps_bytes_and_time(self):
+        import subprocess
+        import workspace_tiling as wt
+        self.assertEqual(wt.bounded_run([sys.executable, "-c", "print('ok')"]), "ok\n")
+        with self.assertRaises(subprocess.CalledProcessError):            # an endless stream
+            wt.bounded_run([sys.executable, "-c", "import sys\nwhile True: sys.stdout.write('x'*65536)"],
+                           timeout=10, max_bytes=1024 * 1024)
+        with self.assertRaises(subprocess.TimeoutExpired):                 # a silent hang
+            wt.bounded_run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5)
+        with self.assertRaises(subprocess.CalledProcessError):
+            wt.bounded_run([sys.executable, "-c", "raise SystemExit(3)"])
+
+    def test_notifications_carry_no_markup(self):
+        import workspace_tiling as wt
+        sent = []
+        with patch.object(wt.shutil, "which", return_value="/usr/bin/notify-send"), \
+                patch.object(wt.subprocess, "Popen", side_effect=lambda argv, **k: sent.append(argv)):
+            wt.send_notification("T", "Moved (<img src='http://x/y.png'>\nA&B)")
+        body = sent[0][-1]
+        self.assertNotIn("<", body)
+        self.assertNotIn("&", body)
+        self.assertNotIn("\n", body)
 
 if __name__ == "__main__":
     unittest.main()

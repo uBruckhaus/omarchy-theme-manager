@@ -131,8 +131,8 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(result["failed"], [{"name": "Sneaky", "reason": "no_launcher"}])
         # Labelled as a terminal command but not starting with a terminal: not run either.
         self.assertEqual(tile.trusted_argv({"argv": evil, "argv_source": "terminal"}), [])
-        self.assertEqual(tile.trusted_argv({"argv": ["/usr/bin/foot", "nvim"], "argv_source": "terminal"}),
-                         ["/usr/bin/foot", "nvim"])
+        # Since 2.0.0 not even a real terminal's saved command: the label can be forged in shell.json.
+        self.assertEqual(tile.trusted_argv({"argv": ["/usr/bin/foot", "nvim"], "argv_source": "terminal"}), [])
 
     def test_window_class_is_never_a_program(self):
         """No launcher, no trusted command: the class (chosen by the app) is not looked up on PATH."""

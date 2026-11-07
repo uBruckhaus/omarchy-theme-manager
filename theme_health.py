@@ -7,18 +7,33 @@ import switcher_sync
 import theme_core
 
 
+def _read_own(path: Path, limit: int) -> str:
+    """At most `limit` bytes of a regular file of yours; a link, FIFO, device,
+    someone else's file or a larger file reads as empty (never blocks)."""
+    import os
+    import stat
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return ""
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > limit:
+            return ""
+        data = os.read(fd, limit + 1)
+        return data[:limit].decode("utf-8", "replace") if len(data) <= limit else ""
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+
+
 def inspect() -> dict:
     enabled = theme_core.sync_enabled()
     menu = theme_core.menu_extension_file()
     hook = theme_core.theme_set_hook_file()
-    try:
-        menu_text = menu.read_text()[:1024 * 1024]
-    except OSError:
-        menu_text = ""
-    try:
-        hook_text = hook.read_text()[:64 * 1024] if not hook.is_symlink() else ""
-    except OSError:
-        hook_text = ""
+    menu_text = _read_own(menu, 1024 * 1024)
+    hook_text = _read_own(hook, 64 * 1024)
     hidden = theme_core.load_hidden() - {theme_core.current_theme()}
     previews = theme_core.switcher_cache_dir() / "previews"
     leaked = []

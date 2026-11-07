@@ -42,6 +42,8 @@ import wallpaper_search
 
 TIMEOUT = 240                 # seconds for one answer
 MAX_ANSWER = 256 * 1024       # bytes read from the agent
+AGENT_FILE_MAX = 256 * 1024 * 1024   # RLIMIT_FSIZE of an agent: no file it writes grows past this
+WORK_MAX = 64 * 1024 * 1024          # all files in the Ask's private folder together
 MAX_PROMPT = 100 * 1024       # Antigravity takes it as one argument
 MAX_REQUEST = 600             # characters of the user's text
 MAX_PROMPTS = 12              # saved suggestions under the prompt
@@ -312,25 +314,73 @@ _OWNED_LOCK = threading.Lock()
 _UNLOADING = threading.Lock()           # an unload and the start of a new local Ask never overlap
 
 
-def _http_json(method: str, host: str, port: int, path: str, body=None, timeout: float = 2.0):
-    """One small JSON request to a loopback server; None on any failure."""
-    if host not in LOOPBACK:
+LOCAL_REPLY_MAX = 1024 * 1024     # bytes of a model server's reply
+LOCAL_DEADLINE = 3.0              # seconds for one whole request, connect to last byte
+
+
+def _http_json(method: str, host: str, port: int, path: str, body=None, timeout: float = LOCAL_DEADLINE):
+    """One small JSON request to a loopback server (HTTP/1.0, one deadline for
+    the whole exchange, the reply capped); None on any failure."""
+    import socket
+    if host not in LOOPBACK or type(port) is not int or not 0 < port < 65536:
         return None
-    import http.client
+    deadline = time.monotonic() + timeout
+    data = json.dumps(body).encode() if body is not None else b""
+    request = (f"{method} {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\n"
+               + (f"Content-Type: application/json\r\nContent-Length: {len(data)}\r\n" if body is not None else "")
+               + "Connection: close\r\n\r\n").encode() + data
+    reply = bytearray()
     try:
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
-        try:
-            data = json.dumps(body).encode() if body is not None else None
-            conn.request(method, path, body=data, headers={"Content-Type": "application/json"} if data else {})
-            reply = conn.getresponse()
-            raw = reply.read(1024 * 1024)
-            if reply.status >= 300:
-                return None
-            return json.loads(raw) if raw else {}
-        finally:
-            conn.close()
-    except (OSError, ValueError, http.client.HTTPException):
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
+            sock.sendall(request)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                sock.settimeout(left)
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                reply += chunk
+                if len(reply) > LOCAL_REPLY_MAX:
+                    return None
+    except OSError:
         return None
+    head, sep, payload = bytes(reply).partition(b"\r\n\r\n")
+    if not sep:
+        return None
+    lines = head.split(b"\r\n")
+    parts = lines[0].split(b" ", 2)
+    if len(parts) < 2 or not parts[0].startswith(b"HTTP/1.") or not parts[1].isdigit() or int(parts[1]) >= 300:
+        return None
+    if any(line.lower().startswith(b"transfer-encoding:") and b"chunked" in line.lower() for line in lines[1:]):
+        payload = _unchunk(payload)
+        if payload is None:
+            return None
+    try:
+        return json.loads(payload) if payload.strip() else {}
+    except ValueError:
+        return None
+
+
+def _unchunk(payload: bytes):
+    """A chunked body (some servers send one even to HTTP/1.0); None if malformed."""
+    out, rest = bytearray(), payload
+    while True:
+        size_line, sep, rest = rest.partition(b"\r\n")
+        try:
+            size = int(size_line.split(b";")[0].strip() or b"x", 16)
+        except ValueError:
+            return None
+        if not sep or size < 0:
+            return None
+        if size == 0:
+            return bytes(out)
+        if len(rest) < size + 2:
+            return None
+        out += rest[:size]
+        rest = rest[size + 2:]
 
 
 def local_state(model: dict):
@@ -607,6 +657,34 @@ def keyring_proxy(work: Path):
     return None, None
 
 
+def _limit_files() -> None:
+    """In the agent's process (before exec, inherited through bwrap): a hard
+    cap on every file it writes, so nothing can grow without bound between two
+    checks of the poll loop."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_FSIZE, (AGENT_FILE_MAX, AGENT_FILE_MAX))
+
+
+def _folder_size(folder: Path, max_entries: int = 2000) -> int:
+    """All regular files in the Ask's private folder together (links not
+    followed); too many entries count as too large."""
+    total, seen, stack = 0, 0, [str(folder)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > max_entries:
+                        return WORK_MAX + 1
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            continue
+    return total
+
+
 def _size(path: Path) -> int:
     """Size of an output file; one the agent deleted or replaced counts as too large."""
     try:
@@ -705,13 +783,15 @@ def _run_helper(helper: dict, argv_extra: list, prompt: str, timeout: int) -> st
         with open(out_path, "wb") as out, open(err_path, "wb") as err, open(prompt_path, "rb") as given:
             # Its own process group: on a limit everything it started stops too.
             process = subprocess.Popen(argv, stdin=given, stdout=out, stderr=err, cwd=work,
-                                       start_new_session=True, env=helper_env(helper))
+                                       start_new_session=True, env=helper_env(helper),
+                                       preexec_fn=_limit_files)
             waited = 0.0
             while process.poll() is None:
                 if waited >= timeout:
                     stop(process)
                     raise RuntimeError("no answer in time")
-                if max(_size(out_path), _size(err_path), _size(answer_file)) > MAX_ANSWER:
+                if max(_size(out_path), _size(err_path), _size(answer_file)) > MAX_ANSWER or \
+                        _folder_size(work) > WORK_MAX:
                     stop(process)
                     raise RuntimeError("the answer is too long")
                 time.sleep(0.25)

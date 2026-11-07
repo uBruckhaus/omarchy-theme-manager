@@ -2,6 +2,7 @@
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -78,7 +79,9 @@ class AskAiTests(unittest.TestCase):
 
         class FakeProcess:
             """Never a real agent: writes its 'answer' like the helper would."""
-            def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False, env=None):
+            def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False, env=None,
+                         preexec_fn=None):
+                assert preexec_fn is theme_ai._limit_files          # every agent gets the file size cap
                 self.argv, self.cwd, self.returncode = argv, cwd, 0
                 self.sent = stdin.read()
                 if "--output-last-message" in argv:
@@ -121,7 +124,9 @@ class AskAiTests(unittest.TestCase):
 
     def test_oversized_answer_is_refused_even_after_exit(self):
         class Big:
-            def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False, env=None):
+            def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False, env=None,
+                         preexec_fn=None):
+                assert preexec_fn is theme_ai._limit_files          # every agent gets the file size cap
                 stdout.write(b"x" * (theme_ai.MAX_ANSWER + 10))
                 stdout.flush()
                 self.returncode = 0
@@ -385,6 +390,68 @@ class GpuReleaseTests(unittest.TestCase):
         self.assertIsNone(theme_ai._http_json("GET", "192.168.1.5", self.llama_port, "/models"))
 
 
+class HostileLimitsTests(unittest.TestCase):
+    """Marketplace review 2.0.0: agent files and loopback replies are hard-capped."""
+
+    def test_an_agent_cannot_write_a_file_past_the_cap(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as tmp, patch.object(theme_ai, "AGENT_FILE_MAX", 64 * 1024):
+            out = Path(tmp) / "out.txt"
+            code = ("import signal; signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+                    "f = open(%r, 'wb')\n"
+                    "try:\n    f.write(b'x' * 1024 * 1024); f.flush()\nexcept OSError: pass\n") % str(out)
+            subprocess.run([sys.executable, "-c", code], preexec_fn=theme_ai._limit_files, timeout=30)
+            self.assertLessEqual(out.stat().st_size, 64 * 1024)
+
+    def test_the_work_folder_is_summed_without_following_links(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            work = Path(tmp)
+            (work / "a").write_bytes(b"x" * 1000)
+            (work / "sub").mkdir()
+            (work / "sub" / "b").write_bytes(b"x" * 500)
+            (Path(other) / "huge").write_bytes(b"x" * 100000)
+            (work / "link").symlink_to(Path(other) / "huge")
+            self.assertEqual(theme_ai._folder_size(work), 1500)
+            for i in range(30):
+                (work / f"f{i}").touch()
+            self.assertGreater(theme_ai._folder_size(work, max_entries=10), theme_ai.WORK_MAX)
+
+    def serve(self, reply_chunks, pause=0.0):
+        import socket
+        import threading
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+
+        def run():
+            conn, _ = server.accept()
+            conn.recv(4096)
+            try:
+                for chunk in reply_chunks:
+                    conn.sendall(chunk)
+                    time.sleep(pause)
+            except OSError:
+                pass
+            conn.close()
+            server.close()
+        threading.Thread(target=run, daemon=True).start()
+        return server.getsockname()[1]
+
+    def test_loopback_replies_have_one_deadline_and_a_size_cap(self):
+        ok = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\": []}"
+        self.assertEqual(theme_ai._http_json("GET", "127.0.0.1", self.serve([ok]), "/models"), {"data": []})
+        chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n4\r\n: 1}\r\n0\r\n\r\n"
+        self.assertEqual(theme_ai._http_json("GET", "127.0.0.1", self.serve([chunked]), "/x"), {"a": 1})
+        started = time.monotonic()                                      # a server that drips forever
+        port = self.serve([b"HTTP/1.1 200 OK\r\n"] + [b"X: y\r\n"] * 200, pause=0.05)
+        self.assertIsNone(theme_ai._http_json("GET", "127.0.0.1", port, "/x", timeout=1.0))
+        self.assertLess(time.monotonic() - started, 3.0)
+        big = [b"HTTP/1.1 200 OK\r\n\r\n"] + [b"x" * 65536] * 20         # more than the cap
+        self.assertIsNone(theme_ai._http_json("GET", "127.0.0.1", self.serve(big), "/x"))
+        self.assertIsNone(theme_ai._http_json("GET", "10.0.0.1", 80, "/x"))  # never off this machine
+
+
 class LocalModelTests(unittest.TestCase):
     """pi, Hermes and local models (2026-11-07, as in Maprisma Launcher)."""
 
@@ -426,7 +493,9 @@ class LocalModelTests(unittest.TestCase):
         seen = {}
 
         class FakeProcess:
-            def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False, env=None):
+            def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False, env=None,
+                         preexec_fn=None):
+                assert preexec_fn is theme_ai._limit_files          # every agent gets the file size cap
                 seen["argv"], self.returncode = argv, 0
                 stdout.write(b'{"candidates": []}')
                 stdout.flush()

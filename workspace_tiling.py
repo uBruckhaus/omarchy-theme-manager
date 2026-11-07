@@ -420,10 +420,46 @@ def read_settings():
             "default_split": entry.get("defaultSplit")}
 
 
+HYPR_OUTPUT_MAX = 8 * 1024 * 1024     # window titles come from apps and pages: never unbounded
+
+
+def bounded_run(argv, timeout=3.0, max_bytes=HYPR_OUTPUT_MAX) -> str:
+    """stdout of argv (no shell) with a hard byte cap and one deadline. Raises
+    TimeoutExpired, CalledProcessError (also when the cap is exceeded) or OSError."""
+    import selectors
+    process = subprocess.Popen(list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+    chunks, size, deadline = [], 0, time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                if not selector.select(left):
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise subprocess.CalledProcessError(-1, argv)
+                chunks.append(chunk)
+        process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, argv)
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
 def hypr(*args):
-    result = subprocess.run(["hyprctl", *args], capture_output=True,
-                            text=True, timeout=3, check=True)
-    return result.stdout
+    return bounded_run(["hyprctl", *args])
 
 
 def move_expression(address, target, follow):
@@ -893,27 +929,16 @@ def capture_workspace(ws_id):
 
 
 def trusted_argv(app):
-    """A saved command that may be run: only a terminal's foreground command, captured from a host
-    terminal (argv_source "terminal", the terminal emulator first). Commands saved by older
-    versions from a window's own /proc cmdline are never run: their app starts from its launcher
-    instead, or not at all."""
-    argv = app.get("argv")
-    if app.get("argv_source") != "terminal" or not isinstance(argv, list) or not argv \
-            or not all(isinstance(a, str) for a in argv):
-        return []
-    # The terminal must be a bare name (found on PATH as usual) or a system
-    # binary: a saved "/tmp/foot" or "~/x/kitty" is not trusted (Codex review).
-    program = argv[0]
-    if "/" in program and str(Path(program).parent) not in TRUSTED_BIN_DIRS:
-        return []
-    return list(argv) if Path(program).name.casefold() in TERMINAL_BINS else []
+    """A saved command line is never run (2.0.0, marketplace review): the store
+    can be the Workspace Presets plugin's entry in shell.json, and a label such
+    as argv_source "terminal" written there proves nothing. Every saved app
+    starts from an installed launcher instead, a terminal as a plain terminal."""
+    return []
 
 
 def restorable(app):
-    """The saved app as it may be started: its argv kept only when trusted_argv allows it."""
-    argv = trusted_argv(app)
-    kept = {k: v for k, v in app.items() if k != "argv"}
-    return dict(kept, argv=argv) if argv else kept
+    """The saved app as it may be started: never with a saved command line."""
+    return {k: v for k, v in app.items() if k != "argv"}
 
 
 def is_app_available(app):
@@ -949,8 +974,17 @@ def is_app_available(app):
     return False, "no_launcher"
 
 
+def plain(text, limit=300) -> str:
+    """No markup and no control characters: notification daemons render markup,
+    and window classes come from the apps themselves."""
+    text = "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in str(text))
+    text = text.replace("&", "+").replace("<", "‹").replace(">", "›")
+    return text[:limit]
+
+
 def send_notification(title, body, urgency="normal"):
-    """Send a desktop notification via notify-send if available."""
+    """Send a desktop notification via notify-send if available (plain text only)."""
+    title, body = plain(title, 120), plain(body, 300)
     if shutil.which("notify-send"):
         try:
             subprocess.Popen(
@@ -1583,7 +1617,8 @@ def set_omarchy_mode(ws_id, mode, dry_run=False):
             raise
     for target in ("omarchy.workspaces", "omarchy.dock"):
         try:
-            subprocess.run(["omarchy-shell", "-q", target, "refresh"], capture_output=True, timeout=3)
+            subprocess.run(["omarchy-shell", "-q", target, "refresh"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
         except (OSError, subprocess.SubprocessError):
             pass
     # Titlebars come from a Hyprland plugin that only loads while the config

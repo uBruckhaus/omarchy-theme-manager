@@ -71,12 +71,14 @@ class SnapshotTests(unittest.TestCase):
             tile.apply_snapshot({"maxWindows": 2}, restore_apps=False)
         self.assertEqual(tile.load_store(), {"maxWindows": 2, "active": True, "autoMoveOnRestore": True})
 
-    def test_terminal_command_must_be_a_system_terminal(self):
-        app = {"argv_source": "terminal"}
-        self.assertEqual(tile.trusted_argv(dict(app, argv=["foot", "nvim"])), ["foot", "nvim"])
-        self.assertEqual(tile.trusted_argv(dict(app, argv=["/usr/bin/kitty", "-e", "top"])), ["/usr/bin/kitty", "-e", "top"])
-        for planted in (["/tmp/foot", "x"], ["/home/u/bin/kitty"], ["./foot"], ["sh", "-c", "x"]):
-            self.assertEqual(tile.trusted_argv(dict(app, argv=planted)), [])
+    def test_saved_commands_are_never_run_whatever_their_label(self):
+        """A forged entry in Workspace Presets' shell.json (marketplace review, 2.0.0):
+        argv_source "terminal" plus a real terminal is not trusted either."""
+        app = {"argv_source": "terminal", "desktop_id": "foot.desktop"}
+        for saved in (["foot", "nvim"], ["/usr/bin/foot", "-e", "sh", "-c", "touch /tmp/x"],
+                      ["/usr/bin/kitty", "-e", "top"], ["/tmp/foot", "x"], ["sh", "-c", "x"]):
+            self.assertEqual(tile.trusted_argv(dict(app, argv=saved)), [])
+            self.assertNotIn("argv", tile.restorable(dict(app, argv=saved)))      # the launcher is used
 
     def test_autostart_waits_while_the_plugin_is_on_the_bar(self):
         with patch.object(tile, "wp_on_bar", return_value=True), patch.object(tile, "_autostart_all") as run, \

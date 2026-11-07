@@ -57,6 +57,40 @@ class ScreenshotTests(TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(commands[0][0:3], ["grim", "-g", "100,200 700x500"])
 
+    def test_grim_never_writes_into_the_chosen_folder_and_links_are_not_followed(self):
+        """Marketplace review 2.0.0: grim writes into a private folder; the copy into the chosen
+        folder is created exclusively there and never follows a planted link."""
+        with TemporaryDirectory() as tmp:
+            folder, victim = Path(tmp) / "shots", Path(tmp) / "victim.txt"
+            folder.mkdir(mode=0o755)
+            victim.write_bytes(b"keep")
+            now = datetime(2026, 11, 7, 22, 0, 0)
+            (folder / "theme-manager-2026-11-07-22-00-00.png").symlink_to(victim)
+            written = []
+
+            def fake_grim(argv, **_kwargs):
+                written.append(Path(argv[-1]))
+                Path(argv[-1]).write_bytes(b"PNG")
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            with patch.object(screenshots.subprocess, "run", side_effect=fake_grim):
+                path = screenshots.capture((0, 0, 10, 10), folder, now)
+            self.assertNotEqual(written[0].parent, folder)                # grim wrote elsewhere
+            self.assertFalse(written[0].parent.exists())                  # and that folder is gone
+            self.assertEqual(path.name, "theme-manager-2026-11-07-22-00-00-2.png")
+            self.assertEqual(victim.read_bytes(), b"keep")
+            self.assertEqual(sorted(p.name for p in folder.iterdir()),
+                             ["theme-manager-2026-11-07-22-00-00-2.png", "theme-manager-2026-11-07-22-00-00.png"])
+
+    def test_a_folder_others_can_write_is_refused(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "shared"
+            folder.mkdir()
+            folder.chmod(0o777)
+            with patch.object(screenshots.subprocess, "run") as grim:
+                with self.assertRaises(ValueError):
+                    screenshots.capture((0, 0, 10, 10), folder)
+            grim.assert_not_called()
+
     def test_failed_capture_removes_temporary_file(self):
         with TemporaryDirectory() as tmp:
             with patch.object(screenshots.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"failed")):

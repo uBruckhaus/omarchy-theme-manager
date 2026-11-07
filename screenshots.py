@@ -43,55 +43,84 @@ def folder_from_settings(settings: dict) -> Path:
     return Path(value) if valid_folder_setting(value) else default_folder()
 
 
-def _entry_exists(path: Path) -> bool:
-    try:
-        path.lstat()
-        return True
-    except FileNotFoundError:
-        return False
+MAX_SHOT = 256 * 1024 * 1024     # a PNG of the popup is far smaller
+
+
+def _private_dir() -> str:
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    base = runtime if runtime and os.path.isdir(runtime) else None
+    return tempfile.mkdtemp(prefix="theme-manager-shot-", dir=base)     # 0700, ours
 
 
 def capture(geometry: tuple[int, int, int, int], folder: Path | None = None,
             now: datetime | None = None) -> Path:
-    """Save one PNG, using a private temporary file and a unique final name."""
+    """Save one PNG. grim writes into a new private folder; the finished file is
+    then copied into the chosen folder through a handle on that folder (no
+    path is reopened there): the folder must be yours and closed to others,
+    the name is created exclusively and never follows a link."""
     x, y, width, height = geometry
     if width <= 0 or height <= 0 or width > 16384 or height > 16384:
         raise ValueError("invalid screenshot geometry")
     folder = folder or default_folder()
     folder.mkdir(parents=True, exist_ok=True)
-    if folder.is_symlink() or not folder.is_dir():
-        raise ValueError("invalid screenshot folder")
-    stamp = (now or datetime.now()).strftime("%Y-%m-%d-%H-%M-%S")
-    stem = f"theme-manager-{stamp}"
-    name = folder / f"{stem}.png"
-    suffix = 2
-    while _entry_exists(name) or _entry_exists(name.with_suffix(".txt")):
-        name = folder / f"{stem}-{suffix}.png"
-        suffix += 1
-    fd, temporary = tempfile.mkstemp(prefix=".theme-manager-shot-", suffix=".png", dir=folder)
-    os.close(fd)
+    dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        result = subprocess.run(["grim", "-g", f"{x},{y} {width}x{height}", temporary],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                timeout=15, check=False)
-        if result.returncode != 0:
-            raise OSError(result.stderr.decode("utf-8", "replace").strip() or "grim failed")
-        if not Path(temporary).is_file() or Path(temporary).stat().st_size == 0:
-            raise OSError("grim produced no screenshot")
-        # A hard link is atomic and refuses a name planted after the check.
-        while True:
+        info = os.fstat(dir_fd)
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise ValueError("the screenshot folder must be yours and not writable by others")
+        private = _private_dir()
+        shot = os.path.join(private, "shot.png")
+        try:
+            result = subprocess.run(["grim", "-g", f"{x},{y} {width}x{height}", shot],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=15, check=False)
+            if result.returncode != 0:
+                raise OSError("grim failed")
+            source = os.open(shot, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
-                os.link(temporary, name)
-                break
-            except FileExistsError:
-                name = folder / f"{stem}-{suffix}.png"
-                suffix += 1
-                while _entry_exists(name) or _entry_exists(name.with_suffix(".txt")):
-                    name = folder / f"{stem}-{suffix}.png"
+                size = os.fstat(source).st_size
+                if size == 0 or size > MAX_SHOT:
+                    raise OSError("grim produced no usable screenshot")
+                stamp = (now or datetime.now()).strftime("%Y-%m-%d-%H-%M-%S")
+                stem, suffix = f"theme-manager-{stamp}", 1
+                while True:
+                    name = f"{stem}.png" if suffix == 1 else f"{stem}-{suffix}.png"
                     suffix += 1
-        return name
+                    if _taken(dir_fd, name[:-4] + ".txt"):
+                        continue
+                    try:
+                        target = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                                         | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+                        break
+                    except FileExistsError:
+                        continue
+                try:
+                    copied = 0
+                    while copied < size:
+                        chunk = os.read(source, min(1024 * 1024, size - copied))
+                        if not chunk:
+                            break
+                        os.write(target, chunk)
+                        copied += len(chunk)
+                finally:
+                    os.close(target)
+                return folder / name
+            finally:
+                os.close(source)
+        finally:
+            for entry in os.listdir(private):
+                os.unlink(os.path.join(private, entry))
+            os.rmdir(private)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        os.close(dir_fd)
+
+
+def _taken(dir_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def capture_to_settings(geometry: tuple[int, int, int, int], settings: dict) -> Path:
