@@ -308,10 +308,14 @@ def _listeners(port: int):
                     return None
                 offset = 0
                 while offset + 16 <= len(data):
-                    length, kind, _flags, got_seq, _pid = struct.unpack_from("=IHHII", data, offset)
+                    length, kind, flags, got_seq, _pid = struct.unpack_from("=IHHII", data, offset)
                     if length < 16 or offset + length > len(data) or got_seq != seq:
                         return None
-                    if kind == 3:                                            # NLMSG_DONE
+                    if flags & 0x10:                                         # NLM_F_DUMP_INTR: may have missed sockets
+                        return None
+                    if kind == 3:                                            # NLMSG_DONE: complete only with error 0
+                        if length < 20 or struct.unpack_from("=i", data, offset + 16)[0] != 0:
+                            return None
                         done = True
                         break
                     if kind != 20 or length < 16 + 72:                       # an error or anything unexpected

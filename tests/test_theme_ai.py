@@ -541,6 +541,28 @@ class PortOwnerTests(unittest.TestCase):
         with patch("socket.socket", Silent), patch.object(theme_ai, "NETLINK_DEADLINE", 0.2):
             self.assertIsNone(theme_ai._listeners(8080))            # no end marker before the deadline
 
+        def dump(flags=0x2, done_error=0, done_len=20):
+            import struct
+
+            class Dump(Silent):
+                def recv(self, _n):
+                    body = bytearray(72)
+                    body[1] = 10
+                    struct.pack_into("!H", body, 4, 8080)
+                    struct.pack_into("=I", body, 64, os.getuid())
+                    row = struct.pack("=IHHII", 16 + 72, 20, flags, self.seq, 0) + bytes(body)
+                    end = struct.pack("=IHHII", done_len, 3, 2, self.seq, 0) + struct.pack("=i", done_error)[:done_len - 16]
+                    return row + end
+            return patch("socket.socket", Dump)
+        with dump():
+            self.assertEqual([uid for _f, uid in theme_ai._listeners(8080)], [os.getuid(), os.getuid()])
+        with dump(flags=0x2 | 0x10):
+            self.assertIsNone(theme_ai._listeners(8080))            # interrupted dump (NLM_F_DUMP_INTR)
+        with dump(done_error=-16):
+            self.assertIsNone(theme_ai._listeners(8080))            # NLMSG_DONE with an error code
+        with dump(done_len=16):
+            self.assertIsNone(theme_ai._listeners(8080))            # NLMSG_DONE without its error field
+
 
     def test_chunked_bodies_parse_by_offsets_with_a_chunk_cap(self):
         many = b"1\r\nx\r\n" * 5000 + b"0\r\n\r\n"
