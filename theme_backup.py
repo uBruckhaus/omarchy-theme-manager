@@ -268,7 +268,10 @@ def preview(path: Path) -> dict:
 def restore(path: Path, previous: Path | None = None) -> Path:
     """Replace the state with a backup's. Under the workspace presets' lock,
     so a change on the Workspaces tab can't be written in between and lost."""
-    with workspace_tiling.runtime_lock():
+    # Lock order as everywhere: workspaces, then looks, then settings, so a
+    # Save, Undo or theme apply can't write looks.json or own_font/own_windows
+    # in between and be lost, or be overwritten.
+    with workspace_tiling.runtime_lock(), theme_looks._locked(), theme_core.settings_lock():
         return _restore(path, previous)
 
 

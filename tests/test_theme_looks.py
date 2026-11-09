@@ -198,6 +198,52 @@ class RaceTests(LooksTestCase):
         self.assertEqual((self.font, self.windows, self.windows_set), ("Mono A", "transparent", []))
         self.assertNotIn("own_windows", self.settings())
 
+    def test_a_switch_while_a_command_runs_gets_the_new_themes_look(self):
+        """Codex round 2: the switch happens during Omarchy's font command."""
+        theme_looks.set_look("ristretto", {"mono_font": "Mono B", "windows": "glassy"})
+        theme_looks.set_look("tokyo-night", {"mono_font": "Mono C", "windows": "opaque"})
+        original = theme_custom.set_font
+
+        def slow_font(font):
+            original(font)
+            if font == "Mono B":
+                self.use("tokyo-night")        # `omarchy theme set tokyo-night` meanwhile
+            return True
+        self.patch(theme_custom, "set_font", slow_font)
+        self.use("ristretto")
+        theme_looks.apply_look("ristretto")
+        self.assertEqual((self.font, self.windows), ("Mono C", "opaque"))   # never ristretto's glassy
+        self.assertNotIn("glassy", self.windows_set)
+        self.assertEqual(self.settings()["own_font"], "Mono A")             # yours, still kept
+
+    def test_the_lock_can_be_taken_again_by_its_holder(self):
+        with theme_core.settings_lock():
+            theme_core._update_settings(theme_core.settings_file(), x=1)   # no deadlock
+        self.assertEqual(self.settings()["x"], 1)
+
+    def test_a_restore_waits_for_a_running_look_change(self):
+        import threading
+        import theme_backup
+        order = []
+        started = threading.Event()
+
+        def slow_change():
+            with theme_looks._locked():
+                started.set()
+                order.append("look start")
+                threading.Event().wait(0.3)
+                order.append("look end")
+        self.patch(theme_backup, "_restore", lambda path, previous=None: order.append("restore") or path)
+        import contextlib
+        import workspace_tiling
+        self.patch(workspace_tiling, "runtime_lock", contextlib.nullcontext)   # never the real one
+        worker = threading.Thread(target=slow_change)
+        worker.start()
+        started.wait(2)
+        theme_backup.restore(self.root / "backup.json")
+        worker.join()
+        self.assertEqual(order, ["look start", "look end", "restore"])
+
     def test_concurrent_saves_lose_nothing(self):
         import threading
         slugs = [f"theme-{i}" for i in range(12)]

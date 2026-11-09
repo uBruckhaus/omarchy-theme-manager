@@ -19,6 +19,7 @@ Trust rules (mirroring the marketplace security review):
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -436,18 +437,47 @@ def _load_settings(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _update_settings(path: Path, **values) -> None:
-    """Read, change and write settings.json under a lock, so two writers
-    (the popup, the bar helper, the theme-set hook) never lose a change."""
+_held_locks = threading.local()
+
+
+@contextlib.contextmanager
+def file_lock(path: Path):
+    """An exclusive `flock` on `path` (created 0600, never through a link),
+    across processes. A thread that already holds it may take it again
+    (a restore holds the settings lock while it switches the sync, which
+    writes settings.json too)."""
+    held = getattr(_held_locks, "paths", None)
+    if held is None:
+        held = _held_locks.paths = set()
+    key = str(path)
+    if key in held:
+        yield
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+    finally:
+        os.close(fd)
+
+
+def settings_lock(path: Path | None = None):
+    path = path or settings_file()
+    return file_lock(path.with_name(path.name + ".lock"))
+
+
+def _update_settings(path: Path, **values) -> None:
+    """Read, change and write settings.json under its lock, so two writers
+    (the popup, the bar helper, the theme-set hook, a restore) never lose a change."""
+    with settings_lock(path):
         data = _load_settings(path)
         data.update(values)
         _atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o600)
-    finally:
-        os.close(fd)
 
 
 def sync_enabled(path: Path | None = None) -> bool:

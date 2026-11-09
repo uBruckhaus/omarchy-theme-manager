@@ -15,10 +15,7 @@ that command the window style is not offered.
 """
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
-import os
 import shutil
 
 import theme_core
@@ -30,6 +27,7 @@ WINDOWS_COMMAND = "omarchy-hyprland-window-transparency"
 LOOKS_MAX = 256 * 1024
 MAX_LOOKS = 500
 OWN_KEYS = {"mono_font": "own_font", "windows": "own_windows"}
+MAX_ROUNDS = 3        # theme switches followed while one apply_look runs
 
 
 # --- looks.json ----------------------------------------------------------------------------
@@ -38,18 +36,11 @@ def looks_file():
     return theme_core.settings_file().parent / "looks.json"
 
 
-@contextlib.contextmanager
 def _locked():
-    """One look change at a time (Save, Undo, rename, prune, a theme apply):
-    from reading looks.json and the user's own values to writing them back."""
-    path = looks_file().with_name("looks.lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    """One look change at a time (Save, Undo, rename, prune, a theme apply, a
+    backup restore): from reading looks.json and the user's own values to
+    writing them back. Order: this lock first, then the settings lock."""
+    return theme_core.file_lock(looks_file().with_name("looks.lock"))
 
 
 def check_look(value) -> dict | None:
@@ -226,20 +217,32 @@ def _apply_field(key: str, wanted) -> bool:
 def apply_look(slug: str) -> list[str]:
     """After a theme was applied (or for Reapply): its font and window
     style, and your own values back for fields it leaves alone. Returns the
-    look keys that changed. Only while `slug` is the theme in use, checked
-    under the lock: a late Save, Undo or Reapply never brings an old theme's
-    look back after a switch (the newer theme's apply does its own)."""
-    theme = _theme(slug)
-    if theme is None:
-        return []
+    look keys that changed. Only for the theme in use: nothing when `slug`
+    is no longer in use, and when the theme changes while Omarchy's font or
+    window-style command runs (a switch does not wait for our lock), the
+    theme in use then gets its look right after, so an old theme's look
+    never stays on the desktop. A few rounds at most."""
+    changed: list[str] = []
     with _locked():
-        if theme_core.current_theme() != slug:
+        target = slug
+        if theme_core.current_theme() != target:
             return []
-        look = look_of(slug)
-        changed = []
-        for key in caps():
-            if _apply_field(key, theme_value(theme, key, look)):
-                changed.append(key)
+        for _round in range(MAX_ROUNDS):
+            theme = _theme(target)
+            if theme is None:
+                break
+            look = look_of(target)
+            moved = None
+            for key in caps():
+                if _apply_field(key, theme_value(theme, key, look)) and key not in changed:
+                    changed.append(key)
+                now = theme_core.current_theme()
+                if now != target:
+                    moved = now
+                    break
+            if moved is None:
+                break
+            target = moved          # another theme came in meanwhile: its look now
     return changed
 
 
