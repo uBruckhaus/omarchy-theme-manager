@@ -27,7 +27,7 @@ WINDOWS_COMMAND = "omarchy-hyprland-window-transparency"
 LOOKS_MAX = 256 * 1024
 MAX_LOOKS = 500
 OWN_KEYS = {"mono_font": "own_font", "windows": "own_windows"}
-MAX_ROUNDS = 3        # theme switches followed while one apply_look runs
+MAX_ROUNDS = 20       # theme switches followed while one apply_look runs (each is an `omarchy theme set`)
 
 
 # --- looks.json ----------------------------------------------------------------------------
@@ -214,11 +214,15 @@ def _apply_field(key: str, wanted) -> bool:
     return current != own
 
 
-def apply_font_override(font: str) -> bool:
-    """A font from outside a theme (a preset), through the same chain: your
-    own font is kept to come back later (only when none is kept yet, never
-    overwritten). True when `font` is on the desktop afterwards."""
+def apply_font_override(font: str, slug: str) -> bool:
+    """A font from outside a theme (a preset for theme `slug`), through the
+    same chain: your own font is kept to come back later (only when none is
+    kept yet, never overwritten). Only while `slug` is still the theme in use
+    (checked under the lock): after a switch meanwhile, nothing changes.
+    True when `font` is on the desktop afterwards."""
     with _locked():
+        if theme_core.current_theme() != slug:
+            return False
         current = theme_custom.current_font()
         if current == font:
             return True
@@ -234,8 +238,8 @@ def apply_look(slug: str) -> list[str]:
     look keys that changed. Only for the theme in use: nothing when `slug`
     is no longer in use, and when the theme changes while Omarchy's font or
     window-style command runs (a switch does not wait for our lock), the
-    theme in use then gets its look right after, so an old theme's look
-    never stays on the desktop. A few rounds at most."""
+    theme in use then gets its look right after, again and again while
+    switches keep coming (up to MAX_ROUNDS switches during one call)."""
     changed: list[str] = []
     with _locked():
         target = slug

@@ -249,13 +249,41 @@ class RaceTests(LooksTestCase):
         theme_looks.set_look("tokyo-night", {"mono_font": "Mono B"})
         self.apply("tokyo-night")                         # yours (Mono A) is kept
         self.assertEqual(self.settings()["own_font"], "Mono A")
-        self.assertTrue(theme_looks.apply_font_override("Mono C"))   # a preset's font
+        self.assertTrue(theme_looks.apply_font_override("Mono C", "tokyo-night"))   # a preset's font
         self.assertEqual((self.font, self.settings()["own_font"]), ("Mono C", "Mono A"))
-        self.assertTrue(theme_looks.apply_font_override("Mono C"))   # already on: nothing changes
+        self.assertTrue(theme_looks.apply_font_override("Mono C", "tokyo-night"))   # already on: nothing changes
         self.apply("ristretto")                           # a theme without a font: yours again
         self.assertEqual(self.font, "Mono A")
-        self.assertTrue(theme_looks.apply_font_override("Mono B"))   # no own font kept yet: keep it now
+        self.assertTrue(theme_looks.apply_font_override("Mono B", "ristretto"))   # no own font kept yet: keep it now
         self.assertEqual(self.settings()["own_font"], "Mono A")
+
+    def test_a_presets_font_is_not_set_after_a_switch(self):
+        """Codex round 4: another theme came in during the preset's wallpaper step."""
+        self.use("ristretto")
+        self.assertFalse(theme_looks.apply_font_override("Mono C", "tokyo-night"))
+        self.assertEqual((self.font, self.fonts_set), ("Mono A", []))
+        self.assertNotIn("own_font", self.settings())
+
+    def test_many_switches_while_commands_run_end_on_the_last_theme(self):
+        """Codex round 4: more than three switches during one apply."""
+        slugs = [f"t{i}" for i in range(6)]
+        for i, slug in enumerate(slugs):
+            (self.roots.system_themes / slug).mkdir()
+            (self.roots.system_themes / slug / "colors.toml").write_text(COLORS)
+            theme_looks.set_look(slug, {"windows": ("glassy", "opaque")[i % 2]})
+        theme_looks.set_look("t5", {"windows": "transparent", "mono_font": "Mono C"})
+        queue = list(slugs[1:])
+        original = theme_looks.set_windows
+
+        def slow_windows(mode):
+            ok = original(mode)
+            if queue:
+                self.use(queue.pop(0))          # the next `omarchy theme set` came in meanwhile
+            return ok
+        self.patch(theme_looks, "set_windows", slow_windows)
+        self.use("t0")
+        theme_looks.apply_look("t0")
+        self.assertEqual((self.font, self.windows), ("Mono C", "transparent"))   # t5's look, the last one
 
     def test_concurrent_saves_lose_nothing(self):
         import threading

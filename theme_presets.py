@@ -174,8 +174,8 @@ def apply(preset: dict) -> list[str]:
     if preset["font"]:
         # Your own font is kept to come back (never overwritten by the preset's).
         import theme_looks
-        if not theme_looks.apply_font_override(preset["font"]):
-            warnings.append("font unavailable")
+        if not theme_looks.apply_font_override(preset["font"], theme.slug):
+            warnings.append("font unavailable")      # (or another theme came in meanwhile: its own font stays)
     if "workspaces" in preset:
         warnings += apply_workspaces(preset["workspaces"])
     return warnings
