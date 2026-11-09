@@ -20,6 +20,7 @@ Trust rules (mirroring the marketplace security review):
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import io
 import json
@@ -436,9 +437,17 @@ def _load_settings(path: Path) -> dict:
 
 
 def _update_settings(path: Path, **values) -> None:
-    data = _load_settings(path)
-    data.update(values)
-    _atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o600)
+    """Read, change and write settings.json under a lock, so two writers
+    (the popup, the bar helper, the theme-set hook) never lose a change."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        data = _load_settings(path)
+        data.update(values)
+        _atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o600)
+    finally:
+        os.close(fd)
 
 
 def sync_enabled(path: Path | None = None) -> bool:

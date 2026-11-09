@@ -15,7 +15,10 @@ that command the window style is not offered.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
 import shutil
 
 import theme_core
@@ -33,6 +36,20 @@ OWN_KEYS = {"mono_font": "own_font", "windows": "own_windows"}
 
 def looks_file():
     return theme_core.settings_file().parent / "looks.json"
+
+
+@contextlib.contextmanager
+def _locked():
+    """One look change at a time (Save, Undo, rename, prune, a theme apply):
+    from reading looks.json and the user's own values to writing them back."""
+    path = looks_file().with_name("looks.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def check_look(value) -> dict | None:
@@ -94,30 +111,33 @@ def set_look(slug: str, look: dict) -> dict:
     checked = check_look(look)
     if checked is None:
         raise ValueError("not a look")
-    looks = load_looks()
-    previous = looks.pop(slug, {})
-    if checked:
-        if len(looks) >= MAX_LOOKS:
-            raise ValueError("too many looks")
-        looks[slug] = checked
-    _save_looks(looks)
+    with _locked():
+        looks = load_looks()
+        previous = looks.pop(slug, {})
+        if checked:
+            if len(looks) >= MAX_LOOKS:
+                raise ValueError("too many looks")
+            looks[slug] = checked
+        _save_looks(looks)
     return previous
 
 
 def rename(old: str, new: str) -> None:
-    looks = load_looks()
-    if old in looks:
-        looks[new] = looks.pop(old)
-        _save_looks(looks)
+    with _locked():
+        looks = load_looks()
+        if old in looks:
+            looks[new] = looks.pop(old)
+            _save_looks(looks)
 
 
 def prune_missing() -> list[str]:
     """Forget the looks of themes that are gone (after Undo is no longer offered)."""
-    looks = load_looks()
     installed = {t.slug for t in theme_core.discover_themes()}
-    gone = [slug for slug in looks if slug not in installed]
-    if gone:
-        _save_looks({slug: look for slug, look in looks.items() if slug in installed})
+    with _locked():
+        looks = load_looks()
+        gone = [slug for slug in looks if slug not in installed]
+        if gone:
+            _save_looks({slug: look for slug, look in looks.items() if slug in installed})
     return gone
 
 
@@ -203,26 +223,23 @@ def _apply_field(key: str, wanted) -> bool:
     return current != own
 
 
-def apply_font(slug: str) -> str | None:
-    """The font part of a theme's look. Returns the font set, if any."""
-    wanted = theme_value(_theme(slug), "mono_font")
-    if not _apply_field("mono_font", wanted):
-        return None
-    return wanted if wanted is not None else theme_custom.current_font()
-
-
 def apply_look(slug: str) -> list[str]:
     """After a theme was applied (or for Reapply): its font and window
     style, and your own values back for fields it leaves alone. Returns the
-    look keys that changed."""
+    look keys that changed. Only while `slug` is the theme in use, checked
+    under the lock: a late Save, Undo or Reapply never brings an old theme's
+    look back after a switch (the newer theme's apply does its own)."""
     theme = _theme(slug)
     if theme is None:
         return []
-    look = look_of(slug)
-    changed = []
-    for key in caps():
-        if _apply_field(key, theme_value(theme, key, look)):
-            changed.append(key)
+    with _locked():
+        if theme_core.current_theme() != slug:
+            return []
+        look = look_of(slug)
+        changed = []
+        for key in caps():
+            if _apply_field(key, theme_value(theme, key, look)):
+                changed.append(key)
     return changed
 
 

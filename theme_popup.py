@@ -2282,6 +2282,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.lk_return = self.stack.get_visible_child_name() or "themes"
         self.lk_data = None
         self.lk_busy = True
+        self.lk_slug = theme.slug
         self.lk_title.set_label(_("Font & effects — {0}").format(theme_core.plain_text(theme.name)))
         self.lk_status.set_label(_("Loading…"))
         for widget in (self.lk_font, self.lk_windows, self.lk_save):
@@ -2292,8 +2293,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self._async(lambda: theme_looks.look_data(slug), lambda data, error: self.fill_look_page(slug, data, error))
 
     def fill_look_page(self, slug: str, data, error):
-        if self.stack.get_visible_child_name() != "look" or not self.lk_title.get_label():
-            return
+        if self.stack.get_visible_child_name() != "look" or slug != getattr(self, "lk_slug", None):
+            return                  # the page was left, or opened again for another theme
         self.lk_busy = False
         if error is not None:
             self.lk_status.set_label(_("Could not read the theme's look: {0}").format(error))
@@ -2394,7 +2395,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if self.stack.get_visible_child_name() != "look":
             return
         self.lk_data = None
-        self.lk_title.set_label("")
+        self.lk_slug = None
         back = self.lk_return
         if back == "settings":
             self.fill_settings()

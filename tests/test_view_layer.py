@@ -66,8 +66,13 @@ class ViewLayerTest(unittest.TestCase):
         theme_core.default_roots = lambda: self.roots
         theme_core.hidden_file = lambda: self.hidden_file
         self.applied: list[str] = []
-        theme_core.apply_theme = lambda slug, binary="omarchy", timeout=120.0: \
-            self.applied.append(slug) or True
+        def fake_apply(slug, binary="omarchy", timeout=120.0):
+            # as `omarchy theme set`: the theme is in use afterwards
+            self.applied.append(slug)
+            self.state_current.parent.mkdir(parents=True, exist_ok=True)
+            self.state_current.write_text(slug + "\n")
+            return True
+        theme_core.apply_theme = fake_apply
         self.notices: list[tuple[str, str]] = []
         theme_core.notify = lambda title, body="": self.notices.append((title, body))
         # Omarchy picker sync: never touch the real cache or menu file.

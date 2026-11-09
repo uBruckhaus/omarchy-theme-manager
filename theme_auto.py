@@ -556,7 +556,10 @@ def apply_theme(slug: str, *, track_base: bool = True) -> bool:
     ok = theme_core.apply_theme(slug)
     if ok:
         record_recent(slug)
-        theme_looks.apply_look(slug)
+        try:
+            theme_looks.apply_look(slug)
+        except Exception:  # noqa: BLE001 - the theme is applied; its look is extra
+            pass
         if track_base:
             remember_base_theme(slug)
     return ok

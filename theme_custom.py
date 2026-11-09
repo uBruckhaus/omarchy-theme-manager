@@ -427,14 +427,6 @@ def set_font(font: str) -> bool:
     return ok
 
 
-def apply_theme_font(slug: str) -> str | None:
-    """After a theme was applied: switch to its font, or back to the font
-    you had before a theme's font took over. Returns the font set, if any.
-    (The font part of the theme's look, see theme_looks.)"""
-    import theme_looks   # (theme_looks imports this module)
-    return theme_looks.apply_font(slug)
-
-
 # --- create and edit -----------------------------------------------------------------------
 
 def _write_marker(directory: Path, base: str, font: str | None, created: float,

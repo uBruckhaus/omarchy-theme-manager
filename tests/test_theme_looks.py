@@ -62,6 +62,11 @@ class LooksTestCase(unittest.TestCase):
     def use(self, slug):
         (self.roots.state_current / "theme.name").write_text(slug + "\n")
 
+    def apply(self, slug):
+        """As after `omarchy theme set <slug>`: that theme is in use, then its look."""
+        self.use(slug)
+        return theme_looks.apply_look(slug)
+
     def settings(self):
         return theme_core._load_settings(theme_core.settings_file())
 
@@ -107,56 +112,57 @@ class ApplyTests(LooksTestCase):
     def test_look_then_your_own_values_back(self):
         theme_looks.set_look("tokyo-night", {"mono_font": "Mono B", "windows": "glassy"})
         self.use("tokyo-night")
-        self.assertEqual(theme_looks.apply_look("tokyo-night"), ["mono_font", "windows"])
+        self.assertEqual(self.apply("tokyo-night"), ["mono_font", "windows"])
         self.assertEqual((self.font, self.windows), ("Mono B", "glassy"))
         self.assertEqual((self.settings()["own_font"], self.settings()["own_windows"]), ("Mono A", "transparent"))
-        self.assertEqual(theme_looks.apply_look("tokyo-night"), [])        # already on the desktop
+        self.assertEqual(self.apply("tokyo-night"), [])        # already on the desktop
         self.use("ristretto")
-        self.assertEqual(theme_looks.apply_look("ristretto"), ["mono_font", "windows"])
+        self.assertEqual(self.apply("ristretto"), ["mono_font", "windows"])
         self.assertEqual((self.font, self.windows), ("Mono A", "transparent"))
         self.assertIsNone(self.settings()["own_font"])
         self.assertIsNone(self.settings()["own_windows"])
-        self.assertEqual(theme_looks.apply_look("ristretto"), [])          # nothing to give back
+        self.assertEqual(self.apply("ristretto"), [])          # nothing to give back
 
     def test_your_own_value_is_kept_until_it_is_really_back(self):
         theme_looks.set_look("tokyo-night", {"windows": "glassy"})
-        theme_looks.apply_look("tokyo-night")
+        self.apply("tokyo-night")
         self.windows_ok = False
-        self.assertEqual(theme_looks.apply_look("ristretto"), [])
+        self.assertEqual(self.apply("ristretto"), [])
         self.assertEqual(self.settings()["own_windows"], "transparent")
         self.windows_ok = True
-        self.assertEqual(theme_looks.apply_look("ristretto"), ["windows"])
+        self.assertEqual(self.apply("ristretto"), ["windows"])
         self.assertIsNone(self.settings()["own_windows"])
 
     def test_the_look_wins_over_a_custom_themes_font(self):
         base = next(t for t in theme_core.discover_themes() if t.slug == "ristretto")
         theme_custom.create_theme(base, "Mine", theme_custom.load_palette(base), "Mono B")
-        self.assertEqual(theme_looks.apply_look("mine"), ["mono_font"])
+        self.assertEqual(self.apply("mine"), ["mono_font"])
         self.assertEqual(self.font, "Mono B")
         theme_looks.set_look("mine", {"mono_font": "Mono C"})
-        self.assertEqual(theme_looks.apply_look("mine"), ["mono_font"])
+        self.assertEqual(self.apply("mine"), ["mono_font"])
         self.assertEqual(self.font, "Mono C")
         self.assertEqual(self.settings()["own_font"], "Mono A")
-        self.assertEqual(theme_custom.apply_theme_font("ristretto"), "Mono A")   # the old entry point
+        self.assertEqual(self.apply("ristretto"), ["mono_font"])
+        self.assertEqual(self.font, "Mono A")
 
     def test_a_custom_themes_own_window_style(self):
         base = next(t for t in theme_core.discover_themes() if t.slug == "ristretto")
         theme_custom.create_theme(base, "Frost", theme_custom.load_palette(base), None, windows="glassy")
         frost = next(t for t in theme_core.discover_themes() if t.slug == "frost")
         self.assertEqual(theme_custom.windows_of(frost), "glassy")
-        self.assertEqual(theme_looks.apply_look("frost"), ["windows"])
+        self.assertEqual(self.apply("frost"), ["windows"])
         self.assertEqual(self.windows, "glassy")
         theme_custom.update_theme(frost, theme_custom.load_palette(frost), None, None)
         self.assertIsNone(theme_custom.windows_of(frost))
         with self.assertRaises(ValueError):
             theme_custom.update_theme(frost, theme_custom.load_palette(frost), None, "blurry")
-        theme_looks.apply_look("ristretto")
+        self.apply("ristretto")
         self.assertEqual(self.windows, "transparent")
 
     def test_no_window_style_without_omarchys_command(self):
         self.patch(theme_looks, "windows_supported", lambda: False)
         theme_looks.set_look("tokyo-night", {"windows": "glassy"})
-        self.assertEqual(theme_looks.apply_look("tokyo-night"), [])
+        self.assertEqual(self.apply("tokyo-night"), [])
         self.assertEqual(self.windows_set, [])
         self.assertEqual(theme_looks.caps(), ["mono_font"])
 
@@ -164,7 +170,7 @@ class ApplyTests(LooksTestCase):
         theme_looks.set_look("ristretto", {"windows": "glassy"})
         self.assertEqual(theme_looks.pending("ristretto"), ["windows"])
         self.assertEqual(theme_looks.pending("tokyo-night"), [])
-        theme_looks.apply_look("ristretto")
+        self.apply("ristretto")
         self.assertEqual(theme_looks.pending("ristretto"), [])
         theme_looks.set_look("ristretto", {})            # yours still to come back
         self.assertEqual(theme_looks.pending("ristretto"), ["windows"])
@@ -180,6 +186,46 @@ class ApplyTests(LooksTestCase):
         self.assertEqual((data["in_use"], data["pending"], data["caps"]), (False, [], ["mono_font", "windows"]))
         with self.assertRaises(FileNotFoundError):
             theme_looks.look_data("nope")
+
+
+class RaceTests(LooksTestCase):
+    """Codex round 1 on 2.1.0 (2026-11-09)."""
+
+    def test_a_late_apply_for_a_theme_no_longer_in_use_does_nothing(self):
+        theme_looks.set_look("tokyo-night", {"windows": "glassy", "mono_font": "Mono B"})
+        self.use("ristretto")                       # switched away before the Save/Reapply job ran
+        self.assertEqual(theme_looks.apply_look("tokyo-night"), [])
+        self.assertEqual((self.font, self.windows, self.windows_set), ("Mono A", "transparent", []))
+        self.assertNotIn("own_windows", self.settings())
+
+    def test_concurrent_saves_lose_nothing(self):
+        import threading
+        slugs = [f"theme-{i}" for i in range(12)]
+        threads = [threading.Thread(target=theme_looks.set_look, args=(slug, {"windows": "glassy"})) for slug in slugs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(theme_looks.load_looks()), sorted(slugs))
+
+    def test_concurrent_settings_updates_lose_nothing(self):
+        import threading
+        path = theme_core.settings_file()
+        keys = [f"k{i}" for i in range(12)]
+        threads = [threading.Thread(target=theme_core._update_settings, args=(path,), kwargs={k: True}) for k in keys]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertTrue(all(self.settings().get(k) for k in keys))
+
+    def test_a_failing_look_never_fails_the_theme_switch(self):
+        import theme_auto
+        self.patch(theme_core, "apply_theme", lambda slug, **kw: self.use(slug) or True)
+        self.patch(theme_looks, "apply_look", lambda slug: (_ for _ in ()).throw(OSError("disk full")))
+        self.patch(theme_auto, "record_recent", lambda slug: None)
+        self.patch(theme_auto, "remember_base_theme", lambda slug: None)
+        self.assertTrue(theme_auto.apply_theme("tokyo-night"))
 
 
 class BackupTests(LooksTestCase):

@@ -220,7 +220,7 @@ class AskAiTests(unittest.TestCase):
     def test_name_without_letters_is_dropped(self):
         _s, cands = theme_ai.verify({"candidates": [{"kind": "new", "base": "nord", "name": "★★★"}]},
                                     THEMES, CATALOG, FONTS)
-        self.assertEqual(cands[0]["name"], "Nord")
+        self.assertEqual(cands[0]["name"], "New Custom Theme")    # never the internal base's name
 
     def test_refine_sends_the_checked_candidate_only(self):
         _s, cands = theme_ai.verify({"candidates": [{"kind": "new", "base": "nord", "name": "X"}]},

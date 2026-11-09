@@ -37,7 +37,10 @@ def main(argv: list[str]) -> int:
         theme_core.sync_current_theme()
         # A theme's look (its font and window style, see theme_looks; other
         # themes bring yours back), also when applied from Omarchy's own picker.
-        theme_looks.apply_look(theme_core.current_theme())
+        try:
+            theme_looks.apply_look(theme_core.current_theme())
+        except Exception:  # noqa: BLE001 - the theme switch and the picker refresh still go on
+            pass
         theme_core.prune_switcher_previews(theme_core.load_hidden())
         theme_core.refresh_switcher_cache(Path(__file__).resolve().parent / "theme-switcher")
         return 0

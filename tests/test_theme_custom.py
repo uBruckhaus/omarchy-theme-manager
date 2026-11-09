@@ -248,6 +248,12 @@ class RenameTests(CustomTestCase):
 
 
 class FontTests(CustomTestCase):
+    def apply_font(self, slug):
+        """As after `omarchy theme set <slug>`: the font part of its look; the font set, if any."""
+        import theme_looks
+        (self.roots.state_current / "theme.name").write_text(slug + "\n")
+        return self.font if "mono_font" in theme_looks.apply_look(slug) else None
+
     def make_custom(self, font):
         base = self.base_theme() if not (self.roots.system_themes / "ristretto").exists() else \
             next(t for t in theme_core.discover_themes() if t.slug == "ristretto")
@@ -255,24 +261,24 @@ class FontTests(CustomTestCase):
 
     def test_theme_font_and_back_to_your_own(self):
         self.make_custom("Mono B")
-        self.assertEqual(theme_custom.apply_theme_font("with-mono-b"), "Mono B")
+        self.assertEqual(self.apply_font("with-mono-b"), "Mono B")
         self.assertEqual(self.font, "Mono B")
-        self.assertEqual(theme_custom.apply_theme_font("with-mono-b"), None)   # already set
-        self.assertEqual(theme_custom.apply_theme_font("ristretto"), "Mono A")  # yours again
+        self.assertEqual(self.apply_font("with-mono-b"), None)   # already set
+        self.assertEqual(self.apply_font("ristretto"), "Mono A")  # yours again
         self.assertEqual(self.fonts_set, ["Mono B", "Mono A"])
         self.assertIsNone(theme_core._load_settings(theme_core.settings_file()).get("own_font"))
 
     def test_themes_without_font_leave_it_alone(self):
         self.make_custom(None)
-        self.assertIsNone(theme_custom.apply_theme_font("with-none"))
-        self.assertIsNone(theme_custom.apply_theme_font("ristretto"))
+        self.assertIsNone(self.apply_font("with-none"))
+        self.assertIsNone(self.apply_font("ristretto"))
         self.assertEqual(self.fonts_set, [])
 
     def test_font_from_a_tampered_marker_is_ignored(self):
         self.make_custom("Mono B")
         marker = self.roots.user_themes / "with-mono-b" / "theme-manager.json"
         marker.write_text(json.dumps({"base": "ristretto", "font": "x\"; rm -rf ~ #"}))
-        self.assertIsNone(theme_custom.apply_theme_font("with-mono-b"))
+        self.assertIsNone(self.apply_font("with-mono-b"))
         self.assertEqual(self.fonts_set, [])
 
     def test_set_font_only_passes_listed_fonts(self):

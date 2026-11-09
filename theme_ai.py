@@ -1004,8 +1004,9 @@ def verify(answer: dict, themes, catalog, fonts, parent: dict | None = None,
                 name = ""          # no letter or digit: no folder name can come of it
             if not name and same_base and kind == "new" and parent.get("kind") == "new":
                 name = parent.get("agent_name") or parent.get("name") or ""
+            fallback = theme_custom.DEFAULT_NAME if kind == "new" else theme_core.plain_text(theme.name, 60)
             item.update(base=theme.slug, base_name=theme_core.plain_text(theme.name, 60),
-                        name=name or theme_core.plain_text(theme.name, 60), colors=colors)
+                        name=name or fallback, colors=colors)
         font = raw.get("font")
         item["font"] = font if isinstance(font, str) and font in font_set and theme_custom.FONT_RE.match(font) else None
         if item["font"] is None and parent is not None and kind != "catalog" and \
