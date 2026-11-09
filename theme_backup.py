@@ -15,6 +15,7 @@ import theme_ai
 import theme_shortcuts
 import theme_auto
 import theme_custom
+import theme_looks
 import i18n
 import screenshots
 import corners
@@ -59,6 +60,7 @@ FILES = {
     "presets.json": list,
     "shortcuts.json": dict,
     "workspaces.json": dict,   # workspace presets and App Presets (workspace_tiling)
+    "looks.json": dict,        # font and window style per theme (theme_looks)
 }
 
 
@@ -137,6 +139,9 @@ def _validate_settings(value: dict) -> None:
         raise ValueError("invalid settings")
     if "own_font" in value and value["own_font"] is not None and \
             (not isinstance(value["own_font"], str) or not theme_custom.FONT_RE.fullmatch(value["own_font"])):
+        raise ValueError("invalid settings")
+    if "own_windows" in value and value["own_windows"] is not None and \
+            value["own_windows"] not in theme_looks.WINDOW_MODES:
         raise ValueError("invalid settings")
     if "screenshot_folder" in value and value["screenshot_folder"] is not None and \
             not screenshots.valid_folder_setting(value["screenshot_folder"]):
@@ -225,6 +230,9 @@ def _validate_value(name: str, value):
         value = cleaned
     elif name == "workspaces.json":
         value = workspace_tiling.without_commands(workspace_tiling.clean_store(value))
+    elif name == "looks.json":
+        if theme_looks.check_looks(value) != value:
+            raise ValueError("invalid looks")
     return value
 
 
@@ -248,7 +256,8 @@ def preview(path: Path) -> dict:
         raise ValueError("invalid backup files")
     checked = {name: _validate_value(name, value) for name, value in files.items()}
     # Every file must stay readable after the restore: its loader refuses larger ones.
-    limits = {"presets.json": theme_presets.MAX_BYTES, "workspaces.json": workspace_tiling.STORE_MAX_BYTES}
+    limits = {"presets.json": theme_presets.MAX_BYTES, "workspaces.json": workspace_tiling.STORE_MAX_BYTES,
+              "looks.json": theme_looks.LOOKS_MAX}
     for name, value in checked.items():
         size = len((json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
         if size > limits.get(name, MAX_BACKUP):

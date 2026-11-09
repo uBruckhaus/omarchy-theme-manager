@@ -793,7 +793,8 @@ class AskPageMixin:
         query = candidate.get("query") or ""
         mine = bool(candidate.get("query_by_user") and query)
         base = candidate.get("base_name", "")
-        kind = {"catalog": _("From omarchy.org"), "new": _("New theme from {0}").format(base),
+        # A new theme is new for you: the theme the agent started from is internal.
+        kind = {"catalog": _("From omarchy.org"), "new": _("New theme"),
                 "edit": _("Edit {0}").format(base)}[candidate["kind"]]
         if mine:
             title = query[:1].upper() + query[1:]
@@ -865,7 +866,10 @@ class AskPageMixin:
             if key == "foreground":
                 swatch.set_margin_end(6)
             row.append(swatch)
-        font = Gtk.Label(label=candidate["font"] or _("Keep the current font"), xalign=0,
+        text = candidate["font"] or _("Keep the current font")
+        if candidate.get("windows"):
+            text += " · " + _(self.WINDOW_LABELS[candidate["windows"]])
+        font = Gtk.Label(label=text, xalign=0,
                          ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, hexpand=True)
         font.add_css_class("tm-hint")
         font.set_margin_start(6)
@@ -1045,6 +1049,11 @@ class AskPageMixin:
         if self.ed is None:
             return
         self.ed_return_page = "ask"              # Back comes here again, results kept
+        if not edit and candidate["kind"] == "new":
+            # Its base theme is internal: no "from Tokyo Night", no "Also Tokyo Night's wallpapers".
+            self.ed["from_ask"] = True
+            # The card's name comes over, as the editor's title and in the name field.
+            self.ed_title.set_label(theme_core.plain_text(candidate["name"]) if candidate["name"] else _("New theme"))
         for key, value in candidate["colors"].items():
             try:
                 self.ed["palette"].set(key, value, self.ed["edited"])
@@ -1052,6 +1061,8 @@ class AskPageMixin:
                 continue
         if candidate["font"]:
             self.ed["font"] = candidate["font"]
+        if candidate.get("windows"):
+            self.ed["windows"] = candidate["windows"]
         # The picture shown on the card comes along: the sample shows it,
         # saving downloads it into the theme (Save and apply makes it the
         # background), and the base theme's own wallpapers become an extra.

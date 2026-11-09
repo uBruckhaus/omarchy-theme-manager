@@ -30,6 +30,7 @@ from pathlib import Path
 
 import theme_core
 import theme_custom
+import theme_looks
 from i18n import _
 
 SLIDESHOW_CHOICES = (0, 5, 10, 15, 30, 60, 120)   # minutes; 0 = off
@@ -555,7 +556,7 @@ def apply_theme(slug: str, *, track_base: bool = True) -> bool:
     ok = theme_core.apply_theme(slug)
     if ok:
         record_recent(slug)
-        theme_custom.apply_theme_font(slug)
+        theme_looks.apply_look(slug)
         if track_base:
             remember_base_theme(slug)
     return ok

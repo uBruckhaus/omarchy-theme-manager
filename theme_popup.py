@@ -53,6 +53,7 @@ import theme_auto
 import theme_catalog
 import theme_core
 import theme_custom
+import theme_looks
 import theme_shortcuts as shortcuts
 from layer_watch import LayerWatch
 import wallpaper_search
@@ -69,7 +70,7 @@ import theme_ai
 from workspaces_page import WorkspacesPageMixin
 import ask_page
 from ask_page import AskPageMixin
-from i18n import _, ngettext
+from i18n import _, N_, ngettext
 
 # Default outer size: a 420 px card around a 784 px list (Uwe's choice,
 # 2026-11-06: room for the workspace cards and their controls), the same on every page so switching pages never resizes the popup.
@@ -249,6 +250,23 @@ def dropped_paths(value) -> list[Path]:
         return [Path(path) for path in (f.get_path() for f in value.get_files())
                 if path and Path(path).is_file()]
     return parse_uris(value if isinstance(value, str) else "")
+
+
+class LookUndo:
+    """Undo for Font & effects: the theme's look as it was (applied again
+    only when the change was applied)."""
+
+    def __init__(self, popup, slug: str, previous: dict, reapply: bool):
+        self.popup, self.slug, self.previous, self.reapply = popup, slug, previous, reapply
+
+    def undo(self):
+        def work():
+            theme_looks.set_look(self.slug, self.previous)
+            if self.reapply and theme_core.current_theme() == self.slug:
+                theme_looks.apply_look(self.slug)
+        self.popup._async(work, lambda _r, error: (
+            error is not None and theme_core.notify(_("Could not undo"), str(error)),
+            self.popup.refresh_look_pending()))
 
 
 class _PresetsPage:
@@ -825,6 +843,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         stack.add_named(self.build_info_page(), "info")
         stack.add_named(self.build_editor_page(), "editor")
         stack.add_named(self.build_shortcut_page(), "shortcut")
+        stack.add_named(self.build_look_page(), "look")
+        self.look_pending: dict[str, list[str]] = {}   # the theme in use → its fields not on the desktop
 
         # Undo after a delete: the file went to the trash and comes back from there.
         self.undo_bar = Gtk.Revealer()
@@ -2202,6 +2222,204 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.sc_return = "themes"
         return page
 
+    # --- Font & effects (theme_looks) ------------------------------------------------------
+
+    WINDOW_LABELS = {"opaque": N_("Opaque"), "transparent": N_("Transparent"), "glassy": N_("Glassy (blur)")}
+    LOOK_FIELDS = {"mono_font": N_("font"), "windows": N_("window style")}
+
+    def build_look_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.track_width(page)
+        header = Gtk.Box(spacing=8)
+        back = self.back_button()
+        back.set_tooltip_text(_("Back (Esc)"))
+        back.connect("clicked", lambda *_: self.close_look_page())
+        header.append(back)
+        self.lk_title = Gtk.Label(xalign=0, hexpand=True)
+        self.lk_title.set_ellipsize(Pango.EllipsizeMode.END)
+        self.lk_title.set_max_width_chars(1)
+        self.lk_title.add_css_class("tm-title")
+        header.append(self.lk_title)
+        page.append(header)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.add_css_class("tm-settings")
+        scroller.set_child(box)
+        page.append(scroller)
+        hint = Gtk.Label(label=_("Used whenever this theme is applied; the theme files stay as they are. "
+                                 "Themes without a choice give your own font and window style back."),
+                         xalign=0, wrap=True, max_width_chars=1)
+        hint.add_css_class("tm-hint")
+        box.append(hint)
+        self.lk_font = Gtk.DropDown.new_from_strings([""])
+        self.lk_font.connect("notify::selected", lambda *_: self.update_look_buttons())
+        self.settings_row(box, _("Font"), _("Omarchy's monospace font: terminals, the bar and menus"), self.lk_font)
+        self.lk_windows = Gtk.DropDown.new_from_strings([""])
+        self.lk_windows.connect("notify::selected", lambda *_: self.update_look_buttons())
+        self.lk_windows_row = self.settings_row(
+            box, _("Windows"), _("Glassy blurs what is behind see-through windows, the bar and menus, "
+                                 "and gives terminals a see-through background"), self.lk_windows)
+        self.lk_status = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
+        self.lk_status.add_css_class("tm-hint")
+        box.append(self.lk_status)
+        answers = Gtk.Box(spacing=12)
+        answers.set_halign(Gtk.Align.END)
+        self.lk_save = Gtk.Button(label=_("Apply"))
+        self.lk_save.add_css_class("tm-paste")
+        self.lk_save.connect("clicked", lambda *_: self.save_look())
+        answers.append(self.lk_save)
+        box.append(answers)
+        self.lk_data = None
+        self.lk_fonts: list = []
+        self.lk_modes: list = []
+        self.lk_busy = False
+        self.lk_return = "themes"
+        return page
+
+    def open_look_page(self, theme: theme_core.ThemeInfo):
+        self.lk_return = self.stack.get_visible_child_name() or "themes"
+        self.lk_data = None
+        self.lk_busy = True
+        self.lk_title.set_label(_("Font & effects — {0}").format(theme_core.plain_text(theme.name)))
+        self.lk_status.set_label(_("Loading…"))
+        for widget in (self.lk_font, self.lk_windows, self.lk_save):
+            widget.set_sensitive(False)
+        self.stack.set_visible_child_name("look")
+        self.lk_save.grab_focus()
+        slug = theme.slug
+        self._async(lambda: theme_looks.look_data(slug), lambda data, error: self.fill_look_page(slug, data, error))
+
+    def fill_look_page(self, slug: str, data, error):
+        if self.stack.get_visible_child_name() != "look" or not self.lk_title.get_label():
+            return
+        self.lk_busy = False
+        if error is not None:
+            self.lk_status.set_label(_("Could not read the theme's look: {0}").format(error))
+            return
+        self.lk_data = data
+        look, own, themed = data["look"], data["own"], data["theme"]
+
+        def default_label(key, describe):
+            if themed.get(key) is not None:
+                return _("Theme default ({0})").format(describe(themed[key]))
+            if own.get(key) is not None:
+                return _("Theme default (yours: {0})").format(describe(own[key]))
+            return _("Theme default")
+
+        fonts = list(data["fonts"])
+        chosen = look.get("mono_font")
+        if chosen and chosen not in fonts:
+            fonts.insert(0, chosen)        # a saved font no longer installed stays until another is chosen
+        self.lk_fonts = [None, *fonts]
+        labels = [default_label("mono_font", str)] + [
+            _("{0} (not installed)").format(f) if f not in data["fonts"] else f for f in fonts]
+        self.lk_font.set_model(Gtk.StringList.new(labels))
+        self.lk_font.set_selected(self.lk_fonts.index(chosen) if chosen in self.lk_fonts else 0)
+        windows = "windows" in data["caps"]
+        self.lk_windows_row.set_visible(windows)
+        mode_label = lambda mode: _(self.WINDOW_LABELS[mode])
+        self.lk_modes = [None, *theme_looks.WINDOW_MODES]
+        self.lk_windows.set_model(Gtk.StringList.new(
+            [default_label("windows", mode_label)] + [mode_label(m) for m in theme_looks.WINDOW_MODES]))
+        mode = look.get("windows")
+        self.lk_windows.set_selected(self.lk_modes.index(mode) if mode in self.lk_modes else 0)
+        self.lk_font.set_sensitive(True)
+        self.lk_windows.set_sensitive(windows)
+        self.update_look_buttons()
+
+    def look_edited(self) -> dict:
+        edited = {}
+        font = self.lk_fonts[self.lk_font.get_selected()] if self.lk_font.get_selected() < len(self.lk_fonts) else None
+        mode = self.lk_modes[self.lk_windows.get_selected()] if self.lk_windows.get_selected() < len(self.lk_modes) \
+            else None
+        if font:
+            edited["mono_font"] = font
+        if mode and "windows" in self.lk_data["caps"]:
+            edited["windows"] = mode
+        if "windows" not in self.lk_data["caps"] and self.lk_data["look"].get("windows"):
+            edited["windows"] = self.lk_data["look"]["windows"]    # kept for an Omarchy that has it
+        return edited
+
+    def update_look_buttons(self):
+        data = self.lk_data
+        if data is None or self.lk_busy:
+            return
+        changed = self.look_edited() != data["look"]
+        self.lk_save.set_sensitive(changed)               # one button: enabled once something changed
+        self.lk_save.set_tooltip_text(_("Saves the change and puts it on the desktop now") if data["in_use"] else
+                                      _("Saves the change; it is used whenever this theme is applied"))
+        if data["in_use"] and data["pending"] and not changed:
+            self.lk_status.set_label(_("Not on the desktop yet: {0}").format(self.look_field_names(data["pending"])))
+        else:
+            self.lk_status.set_label("")
+
+    def look_field_names(self, keys) -> str:
+        return ", ".join(_(self.LOOK_FIELDS[k]) for k in keys if k in self.LOOK_FIELDS)
+
+    def save_look(self):
+        """Stores the change; the theme in use gets it on the desktop at once."""
+        data = self.lk_data
+        if data is None or self.lk_busy:
+            return
+        slug, name = data["slug"], theme_core.plain_text(data["name"])
+        edited = self.look_edited()
+        if edited == data["look"]:
+            return
+        apply = data["in_use"]
+        self.lk_busy = True
+        self.lk_save.set_sensitive(False)
+
+        def work():
+            previous = theme_looks.set_look(slug, edited)
+            applied = theme_looks.apply_look(slug) if apply else []
+            return previous, applied, theme_looks.pending(slug)
+
+        def done(result, error):
+            self.lk_busy = False
+            if error is not None:
+                theme_core.notify(_("Could not save Font & effects"), f"{name}: {error}")
+                self.update_look_buttons()     # the edits stay for another try
+                return
+            previous, _applied, pending = result
+            self.look_pending = {slug: pending} if data["in_use"] else self.look_pending
+            text = _("Font & effects saved and applied") if apply else _("Font & effects saved for {0}").format(name)
+            theme_core.notify(text, name)
+            self.close_look_page()
+            self.offer_undo(text, [LookUndo(self, slug, previous, apply)])
+        self._async(work, done)
+
+    def close_look_page(self):
+        if self.stack.get_visible_child_name() != "look":
+            return
+        self.lk_data = None
+        self.lk_title.set_label("")
+        back = self.lk_return
+        if back == "settings":
+            self.fill_settings()
+            self.stack.set_visible_child_name("settings")
+            return
+        self.show_themes()
+
+    def refresh_look_pending(self):
+        """Whether the theme in use has a font or window style not on the
+        desktop yet (its menu offers Reapply then); off the main loop."""
+        slug = theme_core.current_theme()
+
+        def done(keys, error):
+            self.look_pending = {slug: keys} if error is None and keys else {}
+        self._async(lambda: theme_looks.pending(slug), done)
+
+    def reapply_look(self, theme: theme_core.ThemeInfo):
+        def done(_applied, error):
+            if error is not None:
+                theme_core.notify(_("Could not reapply"), f"{theme_core.plain_text(theme.name)}: {error}")
+            else:
+                theme_core.notify(_("Reapplied: {0}").format(theme_core.plain_text(theme.name)), "")
+            self.refresh_look_pending()
+        self._async(lambda: theme_looks.apply_look(theme.slug), done)
+
     def open_shortcut_page(self, action: str):
         self.sc_return = self.stack.get_visible_child_name() or "themes"
         self.sc_action = action
@@ -2613,6 +2831,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.ed_return_page = None          # Ask AI's Use sets it after opening
         font = theme_custom.font_of(base) if edit else None
         self.ed = {"base": base, "edit": edit, "palette": palette, "edited": set(), "font": font,
+                   "windows": theme_custom.windows_of(base) if edit else None,
+                   "windows_ok": theme_looks.windows_supported(),
                    "entries": {}, "wallpapers": wallpaper is None, "fonts": theme_custom.list_fonts(),
                    "wallpaper": wallpaper, "system_font": theme_custom.current_font()}
         name = theme_core.plain_text(base.name)
@@ -2688,9 +2908,19 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         font_drop.set_tooltip_text(_("Omarchy's monospace font (terminals, bar, menus). It is switched when this "
                                    "theme is applied, and back to your own font with other themes."))
         self.settings_row(box, _("Font"), "", font_drop).add_css_class("tm-setting-compact")
+        if ed["windows_ok"]:
+            modes = [None, *theme_looks.WINDOW_MODES]
+            windows_drop = self.dropdown([_("Keep the current window style")] + [
+                _(self.WINDOW_LABELS[m]) for m in theme_looks.WINDOW_MODES],
+                modes.index(ed["windows"]) if ed["windows"] in modes else 0, self.set_editor_windows)
+            windows_drop.set_tooltip_text(_("Omarchy's window style. Glassy blurs what is behind see-through "
+                                            "windows, the bar and menus. It is switched when this theme is applied, "
+                                            "and back to your own with other themes."))
+            self.settings_row(box, _("Windows"), "", windows_drop).add_css_class("tm-setting-compact")
 
-        if not ed["edit"]:
+        if not ed["edit"] and not ed.get("from_ask"):
             # Which wallpapers the new theme gets: a compact row up here too.
+            # (An Ask AI theme: the card's picture, else its base's wallpapers, without a row.)
             count = sum(1 for w in theme_core.list_backgrounds(None, ed["base"]) if not w.hidden)
             base = theme_core.plain_text(ed["base"].name)
             if ed.get("ask_wallpaper") is not None and ed["wallpaper"] is None:
@@ -2922,6 +3152,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 entry.set_text(ed["palette"].get(other))
         self.update_editor_css()
 
+    def set_editor_windows(self, index: int):
+        if self.ed is not None:
+            modes = [None, *theme_looks.WINDOW_MODES]
+            self.ed["windows"] = modes[index] if 0 <= index < len(modes) else None
+            self.update_editor_css()
+
     def set_editor_font(self, index: int):
         if self.ed is not None:
             self.ed["font"] = self.ed["fonts"][index - 1] if index else None
@@ -2942,7 +3178,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                    " margin-bottom: 4px; }")
         css.append(f".tm-ed-desk label {{ {font} font-size: 11px; }}")
         css.append(f".tm-ed-desk .s-bar {{ background: alpha({c['background']}, 0.94); padding: 3px 10px; }}")
-        css.append(f".tm-ed-desk .s-win {{ background: alpha({c['background']}, 0.97);"
+        # glassy: the sample window lets the wallpaper show through, as on the desktop
+        see_through = 0.72 if ed.get("windows") == "glassy" else 0.97
+        css.append(f".tm-ed-desk .s-win {{ background: alpha({c['background']}, {see_through});"
                    f" border: 2px solid {c['accent']}; border-radius: 8px; margin: 8px 18px 10px 18px;"
                    " padding: 5px 10px; }")
         css.append(f".tm-ed-desk .s-text {{ color: {c['foreground']}; }}")
@@ -2972,6 +3210,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if self.ed_hint.get_label():
             return
         palette, font, base = ed["palette"], ed["font"], ed["base"]
+        windows = ed.get("windows")
         ask_wall = ed.get("ask_wallpaper")          # chosen on an Ask AI card
         self.ed_ask_downloaded = None
         if ed["edit"]:
@@ -2986,7 +3225,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             def work():
                 slug = theme_custom.rename_theme(base, name)
                 theme = next(t for t in theme_core.discover_themes() if t.slug == slug)
-                theme_custom.update_theme(theme, palette, font)
+                theme_custom.update_theme(theme, palette, font, windows)
                 self.ed_ask_downloaded = self.download_ask_wallpaper(slug, ask_wall)
                 if self.ed_ask_downloaded is not None:      # its preview shows that picture
                     theme_custom.make_preview(theme.path, palette, self.ed_ask_downloaded)
@@ -3003,7 +3242,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
             def work():
                 directory = theme_custom.create_theme(base, name, palette, font, wallpapers,
-                                                      extra_wallpapers=extra)
+                                                      extra_wallpapers=extra, windows=windows)
                 slug = directory.name
                 self.ed_ask_downloaded = self.download_ask_wallpaper(slug, ask_wall)
                 if self.ed_ask_downloaded is not None:      # its preview shows that picture
@@ -3118,7 +3357,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if error is None and themes:
                 theme_core.notify(_("Shortcut removed"), _("The key of {0} is free again.").format(", ".join(
                     theme_core.display_name(t) for t in themes)))
-        self._async(shortcuts.prune_missing, done)
+        self._async(lambda: (theme_looks.prune_missing(), shortcuts.prune_missing())[1], done)
 
     def undo_delete(self):
         receipts, self.undo_receipts = self.undo_receipts, []
@@ -3888,6 +4127,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
         if theme.current:
             item(_("Current theme"), lambda: None, "object-select-symbolic", sensitive=False)
+            # only while its font or window style isn't on the desktop (saved in Font & effects, or changed elsewhere)
+            pending = self.look_pending.get(theme.slug)
+            if pending:
+                item(_("Reapply"), lambda: self.reapply_look(theme), "view-refresh-symbolic",
+                     tooltip=_("Not on the desktop yet: {0}").format(self.look_field_names(pending)))
         else:
             item(_("Apply theme"), lambda: self.apply_theme_action(theme), "media-playback-start-symbolic")
         item(_("Wallpapers"), lambda: self.open_wallpapers_for(theme), "image-x-generic-symbolic",
@@ -3903,6 +4147,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if theme_custom.is_custom(theme):
             item(_("Edit theme…"), lambda: self.open_editor(theme, edit=True), "document-edit-symbolic",
                  tooltip=_("Name, colors and font"))
+        item(_("Font & effects…"), lambda: self.open_look_page(theme), "preferences-desktop-font-symbolic",
+             tooltip=_("Your own font and window style whenever this theme is applied"))
         key = shortcuts.load_state().get(shortcuts.APPLY + theme.slug)
         hidden = theme.slug in self.hidden
         label = _("Shortcut: {0}…").format(shortcuts.combo_label(key)) if key else _("Shortcut…")
@@ -4595,6 +4841,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if self.theme.reload():
             self.apply_theme_css()
         self.hidden = self.load_hidden_list()
+        self.refresh_look_pending()
         self.refresh_themes(keep=theme.slug)
         if self.stack.get_visible_child_name() == "import":
             self.fill_catalog(self.catalog, None)
@@ -4632,6 +4879,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if not slug or slug == getattr(self, "current_slug", None):
             return GLib.SOURCE_REMOVE
         self.current_slug = slug
+        self.refresh_look_pending()
         if self.theme.reload():
             self.apply_theme_css()
         self.hidden = self.load_hidden_list()
@@ -5260,6 +5508,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         back = keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_BackSpace)
         if page == "shortcut":
             return self.on_shortcut_key(_controller, keyval, _keycode, state)
+        if page == "look" and keyval in (Gdk.KEY_Escape, Gdk.KEY_BackSpace):
+            self.close_look_page()
+            return True
         if self.ws_app_list_open():
             # The app list of an App Preset: its search field gets the keys; Esc closes only the list.
             if keyval == Gdk.KEY_Escape:
@@ -5591,6 +5842,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if theme_core.sync_enabled():
             theme_core.prune_switcher_previews(self.hidden)
         self.refresh_themes()
+        self.refresh_look_pending()
         self.grab_keyboard()
         self.move_to(self.position)
         self.window.present()

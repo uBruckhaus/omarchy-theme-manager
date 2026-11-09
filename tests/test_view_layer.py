@@ -165,6 +165,14 @@ class ViewLayerTest(unittest.TestCase):
             self.font = font
             return True
         theme_custom.set_font = set_font
+        # Omarchy's window style: recorded, never the real command.
+        import theme_looks
+        self.looks = theme_looks
+        self._orig_looks = (theme_looks.windows_supported, theme_looks.current_windows, theme_looks.set_windows)
+        self.windows = "transparent"
+        theme_looks.windows_supported = lambda: True
+        theme_looks.current_windows = lambda: self.windows
+        theme_looks.set_windows = lambda mode: setattr(self, "windows", mode) or True
         # Keyboard shortcuts: a private ~/.config/hypr, no real hyprctl.
         import theme_shortcuts
         self.sc = theme_shortcuts
@@ -220,6 +228,7 @@ class ViewLayerTest(unittest.TestCase):
         (theme_core.show_background, theme_core.restore_background,
          self.auto.state_file, self.auto.active_workspace) = self._orig_extra
         (self.custom.list_fonts, self.custom.current_font, self.custom.set_font) = self._orig_fonts
+        (self.looks.windows_supported, self.looks.current_windows, self.looks.set_windows) = self._orig_looks
         for name, value in self._orig_sc.items():
             setattr(self.sc, name, value)
         self.tmp.cleanup()
@@ -732,6 +741,41 @@ class ViewLayerTest(unittest.TestCase):
             label = next(c for c in self.children(line) if isinstance(c, Gtk.Label))
             entries[label.get_label()] = button
         return entries
+
+    def test_font_and_effects_one_save_applies_the_theme_in_use_and_undo(self):
+        theme = self.make_theme("user", "alpha")
+        other = self.make_theme("user", "beta")
+        entries = self.menu_entries(theme)
+        self.assertIn("Font & effects…", entries)
+        self.assertNotIn("Reapply", entries)          # nothing pending
+        self.app.open_look_page(theme)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "look")
+        model = self.app.lk_font.get_model()
+        self.assertEqual([model.get_string(i) for i in range(model.get_n_items())],
+                         ["Theme default (yours: Mono A)", "Mono A", "Mono B"])
+        self.assertFalse(hasattr(self.app, "lk_reapply"))       # one button: Save (2026-11-09)
+        self.assertFalse(self.app.lk_save.get_sensitive())      # enabled once something changed
+        self.assertEqual(self.app.lk_save.get_label(), "Apply")
+        self.app.lk_font.set_selected(2)
+        self.app.lk_windows.set_selected(3)
+        self.assertTrue(self.app.lk_save.get_sensitive())
+        self.app.save_look()                           # the theme in use: stored and applied
+        self.assertEqual(self.looks.look_of("alpha"), {"mono_font": "Mono B", "windows": "glassy"})
+        self.assertEqual((self.font, self.windows), ("Mono B", "glassy"))
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.assertNotIn("Reapply", self.menu_entries(theme))
+        self.app.undo_delete()                         # the look as it was, applied again
+        self.assertEqual(self.looks.look_of("alpha"), {})
+        self.assertEqual((self.font, self.windows), ("Mono A", "transparent"))
+        self.app.open_look_page(other)                 # another theme: only stored
+        self.app.lk_windows.set_selected(1)
+        self.app.save_look()
+        self.assertEqual(self.looks.look_of("beta"), {"windows": "opaque"})
+        self.assertEqual(self.windows, "transparent")
+        self.looks.set_look("alpha", {"windows": "glassy"})    # changed elsewhere: the menu offers Reapply
+        self.app.refresh_look_pending()
+        self.menu_entries(theme)["Reapply"].emit("clicked")
+        self.assertEqual(self.windows, "glassy")
 
     def test_system_menu_item_disabled(self):
         theme = self.make_theme("system", "gamma")
@@ -1948,6 +1992,9 @@ class ViewLayerTest(unittest.TestCase):
         labels = [l.get_label() for b in buttons for l in self.descendants(b) if isinstance(l, gi.repository.Gtk.Label)]
         self.assertEqual([l for l in labels if l in ("Use", "Not this", "Refine…", "Wallpaper…")],
                          ["Use", "Not this", "Refine…", "Wallpaper…"])
+        texts = [l.get_label() for l in self.descendants(card) if isinstance(l, gi.repository.Gtk.Label)]
+        self.assertIn("New theme", texts)
+        self.assertFalse(any("Gamma" in t for t in texts))    # the base theme is internal (2026-11-09)
         asked = []
         with patch.object(self.app, "ask_now", side_effect=lambda *a, **k: asked.append(True)):
             self.app.ask_entry.grab_focus()
@@ -1959,6 +2006,11 @@ class ViewLayerTest(unittest.TestCase):
         self.assertEqual(self.app.ed["palette"].colors["red"], "#ff0000")
         self.assertIn("Blue Dog", self.app.ed_name.get_text())
         self.assertFalse(self.app.ed["edit"])             # a system theme is never changed: a copy
+        self.assertEqual(self.app.ed_title.get_label(), "Blue Dog")          # the card's name comes over
+        editor_texts = [l.get_label() for l in self.descendants(self.app.stack.get_child_by_name("editor"))
+                        if isinstance(l, gi.repository.Gtk.Label)]
+        self.assertFalse(any("Gamma" in t or "Take over its wallpapers" in t for t in editor_texts))
+        self.assertTrue(self.app.ed["wallpapers"])        # no card picture: its base's wallpapers, silently
         # Saving downloads the picture the card showed into the new theme.
         import wallpaper_search
         self.app.ed["ask_wallpaper"] = "ITEM"

@@ -59,6 +59,8 @@ class CustomTestCase(unittest.TestCase):
             self.font = font
             return True
         self.patch(theme_custom, "set_font", set_font)
+        import theme_looks
+        self.patch(theme_looks, "windows_supported", lambda: False)   # never Omarchy's real window style
 
     def patch(self, module, name, value):
         original = getattr(module, name)

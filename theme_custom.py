@@ -35,6 +35,8 @@ from i18n import _, N_
 MARKER = "theme-manager.json"
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,79}$")
+# Omarchy's window styles (`omarchy-hyprland-window-transparency`); glassy = blur behind see-through windows
+WINDOW_MODES = ("opaque", "transparent", "glassy")
 MAX_COLORS_BYTES = 64 * 1024
 MAX_WALLPAPERS = 60
 MAX_NAME = 40
@@ -389,6 +391,12 @@ def font_of(theme) -> str | None:
     return font if isinstance(font, str) and FONT_RE.match(font) else None
 
 
+def windows_of(theme) -> str | None:
+    """The window style a theme made with Theme Manager brings, if any."""
+    windows = (marker_of(theme) or {}).get("windows")
+    return windows if windows in WINDOW_MODES else None
+
+
 # --- fonts ----------------------------------------------------------------------------
 
 def list_fonts() -> list[str]:
@@ -421,31 +429,25 @@ def set_font(font: str) -> bool:
 
 def apply_theme_font(slug: str) -> str | None:
     """After a theme was applied: switch to its font, or back to the font
-    you had before a theme's font took over. Returns the font set, if any."""
-    theme = next((t for t in theme_core.discover_themes() if t.slug == slug), None)
-    wanted = font_of(theme) if theme is not None and is_custom(theme) else None
-    settings = theme_core._load_settings(theme_core.settings_file())
-    saved = settings.get("own_font")
-    saved = saved if isinstance(saved, str) and FONT_RE.match(saved) else None
-    current = current_font()
-    if wanted:
-        if saved is None and current and current != wanted:
-            theme_core._update_settings(theme_core.settings_file(), own_font=current)
-        if current != wanted and set_font(wanted):
-            return wanted
-        return None
-    if saved:
-        theme_core._update_settings(theme_core.settings_file(), own_font=None)
-        if current != saved and set_font(saved):
-            return saved
-    return None
+    you had before a theme's font took over. Returns the font set, if any.
+    (The font part of the theme's look, see theme_looks.)"""
+    import theme_looks   # (theme_looks imports this module)
+    return theme_looks.apply_font(slug)
 
 
 # --- create and edit -----------------------------------------------------------------------
 
-def _write_marker(directory: Path, base: str, font: str | None, created: float) -> None:
-    theme_core._atomic_write(directory / MARKER, json.dumps(
-        {"base": base, "font": font, "created": created}, indent=2) + "\n", mode=0o644)
+def _write_marker(directory: Path, base: str, font: str | None, created: float,
+                  windows: str | None = None) -> None:
+    marker = {"base": base, "font": font, "created": created}
+    if windows is not None:
+        marker["windows"] = windows
+    theme_core._atomic_write(directory / MARKER, json.dumps(marker, indent=2) + "\n", mode=0o644)
+
+
+def _check_windows(windows) -> None:
+    if windows is not None and windows not in WINDOW_MODES:
+        raise ValueError(_("bad window style"))
 
 
 def _copy_icons(base_dir: Path, directory: Path) -> None:
@@ -497,7 +499,7 @@ def _copy_wallpapers(base, directory: Path) -> int:
 
 def create_theme(base, name: str, palette: Palette, font: str | None,
                  wallpapers: bool = True, roots: theme_core.Roots | None = None,
-                 extra_wallpapers: list | None = None) -> Path:
+                 extra_wallpapers: list | None = None, windows: str | None = None) -> Path:
     """A new user theme made from `base` with these colors and font.
     `wallpapers` copies the base theme's visible wallpapers;
     `extra_wallpapers` are further image files to copy (e.g. the wallpaper
@@ -506,6 +508,7 @@ def create_theme(base, name: str, palette: Palette, font: str | None,
     slug = theme_core._validate_slug(slug_for(name))
     if font is not None and not FONT_RE.match(font):
         raise ValueError(_("bad font name"))
+    _check_windows(windows)
     if any(t.slug == slug for t in theme_core.discover_themes(roots)):
         raise FileExistsError(_("a theme called {0} already exists").format(theme_core.display_name(slug)))
     roots.user_themes.mkdir(parents=True, exist_ok=True)
@@ -519,7 +522,7 @@ def create_theme(base, name: str, palette: Palette, font: str | None,
             _copy_wallpapers(base, directory)
         for source in (extra_wallpapers or [])[:MAX_WALLPAPERS]:
             _copy_one(Path(source), directory)
-        _write_marker(directory, base.slug, font, time.time())
+        _write_marker(directory, base.slug, font, time.time(), windows)
         make_preview(directory, palette)
     except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
@@ -527,19 +530,20 @@ def create_theme(base, name: str, palette: Palette, font: str | None,
     return directory
 
 
-def update_theme(theme, palette: Palette, font: str | None) -> None:
-    """Save new colors and font into a custom theme made by Theme Manager."""
+def update_theme(theme, palette: Palette, font: str | None, windows: str | None = None) -> None:
+    """Save new colors, font and window style into a custom theme made by Theme Manager."""
     marker = marker_of(theme)
     if marker is None or theme_core.theme_from_git(Path(theme.path)):
         raise PermissionError(_("only themes made with Theme Manager can be edited here"))
     if font is not None and not FONT_RE.match(font):
         raise ValueError(_("bad font name"))
+    _check_windows(windows)
     directory = Path(theme.path)
     base = marker.get("base") if isinstance(marker.get("base"), str) else "?"
     theme_core._atomic_write(directory / "colors.toml",
                              render_colors(palette, theme.name, theme_core.display_name(base)), mode=0o644)
     created = marker.get("created") if isinstance(marker.get("created"), (int, float)) else time.time()
-    _write_marker(directory, base, font, created)
+    _write_marker(directory, base, font, created, windows)
     make_preview(directory, palette)
 
 
@@ -576,6 +580,8 @@ def rename_theme(theme, new_name: str, roots: theme_core.Roots | None = None) ->
     theme_auto.rename_state(old, new)
     import theme_presets
     theme_presets.rename_theme(old, new)
+    import theme_looks
+    theme_looks.rename(old, new)
     try:
         import theme_shortcuts
         theme_shortcuts.rename_theme(old, new)

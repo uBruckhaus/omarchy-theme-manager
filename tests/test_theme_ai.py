@@ -226,14 +226,28 @@ class AskAiTests(unittest.TestCase):
         _s, cands = theme_ai.verify({"candidates": [{"kind": "new", "base": "nord", "name": "X"}]},
                                     THEMES, CATALOG, FONTS)
         sent = theme_ai.for_refine(cands[0])
-        self.assertEqual(set(sent), {"kind", "base", "name", "font", "wallpaper_query", "wallpaper_query_by_user",
-                                     "catalog_slug", "palette"})
+        self.assertEqual(set(sent), {"kind", "base", "name", "font", "windows", "wallpaper_query",
+                                     "wallpaper_query_by_user", "catalog_slug", "palette"})
         self.assertFalse(sent["wallpaper_query_by_user"])
         cands[0]["query"], cands[0]["query_by_user"] = "cute girl portrait", True
         sent = theme_ai.for_refine(cands[0])
         self.assertEqual((sent["wallpaper_query"], sent["wallpaper_query_by_user"]), ("cute girl portrait", True))
         prompt = theme_ai.build_prompt("another picture", [], [], [], sent)
         self.assertIn("wallpaper_query_by_user is true", prompt)
+
+
+    def test_window_style_is_checked_and_kept_on_refine(self):
+        """"An icy frosted-glass look" came back without any blur (2026-11-09)."""
+        self.assertIn('"glassy"', theme_ai.build_prompt("frosted glass", [], [], []))
+        _s, cands = theme_ai.verify({"candidates": [
+            {"kind": "new", "base": "nord", "name": "Ice", "windows": "glassy"},
+            {"kind": "new", "base": "nord", "name": "Bad", "windows": "rm -rf", "palette": {"red": "#110000"}},
+            {"kind": "catalog", "catalog_slug": CATALOG[0].slug, "windows": "glassy"}]}, THEMES, CATALOG, FONTS)
+        self.assertEqual([c["windows"] for c in cands], ["glassy", None, None])
+        self.assertEqual(theme_ai.for_refine(cands[0])["windows"], "glassy")
+        _s, refined = theme_ai.verify({"candidates": [{"kind": "new", "base": "nord", "palette": {"red": "#220000"}}]},
+                                      THEMES, CATALOG, FONTS, cands[0], limit=1)
+        self.assertEqual(refined[0]["windows"], "glassy")           # null keeps the card's window style
 
 
 class RefineTests(unittest.TestCase):
