@@ -244,6 +244,19 @@ class RaceTests(LooksTestCase):
         worker.join()
         self.assertEqual(order, ["look start", "look end", "restore"])
 
+    def test_a_presets_font_never_overwrites_your_own(self):
+        """Codex round 3: a preset with a custom theme's font replaced own_font."""
+        theme_looks.set_look("tokyo-night", {"mono_font": "Mono B"})
+        self.apply("tokyo-night")                         # yours (Mono A) is kept
+        self.assertEqual(self.settings()["own_font"], "Mono A")
+        self.assertTrue(theme_looks.apply_font_override("Mono C"))   # a preset's font
+        self.assertEqual((self.font, self.settings()["own_font"]), ("Mono C", "Mono A"))
+        self.assertTrue(theme_looks.apply_font_override("Mono C"))   # already on: nothing changes
+        self.apply("ristretto")                           # a theme without a font: yours again
+        self.assertEqual(self.font, "Mono A")
+        self.assertTrue(theme_looks.apply_font_override("Mono B"))   # no own font kept yet: keep it now
+        self.assertEqual(self.settings()["own_font"], "Mono A")
+
     def test_concurrent_saves_lose_nothing(self):
         import threading
         slugs = [f"theme-{i}" for i in range(12)]

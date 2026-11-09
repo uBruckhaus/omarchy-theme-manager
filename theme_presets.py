@@ -172,10 +172,10 @@ def apply(preset: dict) -> list[str]:
         else:
             theme_auto.remember_base_wallpaper(theme.slug, wallpaper)
     if preset["font"]:
-        if theme_custom.current_font() != preset["font"] and not theme_custom.set_font(preset["font"]):
+        # Your own font is kept to come back (never overwritten by the preset's).
+        import theme_looks
+        if not theme_looks.apply_font_override(preset["font"]):
             warnings.append("font unavailable")
-        elif theme_custom.is_custom(theme):
-            theme_core._update_settings(theme_core.settings_file(), own_font=preset["font"])
     if "workspaces" in preset:
         warnings += apply_workspaces(preset["workspaces"])
     return warnings
