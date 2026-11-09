@@ -244,26 +244,6 @@ class RaceTests(LooksTestCase):
         worker.join()
         self.assertEqual(order, ["look start", "look end", "restore"])
 
-    def test_a_presets_font_never_overwrites_your_own(self):
-        """Codex round 3: a preset with a custom theme's font replaced own_font."""
-        theme_looks.set_look("tokyo-night", {"mono_font": "Mono B"})
-        self.apply("tokyo-night")                         # yours (Mono A) is kept
-        self.assertEqual(self.settings()["own_font"], "Mono A")
-        self.assertTrue(theme_looks.apply_font_override("Mono C", "tokyo-night"))   # a preset's font
-        self.assertEqual((self.font, self.settings()["own_font"]), ("Mono C", "Mono A"))
-        self.assertTrue(theme_looks.apply_font_override("Mono C", "tokyo-night"))   # already on: nothing changes
-        self.apply("ristretto")                           # a theme without a font: yours again
-        self.assertEqual(self.font, "Mono A")
-        self.assertTrue(theme_looks.apply_font_override("Mono B", "ristretto"))   # no own font kept yet: keep it now
-        self.assertEqual(self.settings()["own_font"], "Mono A")
-
-    def test_a_presets_font_is_not_set_after_a_switch(self):
-        """Codex round 4: another theme came in during the preset's wallpaper step."""
-        self.use("ristretto")
-        self.assertFalse(theme_looks.apply_font_override("Mono C", "tokyo-night"))
-        self.assertEqual((self.font, self.fonts_set), ("Mono A", []))
-        self.assertNotIn("own_font", self.settings())
-
     def test_many_switches_while_commands_run_end_on_the_last_theme(self):
         """Codex round 4: more than three switches during one apply."""
         slugs = [f"t{i}" for i in range(6)]
@@ -284,6 +264,19 @@ class RaceTests(LooksTestCase):
         self.use("t0")
         theme_looks.apply_look("t0")
         self.assertEqual((self.font, self.windows), ("Mono C", "transparent"))   # t5's look, the last one
+
+    def test_a_preset_sets_no_font(self):
+        """Uwe 2026-11-09 (after Codex rounds 3-5 on the preset font): an older preset's saved font is ignored."""
+        import theme_auto
+        import theme_presets
+        self.patch(theme_core, "apply_theme", lambda slug, **kw: self.use(slug) or True)
+        self.patch(theme_auto, "record_recent", lambda slug: None)
+        self.patch(theme_auto, "remember_base_theme", lambda slug: None)
+        theme_looks.set_look("tokyo-night", {"windows": "glassy"})
+        warnings = theme_presets.apply({"name": "Old", "theme": "tokyo-night", "wallpaper": None, "font": "Mono C"})
+        self.assertEqual(warnings, [])
+        self.assertEqual((self.font, self.windows), ("Mono A", "glassy"))   # the theme's look, no preset font
+        self.assertNotIn("Mono C", self.fonts_set)
 
     def test_concurrent_saves_lose_nothing(self):
         import threading

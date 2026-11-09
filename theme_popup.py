@@ -535,7 +535,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         info_button.add_css_class("tm-header-btn")
         info_button.connect("clicked", lambda *_: self.open_info())
         presets_button = Gtk.Button(icon_name="bookmark-new-symbolic")
-        presets_button.set_tooltip_text(_("Presets: saved theme, wallpaper and font"))
+        presets_button.set_tooltip_text(_("Presets: saved theme and wallpaper"))
         presets_button.add_css_class("flat")
         presets_button.add_css_class("tm-header-btn")
         presets_button.connect("clicked", lambda *_: self.open_presets())
@@ -567,7 +567,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.header_tooltips = {
             "import": _("Import themes from omarchy.org (Ctrl+I)"),
             "hidden": _("Show hidden themes and wallpapers"),
-            "presets": _("Presets: saved theme, wallpaper and font"),
+            "presets": _("Presets: saved theme and wallpaper"),
             "info": _("Information"),
             "ask": _("Ask AI: find or make a theme"),
         }
@@ -1453,7 +1453,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         inner.add_named(themes_tab, 'themes')
         inner.add_named(self.build_ws_tab('workspaces'), 'workspaces')
         inner.add_named(self.build_ws_tab('apps'), 'apps')
-        hint = Gtk.Label(label=_('Save the current theme, wallpaper and font for later.'),
+        hint = Gtk.Label(label=_('Save the current theme and wallpaper for later.'),
                          xalign=0, wrap=True)
         hint.add_css_class('tm-hint')
         themes_tab.append(hint)
@@ -1575,8 +1575,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             theme = themes.get(preset['theme'])
             wallpaper = theme_auto.wallpaper_named(theme, preset['wallpaper']) if theme and preset['wallpaper'] else None
             parts = [theme_core.plain_text(theme.name, 60) if theme else _('Theme missing'),
-                     preset['wallpaper'] if wallpaper else _('Wallpaper missing') if preset['wallpaper'] else _('No wallpaper'),
-                     preset['font'] or _('No font')]
+                     preset['wallpaper'] if wallpaper else _('Wallpaper missing') if preset['wallpaper'] else _('No wallpaper')]
             summary = Gtk.Label(label=' · '.join(parts), xalign=0, ellipsize=Pango.EllipsizeMode.END)
             summary.add_css_class('tm-hint')
             detail.append(summary)

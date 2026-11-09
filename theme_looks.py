@@ -214,24 +214,6 @@ def _apply_field(key: str, wanted) -> bool:
     return current != own
 
 
-def apply_font_override(font: str, slug: str) -> bool:
-    """A font from outside a theme (a preset for theme `slug`), through the
-    same chain: your own font is kept to come back later (only when none is
-    kept yet, never overwritten). Only while `slug` is still the theme in use
-    (checked under the lock): after a switch meanwhile, nothing changes.
-    True when `font` is on the desktop afterwards."""
-    with _locked():
-        if theme_core.current_theme() != slug:
-            return False
-        current = theme_custom.current_font()
-        if current == font:
-            return True
-        own = _own(theme_core._load_settings(theme_core.settings_file()), "mono_font")
-        if own is None and current is not None:
-            theme_core._update_settings(theme_core.settings_file(), own_font=current)
-        return theme_custom.set_font(font)
-
-
 def apply_look(slug: str) -> list[str]:
     """After a theme was applied (or for Reapply): its font and window
     style, and your own values back for fields it leaves alone. Returns the

@@ -1,4 +1,8 @@
-"""Named theme, wallpaper and font snapshots for Theme Manager."""
+"""Named theme and wallpaper snapshots for Theme Manager.
+
+A preset sets no font (2.1.4): the theme brings its own through Font &
+effects (theme_looks). An older preset's saved font is kept in the file,
+so old presets and backups stay valid, but it is never applied."""
 from __future__ import annotations
 
 import json
@@ -105,7 +109,7 @@ def save(presets: list[dict], path: Path | None = None) -> None:
     theme_core._atomic_write(path, text, mode=0o600)
 
 
-def capture_current(name: str, include_font: bool = True, include_workspaces: bool = False) -> dict:
+def capture_current(name: str, include_workspaces: bool = False) -> dict:
     """include_workspaces: also the workspace presets and App Presets."""
     name = clean_name(name)
     slug = theme_core.current_theme()
@@ -114,17 +118,15 @@ def capture_current(name: str, include_font: bool = True, include_workspaces: bo
         raise FileNotFoundError("current theme is unavailable")
     background = theme_auto.current_background()
     wallpaper = background.name if background is not None and theme_auto.wallpaper_named(theme, background.name) else None
-    font = theme_custom.current_font() if include_font else None
-    preset = {"name": name, "theme": slug, "wallpaper": wallpaper, "font": font}
+    preset = {"name": name, "theme": slug, "wallpaper": wallpaper, "font": None}
     if include_workspaces:
         preset["workspaces"] = workspace_tiling.snapshot()
     return preset
 
 
-def add_current(name: str, include_font: bool = True, path: Path | None = None,
-                include_workspaces: bool = False) -> dict:
+def add_current(name: str, path: Path | None = None, include_workspaces: bool = False) -> dict:
     presets = load(path)
-    preset = capture_current(name, include_font, include_workspaces)
+    preset = capture_current(name, include_workspaces)
     if any(item["name"].casefold() == preset["name"].casefold() for item in presets):
         raise ValueError("a preset with this name already exists")
     presets.append(preset)
@@ -132,10 +134,9 @@ def add_current(name: str, include_font: bool = True, path: Path | None = None,
     return preset
 
 
-def replace_current(name: str, include_font: bool = True, path: Path | None = None,
-                    include_workspaces: bool = False) -> dict:
+def replace_current(name: str, path: Path | None = None, include_workspaces: bool = False) -> dict:
     presets = load(path)
-    preset = capture_current(name, include_font, include_workspaces)
+    preset = capture_current(name, include_workspaces)
     for index, item in enumerate(presets):
         if item["name"].casefold() == preset["name"].casefold():
             presets[index] = preset
@@ -154,7 +155,7 @@ def delete(name: str, path: Path | None = None) -> bool:
 
 
 def apply(preset: dict) -> list[str]:
-    """Apply the theme first, then the saved wallpaper and font if available,
+    """Apply the theme first (with its own look), then the saved wallpaper if available,
     then the Workspace Presets layouts and app presets saved with it."""
     preset = _valid(preset)
     if preset is None:
@@ -171,11 +172,6 @@ def apply(preset: dict) -> list[str]:
             warnings.append("wallpaper unavailable")
         else:
             theme_auto.remember_base_wallpaper(theme.slug, wallpaper)
-    if preset["font"]:
-        # Your own font is kept to come back (never overwritten by the preset's).
-        import theme_looks
-        if not theme_looks.apply_font_override(preset["font"], theme.slug):
-            warnings.append("font unavailable")      # (or another theme came in meanwhile: its own font stays)
     if "workspaces" in preset:
         warnings += apply_workspaces(preset["workspaces"])
     return warnings
