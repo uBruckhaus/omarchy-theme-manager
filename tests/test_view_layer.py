@@ -2458,7 +2458,7 @@ class ViewLayerTest(unittest.TestCase):
                 text = css["text"]
                 self.assertIn(f"border: 1px solid {self.app.theme.colors.get('accent', '#89b4fa')}; "
                               f"border-radius: {card}px; padding: 17px;", " ".join(text.split()))
-                self.assertIn(f"entry, spinbutton {{ border-radius: {control}px; }}", text)
+                self.assertIn(f"entry, entry.search, spinbutton {{ border-radius: {control}px; }}", text)
                 self.assertIn(f"checkbutton check {{ border-radius: {small}px; }}", text)
                 self.assertIn("scale slider { min-width: 14px; min-height: 14px; margin: -6px;", text)
                 self.assertEqual("*:not(.tm-ask-dot) { border-radius: 0; }" in text, choice == "square")

@@ -2711,6 +2711,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if not theme_core.sync_enabled():
             self.set_omarchy_sync(True)
         self.apply_theme_css()
+        self.redraw_pictures(self.window)       # the drawn pictures follow Corners too
         if i18n.language_setting() != "auto":
             self.set_language("auto")
             return
@@ -3733,7 +3734,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         /* Every other control follows the same Corners setting: GTK's own buttons, drop-downs,
            fields, pop-ups and their rows, check boxes, sliders, progress bars and tooltips. Plain
            selectors, so the rules above (more specific) still win. */
-        button, dropdown > button, menubutton > button, entry, spinbutton {{ border-radius: {control}px; }}
+        button, dropdown > button, menubutton > button, entry, entry.search, spinbutton {{ border-radius: {control}px; }}
         popover > contents {{ border-radius: {radius}px; }}
         popover modelbutton, popover listview > row, popover list > row, dropdown popover row {{
             border-radius: {small}px; }}
