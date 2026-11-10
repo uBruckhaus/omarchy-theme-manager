@@ -257,6 +257,14 @@ class WebToolTests(unittest.TestCase):
         self.assertFalse(theme_ai.searches_web("claude", {"ask_ai_web": False}))
         self.assertFalse(theme_ai.searches_web("codex", {"ask_ai_web": True}))
 
+    def test_a_stop_ends_only_helpers_started_before_it(self):
+        import theme_ai
+        first = theme_ai._new_run()
+        theme_ai.cancel()
+        second = theme_ai._new_run()                      # a new Ask right after Stop
+        self.assertTrue(theme_ai._is_cancelled(first))    # the old one still ends
+        self.assertFalse(theme_ai._is_cancelled(second))
+
     def test_web_search_is_stored_as_on_and_a_choice_stays(self):
         import theme_auto
         with tempfile.TemporaryDirectory() as tmp, \

@@ -945,12 +945,27 @@ def stop(process):
     process.wait()
 
 
-_CANCEL = threading.Event()       # Stop: the running helper ends at its next check
+# Stop: every helper started so far ends at its next check; one started
+# after the Stop is not affected (each run has its own number).
+_RUNS = {"started": 0, "cancelled": 0}
+_RUNS_LOCK = threading.Lock()
 
 
 def cancel() -> None:
-    """Stop the helper that is answering now (its whole process group)."""
-    _CANCEL.set()
+    """Stop the helpers answering now (each its whole process group)."""
+    with _RUNS_LOCK:
+        _RUNS["cancelled"] = _RUNS["started"]
+
+
+def _new_run() -> int:
+    with _RUNS_LOCK:
+        _RUNS["started"] += 1
+        return _RUNS["started"]
+
+
+def _is_cancelled(run_id: int) -> bool:
+    with _RUNS_LOCK:
+        return run_id <= _RUNS["cancelled"]
 
 
 def run(helper_id: str, prompt: str, timeout: int = TIMEOUT, web: bool = False) -> str:
@@ -960,7 +975,7 @@ def run(helper_id: str, prompt: str, timeout: int = TIMEOUT, web: bool = False) 
     helper = HELPERS.get(base)
     if helper is None:
         raise RuntimeError("unknown helper")
-    _CANCEL.clear()
+    run_id = _new_run()
     extra = []
     local = local_model(helper_id)
     if base == "pi" and helper_id != "pi" and local is None:
@@ -1036,7 +1051,7 @@ def _run_helper(helper: dict, argv_extra: list, prompt: str, timeout: int, web: 
                                        preexec_fn=_limit_files)
             waited = 0.0
             while process.poll() is None:
-                if _CANCEL.is_set():
+                if _is_cancelled(run_id):
                     stop(process)
                     raise RuntimeError("cancelled")
                 if waited >= timeout:

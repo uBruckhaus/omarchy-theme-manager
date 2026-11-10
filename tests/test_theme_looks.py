@@ -438,8 +438,16 @@ class TextColourTests(LooksTestCase):
         data = theme_looks.look_data("tokyo-night")
         self.assertEqual(data["own"]["text_color"], "#e6d9db")
         self.assertEqual(data["colors"]["background"], "#2c2525")
+        # Only the span the foreground token rendered, as a whole value; another
+        # token with the same colour stays.
+        self.assertEqual(theme_looks._swap("rgb = 30,30,46 30,30,46", "rgb = {{ foreground_rgb }} {{ x }}",
+                                           "#1e1e2e", "#ffffff"), "rgb = 255,255,255 30,30,46")
         self.assertEqual(theme_looks._swap("rgb = 130,30,46 30,30,46", "rgb = {{ foreground_rgb }} {{ x }}",
-                                           "#1e1e2e", "#ffffff"), "rgb = 130,30,46 255,255,255")
+                                           "#1e1e2e", "#ffffff"), "rgb = 130,30,46 30,30,46")
+        self.assertEqual(theme_looks._swap("a #1E1E2E b #1e1e2e;", "a {{ background }} b {{ foreground }};",
+                                           "#1e1e2e", "#ffffff"), "a #1E1E2E b #ffffff;")
+        self.assertEqual(theme_looks._swap("1e1e2e1e1e2e", "{{ foreground_strip }}{{ background_strip }}",
+                                           "#1e1e2e", "#ffffff"), "1e1e2e1e1e2e")      # can't tell apart: unchanged
         self.assertLess(theme_looks.contrast_ratio("#2a2a3a", "#1e1e2e"), theme_looks.MIN_CONTRAST)
         self.assertAlmostEqual(theme_looks.contrast_ratio("#ffffff", "#000000"), 21.0)
 

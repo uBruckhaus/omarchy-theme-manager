@@ -437,19 +437,34 @@ def _forms(color: str) -> dict:
 
 
 def _swap(line: str, template_line: str, old: str, new: str) -> str:
-    """The rendered line with the old colour's forms its foreground tokens
-    produce turned into the new one's, between the line's fixed start and end."""
+    """The rendered line with each value a foreground token produced turned
+    from the old colour into the new one; only those spans, so another token
+    that rendered the same colour stays. A line whose token values cannot be
+    told apart (two tokens with nothing between them) stays as it is."""
     parts = _literal_parts(template_line)
-    start, end = len(parts[0]), len(line) - len(parts[-1])
-    middle = line[start:end]
+    tokens = ANY_TOKEN.findall(template_line)
     before, after = _forms(old), _forms(new)
-    for match in FOREGROUND_TOKEN.finditer(template_line):
-        kind = match.group(1)
-        flags = re.IGNORECASE
-        # Whole values only: "30,30,46" never inside "130,30,46".
-        pattern = r"(?<![0-9A-Fa-f])" + re.escape(before[kind]) + r"(?![0-9A-Fa-f])"
-        middle = re.sub(pattern, lambda _m, value=after[kind]: value, middle, flags=flags)
-    return line[:start] + middle + line[end:]
+    at, end = len(parts[0]), len(line) - len(parts[-1])
+    out = [line[:at]]
+    for index, token in enumerate(tokens):
+        literal = parts[index + 1]
+        last = index == len(tokens) - 1
+        if last:
+            stop = end
+        elif not literal:
+            return line
+        else:
+            stop = line.find(literal, at, end)
+            if stop < 0:
+                return line
+        value = line[at:stop]
+        match = FOREGROUND_TOKEN.fullmatch(token)
+        if match is not None and value.lower() == before[match.group(1)].lower():
+            value = after[match.group(1)]
+        out.append(value)
+        out.append(literal if not last else line[end:])
+        at = stop + len(literal) if not last else len(line)
+    return "".join(out)
 
 
 def rewrite_generated(folder: Path, old: str, new: str) -> list[str]:
