@@ -756,6 +756,18 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         # search phrases, and a helper with web tools also finds pictures on the web.
         self.web_ai_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         ai_row = Gtk.Box(spacing=6)
+        # Which helper asks (the same choice as on the Ask AI page, remembered).
+        self.web_helper_drop = Gtk.DropDown.new_from_strings([])
+        self.web_helper_drop.add_css_class("tm-helper")
+        self.web_helper_drop.set_valign(Gtk.Align.CENTER)
+        self.web_helper_drop.set_factory(ask_page.helper_name_factory(ellipsize=True))
+        self.web_helper_drop.set_list_factory(ask_page.helper_name_factory(ellipsize=False))
+        self.web_helper_drop.set_tooltip_text(_("Helper:"))
+        self.web_helper_drop.update_property([Gtk.AccessibleProperty.LABEL], [_("Helper:")])
+        self.web_helper_drop.connect("notify::selected", lambda *_: self.web_helper_changed())
+        self.web_ai_ready = []
+        self.web_helper_filling = False
+        ai_row.append(self.web_helper_drop)
         self.web_ai_entry = Gtk.Entry(hexpand=True,
                                       placeholder_text=_("Ask AI, e.g. “calm and wintry, fits this theme”"))
         self.web_ai_entry.set_max_length(theme_ai.MAX_REQUEST)
@@ -3809,7 +3821,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-line dropdown > button {{ min-height: 0; padding: 2px 8px; border: 1px solid alpha({fg_hex}, 0.35);
             border-radius: {control}px; background: transparent; }}
         .tm-line dropdown label {{ font-size: 11px; }}
-        dropdown.tm-count > button {{ min-height: 0; padding: 4px 8px; border: 1px solid alpha({fg_hex}, 0.35);
+        dropdown.tm-count > button, dropdown.tm-helper > button {{ min-height: 0; padding: 4px 8px; border: 1px solid alpha({fg_hex}, 0.35);
             border-radius: {control}px; background: transparent; }}
         .tm-line switch {{ min-height: 16px; min-width: 36px; }}
         .tm-line switch slider {{ min-width: 14px; min-height: 14px; margin: 1px; }}
@@ -4704,13 +4716,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if not self.web_query:
             self.web_hint.set_label(self.web_hint_text())
         helper = self.wallpaper_ai_helper()
-        self.web_ai_helper = helper
-        self.web_ai_web = helper is not None and theme_ai.searches_web(helper["id"], theme_auto.settings())
+        self.fill_web_helpers(helper)
+        self.use_web_helper(helper)
         self.web_ai_box.set_visible(helper is not None)
-        if helper is not None:
-            self.web_ai_button.set_tooltip_text(
-                _("Ask {0} for search words: it gets your words and this theme's name and colors; the search "
-                  "itself uses no tokens").format(helper["name"]))
         # One selector: in the Ask AI row with Ask AI, else next to the search field.
         place = self.web_ai_row if helper is not None else self.web_search_row
         if self.web_count_drop.get_parent() is not place:
@@ -4730,6 +4738,42 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         ready = theme_ai.ready_helpers()
         chosen = settings.get("ask_ai_helper")
         return next((h for h in ready if h["id"] == chosen), ready[0] if ready else None)
+
+    def fill_web_helpers(self, helper):
+        """The ready helpers in the drop-down, `helper` selected."""
+        settings = theme_auto.settings()
+        self.web_ai_ready = theme_ai.ready_helpers() if ask_page.enabled(settings) else []
+        names = [h["name"] + (" · " + _("on this PC") if h.get("local") else "") for h in self.web_ai_ready]
+        ids = [h["id"] for h in self.web_ai_ready]
+        self.web_helper_filling = True                # filling is no choice of yours
+        try:
+            self.web_helper_drop.set_model(Gtk.StringList.new(names))
+            if helper is not None and helper["id"] in ids:
+                self.web_helper_drop.set_selected(ids.index(helper["id"]))
+        finally:
+            self.web_helper_filling = False
+
+    def use_web_helper(self, helper):
+        self.web_ai_helper = helper
+        self.web_ai_web = helper is not None and theme_ai.searches_web(helper["id"], theme_auto.settings())
+        if helper is not None:
+            self.web_ai_button.set_tooltip_text(
+                _("Ask {0} for search words: it gets your words and this theme's name and colors; the search "
+                  "itself uses no tokens").format(helper["name"]))
+        self.update_web_next()
+
+    def web_helper_changed(self):
+        """Another helper chosen: it asks from now on (an answer on its way
+        stays), and the Ask AI page uses it too."""
+        if self.web_helper_filling:
+            return
+        index = self.web_helper_drop.get_selected()
+        if not 0 <= index < len(self.web_ai_ready):
+            return
+        helper = self.web_ai_ready[index]
+        self.use_web_helper(helper)
+        if theme_auto.settings().get("ask_ai_helper") != helper["id"]:
+            self.save_setting(ask_ai_helper=helper["id"])
 
     def web_ai_face(self, busy: bool):
         """Ask, or Stop while the helper thinks (as the Ask AI page's button)."""

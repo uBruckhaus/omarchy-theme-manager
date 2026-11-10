@@ -2851,6 +2851,25 @@ class StaleWebAskTests(unittest.TestCase):
         theme_popup.ThemeManager.close_web_search(app)
         self.assertEqual(calls[0], "drop")
 
+    def test_the_wallpaper_helper_choice_is_the_ask_pages_choice(self):
+        from types import SimpleNamespace
+        saved, used = [], []
+        ready = [{"id": "claude", "name": "Claude Code"}, {"id": "codex", "name": "Codex"}]
+        drop = Gtk.DropDown.new_from_strings([])
+        app = SimpleNamespace(web_helper_drop=drop, web_helper_filling=False, web_ai_ready=[],
+                              save_setting=lambda **kw: saved.append(kw), use_web_helper=used.append)
+        app.web_helper_changed = lambda: theme_popup.ThemeManager.web_helper_changed(app)
+        drop.connect("notify::selected", lambda *_: app.web_helper_changed())
+        with patch.object(theme_popup.theme_ai, "ready_helpers", return_value=ready), \
+                patch.object(theme_popup.ask_page, "enabled", return_value=True), \
+                patch.object(theme_popup.theme_auto, "settings", return_value={"ask_ai_helper": "codex"}):
+            theme_popup.ThemeManager.fill_web_helpers(app, ready[1])
+            self.assertEqual(drop.get_selected(), 1)
+            self.assertEqual(saved, [])                       # filling is no choice
+            drop.set_selected(0)
+        self.assertEqual(saved, [{"ask_ai_helper": "claude"}])
+        self.assertEqual(used, [ready[0]])
+
     def test_an_answer_after_a_new_search_is_stale(self):
         app, _calls = self.fake()
         with patch.object(theme_popup.theme_ai, "cancel"):
