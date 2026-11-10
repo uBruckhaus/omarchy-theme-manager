@@ -29,6 +29,30 @@ class CornersTests(unittest.TestCase):
         self.assertEqual(corners.radius("rounded", 0), corners.ROUNDED)
         self.assertEqual(corners.radius("square", 8), 0)
         self.assertEqual(corners.radius("bogus", 6), 6)  # Unknown values read as the default.
+        self.assertEqual(corners.radius("slight", 0), corners.SLIGHT)
+        self.assertEqual(corners.radius("slight", 20), 6)
+        self.assertEqual(corners.CHOICES, ("windows", "slight", "rounded", "square"))
+
+    def test_control_sizes_follow_one_radius(self):
+        """Cards = radius, buttons and fields at most 8, check boxes and badges at most 4,
+        pills square with Square corners (as in AI Playground)."""
+        for radius, control, small, pill in ((0, 0, 0, 0), (2, 2, 2, 999), (6, 6, 4, 999), (12, 8, 4, 999),
+                                             (24, 8, 4, 999)):
+            self.assertEqual((corners.control(radius), corners.small(radius), corners.pill(radius)),
+                             (control, small, pill), radius)
+
+    def test_rounded_path_is_a_plain_rectangle_when_square(self):
+        calls = []
+
+        class Recorder:
+            def __getattr__(self, name):
+                return lambda *args: calls.append((name, args))
+        corners.rounded_path(Recorder(), 1, 2, 30, 20, 0)
+        self.assertEqual(calls, [("rectangle", (1, 2, 30, 20))])
+        calls.clear()
+        corners.rounded_path(Recorder(), 0, 0, 10, 4, 12)         # never more than half the side
+        self.assertEqual([c[0] for c in calls].count("arc"), 4)
+        self.assertTrue(all(c[1][2] == 2 for c in calls if c[0] == "arc"))
 
     def write(self, name, text):
         path = self.dir / name

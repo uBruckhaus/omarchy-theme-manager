@@ -2419,6 +2419,52 @@ class ViewLayerTest(unittest.TestCase):
                      "Apply Gamma"):
             self.assertIn(text, labels)
 
+    def test_f12_alone_takes_a_screenshot_also_with_the_note_closed_only(self):
+        queued = []
+        with patch.object(theme_popup.GLib, "idle_add", side_effect=lambda fn, *a: queued.append(fn)):
+            self.assertTrue(self.app.on_key(None, Gdk.KEY_F12, 0, 0))
+            for mod in (Gdk.ModifierType.SHIFT_MASK, Gdk.ModifierType.CONTROL_MASK,
+                        Gdk.ModifierType.ALT_MASK, Gdk.ModifierType.SUPER_MASK):
+                self.app.on_key(None, Gdk.KEY_F12, 0, mod)
+            self.assertEqual(queued, [self.app.take_screenshot])          # F12 alone, once
+            self.app.shot_dialog.set_visible(True)                        # the last note is open
+            self.assertFalse(self.app.on_key(None, Gdk.KEY_F12, 0, 0))
+            self.app.shot_dialog.set_visible(False)
+            self.app.save_setting(screenshot_key=False)
+            self.assertFalse(self.app.on_key(None, Gdk.KEY_F12, 0, 0))
+        self.assertEqual(len(queued), 1)
+
+    def test_closing_keeps_a_typed_screenshot_note(self):
+        picture = Path(self.tmp.name) / "theme-manager-2026-11-10-10-00-00.png"
+        picture.write_bytes(PNG)
+        self.app.show_screenshot_note(picture)
+        self.app.shot_note_entry.set_text("the badge is cut off")
+        self.app.close()
+        self.assertEqual(picture.with_suffix(".txt").read_text(), "the badge is cut off\n")
+        self.assertFalse(self.app.shot_dialog_open())
+
+    def test_corners_choices_and_every_control_in_the_css(self):
+        import corners
+        self.assertEqual(len(self.app.corner_labels()), len(corners.CHOICES))
+        self.assertEqual(self.app.corner_labels()[1], "Slightly rounded (6 px)")
+        css = {}
+        real = theme_popup.Gtk.CssProvider.load_from_data
+        def keep(provider, data, *args):
+            css["text"] = bytes(data).decode()
+            return real(provider, data, *args)
+        with patch.object(theme_popup.Gtk.CssProvider, "load_from_data", keep):
+            for choice, card, control, small in (("slight", 6, 6, 4), ("rounded", 12, 8, 4), ("square", 0, 0, 0)):
+                self.app.set_corners(choice)
+                text = css["text"]
+                self.assertIn(f"border: 1px solid {self.app.theme.colors.get('accent', '#89b4fa')}; "
+                              f"border-radius: {card}px; padding: 17px;", " ".join(text.split()))
+                self.assertIn(f"entry, spinbutton {{ border-radius: {control}px; }}", text)
+                self.assertIn(f"checkbutton check {{ border-radius: {small}px; }}", text)
+                self.assertIn("scale slider { min-width: 14px; min-height: 14px; margin: -6px;", text)
+                self.assertEqual("*:not(.tm-ask-dot) { border-radius: 0; }" in text, choice == "square")
+                self.assertEqual("tooltip, tooltip * { border-radius: 0; }" in text, choice == "square")
+                self.assertEqual(theme_popup.workspaces_page.CORNER_RADIUS, card)
+
     def descendants(self, widget) -> list:
         out = []
         for child in self.children(widget):

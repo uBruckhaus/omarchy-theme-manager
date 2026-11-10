@@ -19,6 +19,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Graphene, Gtk, Pango  # noqa: E402
 
+import corners  # noqa: E402
 import theme_auto  # noqa: E402
 import theme_core  # noqa: E402
 import theme_custom  # noqa: E402
@@ -116,14 +117,26 @@ def rgba(hex_color: str, alpha: float = 1.0):
     return color.red, color.green, color.blue, alpha
 
 
+CORNER_RADIUS = corners.ROUNDED     # Settings › Corners, set by the popup's CSS (set_corner_radius)
+
+
+def set_corner_radius(radius):
+    global CORNER_RADIUS
+    CORNER_RADIUS = max(0, radius)
+
+
+def corner(size):
+    """A drawn corner: its own size at most, never more than the Corners setting (0 = Square)."""
+    return min(CORNER_RADIUS, size)
+
+
+def pill(size):
+    """A drawn pill's half height, or square with Square corners."""
+    return size if CORNER_RADIUS else 0
+
+
 def rounded(cr, x, y, w, h, r):
-    r = min(r, w / 2, h / 2)
-    cr.new_sub_path()
-    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
-    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
-    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
-    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
-    cr.close_path()
+    corners.rounded_path(cr, x, y, w, h, r)
 
 
 class LayoutPicture(Gtk.DrawingArea):
@@ -146,7 +159,7 @@ class LayoutPicture(Gtk.DrawingArea):
             # Two screens behind (up right), the picture in front a little smaller.
             off = max(3.0, height * 0.08)
             for step, alpha in ((2, 0.35), (1, 0.6)):
-                rounded(cr, 0.5 + step * off, 0.5, width - 1 - 2 * off, height - 1 - 2 * off, 5)
+                rounded(cr, 0.5 + step * off, 0.5, width - 1 - 2 * off, height - 1 - 2 * off, corner(5))
                 cr.set_source_rgba(*rgba(accent, 0.10 * alpha))
                 cr.fill_preserve()
                 cr.set_source_rgba(*rgba(accent, alpha))
@@ -154,17 +167,17 @@ class LayoutPicture(Gtk.DrawingArea):
                 cr.stroke()
             cr.translate(0, 2 * off)
             width, height = width - 2 * off, height - 2 * off
-        rounded(cr, 0.5, 0.5, width - 1, height - 1, 5)
+        rounded(cr, 0.5, 0.5, width - 1, height - 1, corner(5))
         cr.set_source_rgba(*rgba(fg, 0.06))
         cr.fill_preserve()
         cr.set_source_rgba(*rgba(fg, 0.25))
         cr.set_line_width(1)
         cr.stroke()
         cr.save()
-        rounded(cr, 1, 1, width - 2, height - 2, 4)
+        rounded(cr, 1, 1, width - 2, height - 2, corner(4))
         cr.clip()
         for x, y, w, h in self.rects:
-            rounded(cr, x * width, y * height, w * width, h * height, 3)
+            rounded(cr, x * width, y * height, w * width, h * height, corner(3))
             if self.dashed:
                 cr.set_source_rgba(*rgba(fg, 0.45))
                 cr.set_dash([3, 2])
@@ -1351,7 +1364,7 @@ class WorkspacesPageMixin:
         cr.translate(x, y)
         cr.push_group()
         info["picture"].draw(None, cr, w, h)
-        rounded(cr, 0.5, 0.5, w - 1, h - 1, 6)
+        rounded(cr, 0.5, 0.5, w - 1, h - 1, corner(6))
         cr.set_source_rgba(*rgba(accent, 1))
         cr.set_line_width(2)
         cr.stroke()
@@ -2174,7 +2187,7 @@ class LookAlike(Gtk.DrawingArea):
         bg = self.colors.get("background", "#1e1e2e")
         fg = self.colors.get("foreground", "#cdd6f4")
         accent = self.colors.get("accent", "#89b4fa")
-        rounded(cr, 0, 0, width, height, 8)
+        rounded(cr, 0, 0, width, height, corner(8))
         cr.clip()
         if self.all_label:
             # Not a desktop: a striped template in the theme's colors.
@@ -2219,7 +2232,7 @@ class LookAlike(Gtk.DrawingArea):
         area_h = height - top
         for index, (x, y, w, h) in enumerate(self.rects):
             rx, ry, rw, rh = x * width, top + y * area_h, w * width, h * area_h
-            rounded(cr, rx, ry, rw, rh, 4 * k)
+            rounded(cr, rx, ry, rw, rh, corner(4) * k)
             if self.dashed or index == self.source:
                 cr.set_source_rgba(*rgba(bg, 0.55))
                 cr.fill_preserve()
@@ -2235,7 +2248,7 @@ class LookAlike(Gtk.DrawingArea):
             cr.set_line_width((2 if index == 0 else 1.2) * k)
             cr.stroke()
             if index == self.highlight:          # where a dragged window would go
-                rounded(cr, rx + 3 * k, ry + 3 * k, rw - 6 * k, rh - 6 * k, 3 * k)
+                rounded(cr, rx + 3 * k, ry + 3 * k, rw - 6 * k, rh - 6 * k, corner(3) * k)
                 cr.set_source_rgba(*rgba(accent, 0.25))
                 cr.fill_preserve()
                 cr.set_source_rgba(*rgba(accent, 1))
@@ -2258,7 +2271,7 @@ class LookAlike(Gtk.DrawingArea):
                 cr.fill()
                 line_y += line * 2.6
         if self.drop:                           # a layout is held over the preview
-            rounded(cr, 2, 2, width - 4, height - 4, 8)
+            rounded(cr, 2, 2, width - 4, height - 4, corner(8))
             cr.set_source_rgba(*rgba(accent, 1))
             cr.set_dash([8, 5])
             cr.set_line_width(3)
@@ -2280,7 +2293,7 @@ class LookAlike(Gtk.DrawingArea):
             self.draw_plus(cr, cx, cy, r, bg, fg, accent, 1.0, self.minus_hot, minus=True)
         if self.edge_hover and not self.edge and not self.tray and not self.plus_hot:   # the limit gap
             cr.set_source_rgba(*rgba(fg, 0.55))
-            rounded(cr, width - 6, top + area_h * 0.3, 3, area_h * 0.4, 1.5)
+            rounded(cr, width - 6, top + area_h * 0.3, 3, area_h * 0.4, corner(1.5))
             cr.fill()
         if self.edge:                           # the window limit is being dragged
             cr.set_source_rgba(*rgba(accent, 0.9))
@@ -2293,7 +2306,7 @@ class LookAlike(Gtk.DrawingArea):
             pad = 8 * k
             bw, bh = extents.width + 2 * pad, extents.height + 2 * pad * 0.8
             bx, by = (width - bw) / 2, top + 8 * k
-            rounded(cr, bx, by, bw, bh, bh / 2)
+            rounded(cr, bx, by, bw, bh, pill(bh / 2))
             cr.set_source_rgba(*rgba(bg, 0.92))
             cr.fill_preserve()
             cr.set_source_rgba(*rgba(accent, 1))
@@ -2304,7 +2317,7 @@ class LookAlike(Gtk.DrawingArea):
             cr.show_text(self.badge)
         if self.all_label and not self.tray:
             # A dashed accent frame and a tag: these are the defaults for every workspace.
-            rounded(cr, 2, 2, width - 4, height - 4, 8)
+            rounded(cr, 2, 2, width - 4, height - 4, corner(8))
             cr.set_source_rgba(*rgba(accent, 0.9))
             cr.set_dash([7 * k, 4 * k])
             cr.set_line_width(2 * k)
@@ -2316,14 +2329,14 @@ class LookAlike(Gtk.DrawingArea):
             pad = 6 * k
             tw, th = extents.width + 2 * pad, extents.height + 1.4 * pad
             tx, ty = width - tw - 8 * k, bar + 4 * k
-            rounded(cr, tx, ty, tw, th, th / 2)
+            rounded(cr, tx, ty, tw, th, pill(th / 2))
             cr.set_source_rgba(*rgba(accent, 1))
             cr.fill()
             cr.move_to(tx + pad - extents.x_bearing, ty + th / 2 - extents.height / 2 - extents.y_bearing)
             cr.set_source_rgba(*rgba(bg, 1))
             cr.show_text(self.all_label)
         if self.has_focus() and not self.tray:  # keyboard: which window is chosen
-            rounded(cr, 1.5, 1.5, width - 3, height - 3, 8)
+            rounded(cr, 1.5, 1.5, width - 3, height - 3, corner(8))
             cr.set_source_rgba(*rgba(accent, 0.8))
             cr.set_line_width(2)
             cr.stroke()
@@ -2331,8 +2344,8 @@ class LookAlike(Gtk.DrawingArea):
 
     @staticmethod
     def draw_plus(cr, cx, cy, r, bg, fg, accent, alpha, hot, minus=False):
-        """A round + or − (drawn lines: the font may lack the glyph)."""
-        cr.arc(cx, cy, r, 0, 2 * math.pi)
+        """A round + or − (drawn lines: the font may lack the glyph); square with Square corners."""
+        rounded(cr, cx - r, cy - r, 2 * r, 2 * r, pill(r))
         cr.set_source_rgba(*rgba(accent if hot else bg, (0.95 if hot else 0.9) * alpha))
         cr.fill_preserve()
         cr.set_source_rgba(*rgba(accent, alpha))
@@ -2371,7 +2384,7 @@ class LookAlike(Gtk.DrawingArea):
     def draw_tray(self, cr, width, height, k, bg, fg, accent):
         """The drop targets of a window drag: a dashed frame (out of the
         preview = one window fewer) and a band of layout pictures."""
-        rounded(cr, 1.5, 1.5, width - 3, height - 3, 8)
+        rounded(cr, 1.5, 1.5, width - 3, height - 3, corner(8))
         cr.set_source_rgba(*rgba(fg, 0.45))
         cr.set_dash([6, 4])
         cr.set_line_width(1.5)
@@ -2379,7 +2392,7 @@ class LookAlike(Gtk.DrawingArea):
         cr.set_dash([])
         band = height * self.TRAY_SHARE
         px, py, pw, ph = self.tray_pill()
-        rounded(cr, px, py, pw, ph, 10 * k * 0.6)
+        rounded(cr, px, py, pw, ph, corner(6) * k)
         cr.set_source_rgba(*rgba(bg, 0.93))
         cr.fill_preserve()
         cr.set_source_rgba(*rgba(fg, 0.25))
@@ -2389,7 +2402,7 @@ class LookAlike(Gtk.DrawingArea):
         cr.set_font_size(max(10, band * 0.13))
         for index, ((preset, cap, label, current), (bx, by, bw, bh)) in enumerate(zip(self.tray, self.tray_boxes())):
             hot = index == self.tray_hot
-            rounded(cr, bx, by, bw, bh, 3 * k)
+            rounded(cr, bx, by, bw, bh, corner(3) * k)
             cr.set_source_rgba(*rgba(accent if hot else fg, 0.22 if hot else 0.08))
             cr.fill_preserve()
             cr.set_source_rgba(*rgba(accent if hot or current else fg, 1 if hot else 0.8 if current else 0.35))
@@ -2401,7 +2414,7 @@ class LookAlike(Gtk.DrawingArea):
             inset = bw * 0.06
             for rx, ry, rw, rh in preset_rects(preset, cap):
                 rounded(cr, bx + inset + rx * (bw - 2 * inset), by + inset + ry * (bh - 2 * inset),
-                        rw * (bw - 2 * inset), rh * (bh - 2 * inset), 1.5 * k)
+                        rw * (bw - 2 * inset), rh * (bh - 2 * inset), corner(1.5) * k)
                 cr.set_source_rgba(*rgba(accent if hot else fg, 0.7 if hot else 0.45))
                 cr.fill()
             extents = cr.text_extents(label)

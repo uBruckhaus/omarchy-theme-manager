@@ -17,6 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Gdk, GLib, Graphene, Gtk, Pango  # noqa: E402
 
+import corners  # noqa: E402
 import theme_ai  # noqa: E402
 import theme_auto  # noqa: E402
 import theme_core  # noqa: E402
@@ -853,13 +854,14 @@ class AskPageMixin:
             swatch.set_content_height(16)
 
             def paint(_a, cr, w, h, v=value, outline=key in ("background", "foreground")):
+                small = corners.small(getattr(self, "ui_radius", corners.ROUNDED))    # Settings › Corners
                 cr.set_source_rgba(*rgba(v, 1))
-                cr.rectangle(0, 0, w, h)
+                corners.rounded_path(cr, 0, 0, w, h, small)
                 cr.fill()
                 if outline:
                     cr.set_source_rgba(*rgba(frame, 0.5))
                     cr.set_line_width(1)
-                    cr.rectangle(0.5, 0.5, w - 1, h - 1)
+                    corners.rounded_path(cr, 0.5, 0.5, w - 1, h - 1, max(0, small - 0.5))
                     cr.stroke()
             swatch.set_draw_func(paint)
             swatch.set_tooltip_text(f"{theme_custom.label(key)} {value}")

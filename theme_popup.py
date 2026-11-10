@@ -67,6 +67,7 @@ import theme_backup
 import header_order
 import workspace_state
 import theme_ai
+import workspaces_page
 from workspaces_page import WorkspacesPageMixin
 import ask_page
 from ask_page import AskPageMixin
@@ -143,6 +144,7 @@ class FixedPicture(Gtk.Picture):
     def __init__(self, width: int, height: int, paintable=None):
         super().__init__()
         self._size = (width, height)
+        self.set_overflow(Gtk.Overflow.HIDDEN)     # the picture is clipped to its corners (Settings › Corners)
         if paintable is not None:
             self.set_paintable(paintable)
         self.set_content_fit(Gtk.ContentFit.COVER)
@@ -2663,9 +2665,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.refresh_themes()
 
     def corner_labels(self) -> list[str]:
+        """In the order of corners.CHOICES."""
         rounding = getattr(self, "window_rounding", None)
         like = _("Like windows ({0} px)").format(rounding) if rounding is not None else _("Like windows")
-        return [like, _("Rounded"), _("Square")]
+        return [like, _("Slightly rounded ({0} px)").format(corners.SLIGHT),
+                _("Rounded ({0} px)").format(corners.ROUNDED), _("Square")]
 
     def corners_tip(self) -> str:
         """Where the windows' rounding comes from: the theme, looknfeel.lua or Omarchy."""
@@ -2676,11 +2680,22 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             origin = _("Your windows' rounding is set by the current theme (its hyprland.lua).")
         else:
             origin = _("Your windows use Omarchy's default rounding (square); a theme or ~/.config/hypr/looknfeel.lua can change it.")
-        return _("Corners of the popup and its theme cards. “Like windows” follows Hyprland's window rounding.") + " " + origin
+        return _("Corners of the popup, its cards and every control (buttons, choice boxes, fields). “Like windows” follows Hyprland's window rounding.") + " " + origin
 
     def set_corners(self, value: str):
         self.save_setting(corners=corners.choice(value))
         self.apply_theme_css()
+        self.redraw_pictures(self.window)      # the drawn pictures (workspaces, swatches) follow it
+
+    def redraw_pictures(self, widget):
+        if widget is None:
+            return
+        if isinstance(widget, Gtk.DrawingArea):
+            widget.queue_draw()
+        child = widget.get_first_child()
+        while child is not None:
+            self.redraw_pictures(child)
+            child = child.get_next_sibling()
 
     def reset_settings(self):
         """Back to the defaults (see the button's tooltip). A new language
@@ -2721,7 +2736,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         dialog.select_folder(None, None, done)
 
     def take_screenshot(self):
-        if getattr(self, "screenshot_busy", False) or not self.window.is_visible():
+        if getattr(self, "screenshot_busy", False) or not self.window.is_visible() or self.shot_dialog_open():
             return
         geo = self.monitor_geometry()
         if geo is None:
@@ -3174,22 +3189,24 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         shown = ed["font"] or ed.get("system_font")
         font = f'font-family: "{shown}";' if shown and theme_custom.FONT_RE.match(shown) else ""
         c = ed["palette"].colors
-        css.append(f".tm-ed-desk {{ background: {c['darker_background']}; border-radius: 10px;"
+        radius = getattr(self, "ui_radius", corners.ROUNDED)      # Settings › Corners
+        control, small = corners.control(radius), corners.small(radius)
+        css.append(f".tm-ed-desk {{ background: {c['darker_background']}; border-radius: {radius}px;"
                    " margin-bottom: 4px; }")
         css.append(f".tm-ed-desk label {{ {font} font-size: 11px; }}")
         css.append(f".tm-ed-desk .s-bar {{ background: alpha({c['background']}, 0.94); padding: 3px 10px; }}")
         # glassy: the sample window lets the wallpaper show through, as on the desktop
         see_through = 0.72 if ed.get("windows") == "glassy" else 0.97
         css.append(f".tm-ed-desk .s-win {{ background: alpha({c['background']}, {see_through});"
-                   f" border: 2px solid {c['accent']}; border-radius: 8px; margin: 8px 18px 10px 18px;"
+                   f" border: 2px solid {c['accent']}; border-radius: {control}px; margin: 8px 18px 10px 18px;"
                    " padding: 5px 10px; }")
         css.append(f".tm-ed-desk .s-text {{ color: {c['foreground']}; }}")
         css.append(f".tm-ed-desk .s-muted {{ color: {c['muted']}; }}")
         css.append(".tm-ed-desk .s-small { font-size: 10px; margin-bottom: 2px; }")
         css.append(f".tm-ed-desk .s-sel {{ background: {c['selection']}; color: {c['foreground']};"
-                   " padding: 0 6px; border-radius: 3px; }")
-        css.append(".tm-ed-desk .s-dot { border-radius: 4px; }")
-        css.append("button.tm-swatch { border: 1px solid alpha(currentColor, 0.4); border-radius: 6px;"
+                   f" padding: 0 6px; border-radius: {min(radius, 3)}px; }}")
+        css.append(f".tm-ed-desk .s-dot {{ border-radius: {small}px; }}")
+        css.append(f"button.tm-swatch {{ border: 1px solid alpha(currentColor, 0.4); border-radius: {small}px;"
                    " min-height: 0; min-width: 0; padding: 0; }")
         provider = Gtk.CssProvider()
         provider.load_from_data("\n".join(css).encode("utf-8"))
@@ -3447,9 +3464,15 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 return 0.5
 
         # Corners: Hyprland's window rounding like the Omarchy shell (the
-        # default), or rounded / square whatever the windows do.
+        # default), or slightly rounded / rounded / square whatever the windows do.
         self.window_rounding = hyprland_rounding()
         radius = corners.radius(theme_auto.settings().get("corners"), self.window_rounding)
+        # One Corners setting for everything, in three sizes: the card, cards, dialogs, pop-ups and
+        # previews (radius); buttons, drop-downs and fields (control); check boxes, slider tracks,
+        # badges and swatches (small). Chips and switches are pills, square with Square corners.
+        control, small, pill = corners.control(radius), corners.small(radius), corners.pill(radius)
+        self.ui_radius = radius
+        workspaces_page.set_corner_radius(radius)    # the drawn workspace pictures follow it
         sel_hex = colors.get("selection", "#45475a")
         bg_hex = colors.get("background", "#1e1e2e")
         fg_hex = colors.get("foreground", "#cdd6f4")
@@ -3492,7 +3515,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-card button.tm-ws-preset, .tm-card button.tm-action, .tm-card button.tm-paste,
         .tm-card button.tm-settings-nav-button, .tm-card button.tm-settings-chip {{
             background: transparent; background-image: none; box-shadow: none;
-            border: 1px solid alpha({fg_hex}, 0.25); border-radius: {radius}px; color: {fg_hex}; }}
+            border: 1px solid alpha({fg_hex}, 0.25); border-radius: {control}px; color: {fg_hex}; }}
         .tm-card button.tm-tab, .tm-card button.tm-action, .tm-card button.tm-paste {{ padding: 6px 12px; min-height: 0; }}
         .tm-card button.tm-ws-group {{ padding: 3px 10px; min-height: 0; font-size: 13px; }}
         .tm-card button.tm-tab:hover, .tm-card button.tm-ws-group:hover, .tm-card button.tm-ws-choice:hover,
@@ -3505,7 +3528,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             border: 2px solid {accent_hex}; color: {accent_hex}; background: alpha({accent_hex}, 0.08); }}
         .tm-card button.tm-tab image, .tm-card button.tm-action image, .tm-card button.tm-paste image {{ color: {accent_hex}; }}
         .tm-card button.sc-small {{ background: transparent; background-image: none; box-shadow: none;
-            border: 1px solid alpha({fg_hex}, 0.25); border-radius: {radius}px; color: {fg_hex}; }}
+            border: 1px solid alpha({fg_hex}, 0.25); border-radius: {control}px; color: {fg_hex}; }}
         .tm-card button.sc-small:hover {{ background: alpha({accent_hex}, 0.08); }}
         .tm-card button.tm-action.tm-destructive:hover, .tm-card button.tm-paste.tm-destructive:hover {{
             border-color: {red_hex}; color: {red_hex}; background: alpha({red_hex}, 0.08); }}
@@ -3520,9 +3543,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         flowboxchild.tm-ws-card:hover {{ border-color: alpha({accent_hex}, 0.6); }}
         .tm-ws-title {{ font-weight: 600; font-size: 12px; }}
         .tm-ws-title.tm-ws-current {{ color: {accent_hex}; }}
-        .tm-ws-look {{ border-radius: 5px; }}
+        .tm-ws-look {{ border-radius: {small}px; }}
         .tm-ws-look-name {{ background: alpha({bg_hex}, 0.75); color: {fg_hex}; font-size: 10px;
-            padding: 1px 4px; border-radius: 0 0 5px 5px; }}
+            padding: 1px 4px; border-radius: 0 0 {small}px {small}px; }}
         .tm-ws-heading {{ font-size: 11px; letter-spacing: 1px; color: {muted_hex}; margin-top: 4px; }}
         button.tm-ws-choice, button.tm-ws-preset {{ padding: 4px 6px; min-height: 0; }}
         .tm-ws-preset-name {{ font-size: 10px; }}
@@ -3531,14 +3554,14 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         flowboxchild.tm-ws-card:selected .tm-hint {{ color: alpha({fg_hex}, 0.8); }}
         .tm-ws-banner label {{ font-size: 12px; }}
         .tm-ws-error {{ color: {red_hex}; }}
-        .tm-ws-chip {{ background: alpha({fg_hex}, 0.07); border-radius: 999px; padding: 2px 4px 2px 8px; }}
+        .tm-ws-chip {{ background: alpha({fg_hex}, 0.07); border-radius: {pill}px; padding: 2px 4px 2px 8px; }}
         .tm-ws-chip.tm-ws-chip-failed {{ box-shadow: inset 0 0 0 1px {red_hex}; }}
         button.tm-ws-chip-remove {{ padding: 0 4px; min-height: 0; min-width: 0; }}
         .tm-ws-hover {{ background: {bg_hex}; border: 1px solid {accent_hex}; border-radius: {radius}px;
             padding: 8px; box-shadow: 0 6px 24px alpha(#000000, 0.45); }}
         .tm-ws-hover {{ margin: 24px; }}
         button.tm-ws-zoom {{ padding: 2px; min-height: 0; min-width: 0; margin: 3px;
-            background: alpha({bg_hex}, 0.8); border-radius: 999px; }}
+            background: alpha({bg_hex}, 0.8); border-radius: {pill}px; }}
         button.tm-ws-zoom:hover {{ background: {accent_hex}; color: {bg_hex}; }}
         .tm-ws-hover-caption {{ font-size: 11px; color: {fg_hex}; }}
         flowboxchild.tm-ws-card.tm-ws-all {{ border: 1px dashed alpha({accent_hex}, 0.8);
@@ -3553,19 +3576,19 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-card button.tm-action.tm-action-primary {{ border-color: {accent_hex}; color: {accent_hex}; }}
         .tm-ask-card {{ border: 1px solid alpha({fg_hex}, 0.18); border-radius: {radius}px; padding: 10px; }}
         .tm-ask-prompts {{ padding: 4px; }}
-        .tm-ask-prompt {{ min-height: 34px; border-radius: {radius}px; }}
+        .tm-ask-prompt {{ min-height: 34px; border-radius: {control}px; }}
         .tm-ask-prompt button {{ min-height: 30px; padding: 2px 8px; }}
         .tm-ask-handle {{ color: {dim_hex}; padding: 0 6px; }}
         .tm-ask-prompt.tm-ask-dragging {{ background: alpha({accent_hex}, 0.12); }}
         .tm-ask-prompt.tm-ask-drop-above {{ box-shadow: inset 0 2px {accent_hex}; }}
         .tm-ask-prompt.tm-ask-drop-below {{ box-shadow: inset 0 -2px {accent_hex}; }}
         .tm-ask-busy {{ background: alpha({bg_hex}, 0.85); color: {fg_hex}; border: 1px solid {accent_hex};
-                        border-radius: 999px; padding: 6px 14px; }}
+                        border-radius: {pill}px; padding: 6px 14px; }}
         .tm-dialog-backdrop {{ background: alpha(#000000, 0.45); border-radius: {radius}px; }}
         .tm-dialog {{ background: {bg_hex}; border: 1px solid {accent_hex}; border-radius: {radius}px;
             padding: 18px; }}
-        .tm-header-drop-marker {{ background: {sel_hex}; border-radius: 2px; min-width: 3px; }}
-        .tm-card button.tm-gear-btn {{ border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px;
+        .tm-header-drop-marker {{ background: {sel_hex}; border-radius: {min(radius, 2)}px; min-width: 3px; }}
+        .tm-card button.tm-gear-btn {{ border: 1px solid alpha({fg_hex}, 0.35); border-radius: {control}px;
             padding: 1px 6px; margin-right: 0; }}
         .tm-gear {{ font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace; font-size: 13px; }}
         .tm-section-title {{ font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
@@ -3573,12 +3596,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             min-height: 1px; margin: 0; }}
         .tm-card label.tm-line-label {{ font-size: 11px; color: {dim_hex}; }}
         .tm-line dropdown > button {{ min-height: 0; padding: 2px 8px; border: 1px solid alpha({fg_hex}, 0.35);
-            border-radius: {radius}px; background: transparent; }}
+            border-radius: {control}px; background: transparent; }}
         .tm-line dropdown label {{ font-size: 11px; }}
         .tm-line switch {{ min-height: 16px; min-width: 36px; }}
         .tm-line switch slider {{ min-width: 14px; min-height: 14px; margin: 1px; }}
         .tm-line button.sc-small {{ font-size: 11px; min-height: 0; padding: 2px 8px;
-            border: 1px solid alpha({fg_hex}, 0.35); border-radius: {radius}px; background: transparent; }}
+            border: 1px solid alpha({fg_hex}, 0.35); border-radius: {control}px; background: transparent; }}
         .tm-list {{ background: transparent; }}
         .tm-list flowboxchild {{ border-radius: {radius}px; padding: 2px; outline: none; }}
         .tm-list .tm-tile {{ padding: 3px; }}
@@ -3595,7 +3618,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45); }}
         .tm-preview picture {{ border-radius: {max(2, radius - 6) if radius else 0}px; }}
         .tm-list flowboxchild:hover .tm-preview {{ border-color: {accent_hex}; }}
-        .tm-badge {{ background: alpha({fg_hex}, 0.10); border-radius: {max(4, radius - 6) if radius else 0}px;
+        .tm-badge {{ background: alpha({fg_hex}, 0.10); border-radius: {small}px;
             padding: 2px 10px; }}
         .tm-badge label {{ font-size: 12px; font-weight: 600; color: {muted_hex}; }}
         .tm-list flowboxchild:selected .tm-badge:not(.current) label {{ color: {sel_fg}; }}
@@ -3611,7 +3634,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-tile-name {{ font-size: 14px; font-weight: 600; }}
         .tm-list flowboxchild .tm-tile {{ margin: 0; }}
         button.tm-tile-menu {{ padding: 3px; min-width: 0; min-height: 0; margin: 5px;
-            background: rgba(0, 0, 0, 0.6); color: #ffffff; border-radius: {max(4, radius - 4) if radius else 0}px; }}
+            background: rgba(0, 0, 0, 0.6); color: #ffffff; border-radius: {control}px; }}
         button.tm-tile-menu:hover {{ background: {accent_hex}; color: {bg_hex}; }}
         .tm-tile-badge {{ margin: 6px; background: rgba(0, 0, 0, 0.6); }}
         .tm-tile-badge:not(.current):not(.workspace) label {{ color: #ffffff; }}
@@ -3624,7 +3647,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             border: 1px solid {accent_hex}; border-radius: {radius}px; padding: 5px;
             min-width: 190px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7); }}
         popover.tm-popover arrow {{ background-color: {bg_hex}; border-color: {accent_hex}; }}
-        .tm-menu-item {{ outline: none; background: transparent; border-radius: {radius}px; padding: 0; }}
+        .tm-menu-item {{ outline: none; background: transparent; border-radius: {control}px; padding: 0; }}
         .tm-menu-item label {{ font-size: 13px; font-weight: 500; color: {fg_hex}; }}
         .tm-menu-item image {{ color: {fg_hex}; }}
         .tm-menu-item:focus {{ background: {sel_hex}; }}
@@ -3647,12 +3670,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-settings-nav {{ background: alpha({fg_hex}, 0.04); border-radius: {radius}px;
             padding: 8px; }}
         .tm-settings-nav-button {{ font-size: 12px; min-height: 0; padding: 8px 10px;
-            border-radius: {radius}px; text-align: left; }}
+            border-radius: {control}px; text-align: left; }}
         .tm-settings-nav-button.tm-nav-active {{ background: {sel_hex}; color: {sel_fg};
             font-weight: 700; }}
         .tm-settings-chips {{ padding: 2px 2px 6px 0; }}
         .tm-settings-chip {{ font-size: 11px; min-height: 0; padding: 4px 9px;
-            border-radius: {radius}px; }}
+            border-radius: {control}px; }}
         .tm-settings-chip.tm-nav-active {{ background: {sel_hex}; color: {sel_fg};
             font-weight: 700; }}
         .tm-settings-search {{ margin: 2px 4px 6px 0; }}
@@ -3676,7 +3699,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         expander title {{ padding: 4px 0; }}
         .tm-star {{ color: {accent_hex}; font-size: 15px; }}
         .tm-keyhint {{ font-size: 12px; color: {muted_hex}; font-family: monospace; }}
-        .sc-cap {{ font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: {max(4, radius - 4) if radius else 0}px;
+        .sc-cap {{ font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: {small}px;
             border: 1px solid alpha({fg_hex}, 0.35); background: alpha({fg_hex}, 0.08); }}
         .sc-cap-lg {{ font-size: 15px; padding: 3px 10px; }}
         .sc-key {{ padding: 4px 0; }}
@@ -3707,9 +3730,30 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-grid flowboxchild:focus .tm-add-tile image, .tm-grid flowboxchild:hover .tm-add-tile image {{ color: {accent_hex}; }}
         separator.tm-menu-separator {{ background-color: {muted_hex}; background-image: none;
             opacity: 0.6; min-height: 1px; margin: 3px 6px; }}
+        /* Every other control follows the same Corners setting: GTK's own buttons, drop-downs,
+           fields, pop-ups and their rows, check boxes, sliders, progress bars and tooltips. Plain
+           selectors, so the rules above (more specific) still win. */
+        button, dropdown > button, menubutton > button, entry, spinbutton {{ border-radius: {control}px; }}
+        popover > contents {{ border-radius: {radius}px; }}
+        popover modelbutton, popover listview > row, popover list > row, dropdown popover row {{
+            border-radius: {small}px; }}
+        checkbutton check {{ border-radius: {small}px; }}
+        scale trough, scale highlight, scale fill, progressbar trough, progressbar progress {{
+            border-radius: {small}px; }}
+        scale slider {{ min-width: 14px; min-height: 14px; margin: -6px; border-radius: {pill}px; }}
+        switch, switch slider {{ border-radius: {pill}px; }}
+        tooltip, tooltip.background {{ border-radius: {control}px; }}
         """
+        css += more_plugins.css("tm", fg_hex, dim_hex, accent_hex, radius)
+        css += f".tm-more-icon {{ border-radius: {small}px; }}\n"      # its own 5 px: the setting's small size
+        if radius == 0:
+            # Square: GTK's own controls too (drop-downs, fields, switches, pop-ups, the colour
+            # chooser); the Ask AI status dot stays a dot. Tooltips are windows of their own.
+            css += "window#thememanager-window *:not(.tm-ask-dot) { border-radius: 0; }\n"
+            css += "tooltip, tooltip * { border-radius: 0; }\n"
+        if getattr(self, "ed", None) is not None:
+            self.update_editor_css()               # the editor's sample and swatches follow it too
         provider = Gtk.CssProvider()
-        css += more_plugins.css("tm", fg_hex, dim_hex, accent_hex, min(radius, 8))
         provider.load_from_data(css.encode("utf-8"))
         Gtk.StyleContext.add_provider_for_display(
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -4519,6 +4563,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         tile.add_css_class("tm-tile")
         picture = Gtk.Picture()
+        picture.set_overflow(Gtk.Overflow.HIDDEN)     # clipped to its corners (Settings › Corners)
         picture.set_content_fit(Gtk.ContentFit.COVER)
         picture.set_size_request(self.tile_w, self.tile_w * 9 // 16)
         self.web_pictures[item.id] = picture
@@ -4684,6 +4729,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         tile.add_css_class("tm-tile")
         picture = Gtk.Picture()
+        picture.set_overflow(Gtk.Overflow.HIDDEN)     # clipped to its corners (Settings › Corners)
         picture.set_content_fit(Gtk.ContentFit.COVER)
         picture.set_size_request(self.tile_w, self.tile_w * 9 // 16)
         cached = theme_catalog.preview_path(entry)
@@ -5048,6 +5094,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             tile.add_css_class("tm-row-hidden")
 
         picture = Gtk.Picture()
+        picture.set_overflow(Gtk.Overflow.HIDDEN)     # clipped to its corners (Settings › Corners)
         self.decoder.request(picture, wallpaper.path, self.tile_w, self.tile_w * 9 // 16)
         picture.set_content_fit(Gtk.ContentFit.COVER)
         picture.set_size_request(self.tile_w, self.tile_w * 9 // 16)  # wallpapers are 16:9
@@ -5508,6 +5555,16 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         back = keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_BackSpace)
         if page == "shortcut":
             return self.on_shortcut_key(_controller, keyval, _keycode, state)
+        # F12 alone (as in AI Playground: no Shift, Ctrl, Alt or Super), also while typing in a field
+        # or with a pop-up list open; never on the shortcut page (F12 can be the key being set
+        # there) nor while the note of the last screenshot is open.
+        if keyval == Gdk.KEY_F12 and not state & (Gdk.ModifierType.SHIFT_MASK |
+                                                  Gdk.ModifierType.CONTROL_MASK |
+                                                  Gdk.ModifierType.ALT_MASK |
+                                                  Gdk.ModifierType.SUPER_MASK) \
+                and not self.shot_dialog_open() and screenshots.key_enabled(theme_auto.settings()):
+            GLib.idle_add(self.take_screenshot)
+            return True
         if page == "look" and keyval in (Gdk.KEY_Escape, Gdk.KEY_BackSpace):
             self.close_look_page()
             return True
@@ -5536,12 +5593,6 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 self.finish_screenshot_note(True)
                 return True
             return False
-        if keyval == Gdk.KEY_F12 and not state & (Gdk.ModifierType.CONTROL_MASK |
-                                                  Gdk.ModifierType.ALT_MASK |
-                                                  Gdk.ModifierType.SUPER_MASK):
-            if screenshots.key_enabled(theme_auto.settings()):
-                GLib.idle_add(self.take_screenshot)
-                return True
         if self.actions_menu_open() and keyval != Gdk.KEY_Escape:
             return False  # the menu handles its own keys
         if keyval in (Gdk.KEY_z, Gdk.KEY_Z) and state & Gdk.ModifierType.CONTROL_MASK and self.undo_receipts:
@@ -6018,7 +6069,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if self.stack.get_visible_child_name() == "confirm":
             self.cancel_confirm()  # never reopen onto a stale question
         if self.shot_dialog_open():
-            self.finish_screenshot_note(False)
+            self.finish_screenshot_note(True)      # a note already typed is kept (none typed, no file)
         self.ws_hover_hide()
         if self.settings_previous_size is not None:
             self.stack.set_visible_child_name("themes")

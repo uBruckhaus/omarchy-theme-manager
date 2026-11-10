@@ -160,6 +160,9 @@ def install(strings):
     for key, values in LOOK_TRANSLATIONS.items():
         for code in ('de', 'fr', 'es', 'it', 'pt', 'nl', 'pl'):
             strings.setdefault(code, {})[key] = values[code]
+    for key, values in CORNER_TRANSLATIONS.items():
+        for code in ('de', 'fr', 'es', 'it', 'pt', 'nl', 'pl'):
+            strings.setdefault(code, {})[key] = values[code]
     from workspace_i18n import STRINGS as WORKSPACE_TABS
     for key, values in WORKSPACE_TABS.items():
         for code in ('de', 'fr', 'es', 'it', 'pt', 'nl', 'pl'):
@@ -440,4 +443,19 @@ LOOK_TRANSLATIONS = {
     'Presets: saved theme and wallpaper': dict(de='Presets: gespeichertes Theme und Hintergrund', fr='Préréglages : thème et fond d’écran enregistrés', es='Preajustes: tema y fondo guardados', it='Preimpostazioni: tema e sfondo salvati', pt='Presets: tema e papel de parede guardados', nl='Voorinstellingen: opgeslagen thema en achtergrond', pl='Presety: zapisany motyw i tapeta'),
     'Save the current theme and wallpaper for later.': dict(de='Aktuelles Theme und Hintergrund für später speichern.', fr='Enregistrer le thème et le fond d’écran actuels pour plus tard.', es='Guarda el tema y el fondo actuales para más tarde.', it='Salva tema e sfondo attuali per dopo.', pt='Guardar o tema e o papel de parede atuais para mais tarde.', nl='Huidig thema en achtergrond bewaren voor later.', pl='Zapisz bieżący motyw i tapetę na później.'),
     'Reapplied: {0}': dict(de='Erneut angewendet: {0}', fr='Réappliqué : {0}', es='Aplicado de nuevo: {0}', it='Riapplicato: {0}', pt='Reaplicado: {0}', nl='Opnieuw toegepast: {0}', pl='Zastosowano ponownie: {0}'),
+}
+
+
+# Settings › Corners: one setting for every control (2.2.0), labels as in AI Playground.
+CORNER_TRANSLATIONS = {
+    'Slightly rounded ({0} px)': dict(de='Leicht abgerundet ({0} px)', fr='Légèrement arrondis ({0} px)', es='Ligeramente redondeadas ({0} px)', it='Leggermente arrotondati ({0} px)', pt='Levemente arredondados ({0} px)', nl='Licht afgerond ({0} px)', pl='Lekko zaokrąglone ({0} px)'),
+    'Rounded ({0} px)': dict(de='Abgerundet ({0} px)', fr='Arrondis ({0} px)', es='Redondeadas ({0} px)', it='Arrotondati ({0} px)', pt='Arredondados ({0} px)', nl='Afgerond ({0} px)', pl='Zaokrąglone ({0} px)'),
+    "Corners of the popup, its cards and every control (buttons, choice boxes, fields). “Like windows” follows Hyprland's window rounding.": dict(
+        de='Ecken des Popups, seiner Karten und aller Bedienelemente (Knöpfe, Auswahlfelder, Eingabefelder). „Wie Fenster“ folgt der Fensterrundung von Hyprland.',
+        fr="Coins de la fenêtre, de ses cartes et de toutes les commandes (boutons, listes de choix, champs). « Comme les fenêtres » suit l'arrondi des fenêtres de Hyprland.",
+        es='Esquinas de la ventana, sus tarjetas y todos los controles (botones, listas de opciones, campos). «Como las ventanas» sigue el redondeo de ventanas de Hyprland.',
+        it="Angoli della finestra, delle sue schede e di tutti i controlli (pulsanti, caselle di scelta, campi). «Come le finestre» segue l'arrotondamento delle finestre di Hyprland.",
+        pt='Cantos da janela, dos seus cartões e de todos os controlos (botões, caixas de escolha, campos). «Como as janelas» segue o arredondamento das janelas do Hyprland.',
+        nl='Hoeken van de pop-up, zijn kaarten en alle bedieningselementen (knoppen, keuzelijsten, velden). „Zoals vensters” volgt de vensterafronding van Hyprland.',
+        pl='Narożniki okna, jego kart i wszystkich kontrolek (przyciski, listy wyboru, pola). „Jak okna” podąża za zaokrągleniem okien Hyprlanda.'),
 }
