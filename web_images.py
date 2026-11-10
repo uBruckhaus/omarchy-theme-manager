@@ -20,6 +20,7 @@ import ipaddress
 import os
 import re
 import socket
+import stat
 import threading
 import urllib.parse
 from dataclasses import dataclass
@@ -191,11 +192,62 @@ def _key(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:32]
 
 
+def _private_cache() -> bool:
+    """The cache folder is a real folder of this user, closed to others."""
+    try:
+        info = os.lstat(cache_dir())
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
+
+
+def _make_private_cache() -> None:
+    """The cache folder, made or closed to others (0700); one that is a link
+    or someone else's raises OSError and nothing is written."""
+    folder = cache_dir()
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = os.lstat(folder)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise OSError(_("the picture cache {0} is not your own folder").format(folder))
+    if info.st_mode & 0o077:
+        os.chmod(folder, 0o700, follow_symlinks=False)
+
+
+def read_cached(path: Path) -> bytes:
+    """A cached picture's bytes: a regular file of this user (no link), at
+    most the wallpaper limit, read from the open file. Raises OSError."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        limit = theme_core.MAX_BACKGROUND_BYTES
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > limit:
+            raise OSError(f"not a cached picture: {path}")
+        data = b""
+        while len(data) <= limit:
+            more = os.read(fd, limit + 1 - len(data))
+            if not more:
+                break
+            data += more
+        if len(data) > limit:
+            raise OSError(f"cached picture too large: {path}")
+        return data
+    finally:
+        os.close(fd)
+
+
 def cached(url: str) -> Path | None:
+    if not _private_cache():
+        return None
     for ext in (".jpg", ".png", ".webp"):
         path = cache_dir() / (_key(url) + ext)
-        if path.is_file() and not path.is_symlink():
-            return path if theme_core.image_size_problem(path) is None else None
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or \
+                info.st_size > theme_core.MAX_BACKGROUND_BYTES:
+            return None
+        return path if theme_core.image_size_problem(path) is None else None
     return None
 
 
@@ -222,7 +274,7 @@ def get(raw_url, resolver=None, fetch=None) -> Path:
     if not theme_core.is_image_data(data) or ext not in (".jpg", ".png", ".webp"):
         raise ValueError(_("the link is not a JPEG, PNG or WebP picture"))
     path = cache_dir() / (_key(url) + ext)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _make_private_cache()
     theme_core._atomic_write_bytes(path, data, mode=0o600)
     problem = theme_core.image_size_problem(path)
     if problem is not None:
@@ -257,7 +309,7 @@ def download(roots, slug: str, item: WebPicture) -> Path:
     name = file_name_of(item.url, path)
     if already_added(roots, slug, item):
         raise FileExistsError(_("{0} is already in this theme").format(name))
-    return theme_core.add_background_bytes(roots, slug, path.read_bytes(), name=name)
+    return theme_core.add_background_bytes(roots, slug, read_cached(path), name=name)
 
 
 def open_page(item: WebPicture) -> bool:

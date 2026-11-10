@@ -2804,6 +2804,36 @@ class StaleWebAskTests(unittest.TestCase):
         self.assertEqual(app.web_pics, [])
         self.assertFalse(app.web_ai_busy)
 
+    def test_a_first_ask_answer_after_a_new_search_or_theme_is_stale(self):
+        from types import SimpleNamespace
+        app, _calls = self.fake()
+        app.web_next_pending = set()
+        app.web_epoch = 7
+        app.web_ai_entry = SimpleNamespace(set_sensitive=lambda on: None)
+        with patch.object(theme_popup.theme_ai, "cancel") as cancel:
+            theme_popup.ThemeManager.drop_first_ask(app)
+        cancel.assert_called_once()                       # the helper's request ends
+        self.assertFalse(app.web_ai_busy)
+        theme_popup.ThemeManager.web_ai_done(app, ("x", ["q"], []), None, epoch=7)   # nothing happens
+        self.assertEqual(app.web_pics, [])
+
+    def test_another_theme_makes_wallhaven_and_web_answers_stale(self):
+        import threading
+        from types import SimpleNamespace
+        app, _calls = self.fake()
+        app.web_next_pending = {"web", "wallhaven"}
+        app.web_loading, app.web_generation, app.web_epoch = True, 2, 0
+        app.web_next_stop = threading.Event()
+        app.web_ai_entry = SimpleNamespace(set_sensitive=lambda on: None)
+        app.drop_first_ask = lambda: theme_popup.ThemeManager.drop_first_ask(app)
+        with patch.object(theme_popup.theme_ai, "cancel"):
+            theme_popup.ThemeManager.drop_web_requests(app)
+        self.assertEqual(app.web_generation, 3)
+        self.assertTrue(app.web_next_stop.is_set())
+        self.assertEqual(app.web_next_pending, set())
+        self.assertFalse(app.web_loading)
+        self.assertEqual(app.web_next_token, 4)
+
     def test_an_answer_after_a_new_search_is_stale(self):
         app, _calls = self.fake()
         with patch.object(theme_popup.theme_ai, "cancel"):

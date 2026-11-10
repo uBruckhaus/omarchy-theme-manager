@@ -339,6 +339,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             GLib.timeout_add(100, lambda: True)  # Let Python dispatch SIGUSR1.
             self.watch_current_theme()
             write_pid_file()
+            theme_auto.store_default_settings()
             try:
                 if theme_core.sync_enabled():   # opt-in, see the settings button
                     theme_core.ensure_menu_override(SWITCHER_WRAPPER)
@@ -834,6 +835,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_more = False       # the last web ask brought pictures: Next asks again
         self.web_next_token = 0     # a Cancel makes the answers of what Next started stale
         self.web_theme_slug = None  # the theme the wallpaper search page was opened for
+        self.web_epoch = 0          # a new search or theme makes a running first Ask AI answer stale
         self.web_next_pending = set()   # what Next started and is still running: "web", "wallhaven"
         self.web_next_stop = threading.Event()  # ends Next's page loading between two pages
         self.web_ai_request = ""
@@ -1247,7 +1249,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         reset = Gtk.Button(label=_("Reset to defaults"))
         reset.add_css_class("sc-small")
         reset.set_halign(Gtk.Align.START)
-        reset.set_tooltip_text(_("Resets language, corners, sorting, header button order, picker sync, schedule, wallpaper rotation, and screenshot key and folder. Keeps favorites, hidden themes, shortcuts and saved workspace assignments; themes per workspace turn off."))
+        reset.set_tooltip_text(_("Resets language, corners, sorting, header button order, picker sync, schedule, wallpaper rotation, screenshot key and folder, and web search for wallpapers (on). Keeps favorites, hidden themes, shortcuts and saved workspace assignments; themes per workspace turn off."))
         reset.connect("clicked", lambda *_a: self.reset_settings())
         nav.append(Gtk.Box(vexpand=True))
         nav.append(reset)
@@ -2071,7 +2073,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           _("A helper that can search the web (now Claude Code) also looks for wallpaper pictures "
                             "beyond wallhaven.cc. It takes longer and uses more of your plan or tokens. The pictures "
                             "are downloaded only from public https addresses and checked before they are shown."),
-                          self.switch(theme_auto.settings().get("ask_ai_web") is not False,
+                          self.switch(theme_auto.settings().get("ask_ai_web") is not False,   # on by default
                                       lambda on: self.save_setting(ask_ai_web=on)))
         self.setting_line(box, _("Maprisma hints"),
                           _("A ? here and on the Ask AI page opens the note on easy AI setup with Maprisma."),
@@ -2902,7 +2904,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         restarts the popup (on this page), so it comes last."""
         self.save_setting(sort="name", workspace_wallpapers=True, workspace_themes=False,
                           slideshow_minutes=0, corners="windows",
-                          screenshot_key=True, screenshot_folder=None,
+                          screenshot_key=True, screenshot_folder=None, ask_ai_web=True,
                           header_order=list(header_order.DEFAULT))
         self.header_order = list(header_order.DEFAULT)
         self.rebuild_header_group()
@@ -4694,7 +4696,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if theme is None:
             return
         if theme.slug != self.web_theme_slug:
-            self.drop_web_ask()                   # another theme's pictures never land here
+            self.drop_web_requests()              # another theme's answers never land here
         self.web_theme_slug = theme.slug
         self.browser = theme_catalog.default_browser()
         self.ws_title.set_label(_("{0} — search wallpapers").format(theme_core.plain_text(theme.name)))
@@ -4760,14 +4762,18 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         count = self.web_count()
         self.web_ai_request = words
         self.update_web_next()
+        self.web_epoch += 1
+        epoch = self.web_epoch
         self._async(lambda: theme_ai.ask_wallpapers(helper["id"], words, theme.name, colors, rejected, web=web,
                                                     count=count),
-                    self.web_ai_done)
+                    lambda result, error: self.web_ai_done(result, error, epoch))
 
     def web_ai_stop(self):
         theme_ai.cancel()
 
-    def web_ai_done(self, result, error):
+    def web_ai_done(self, result, error, epoch=None):
+        if epoch is not None and epoch != self.web_epoch:
+            return                                # a newer search or another theme: stale
         self.web_ai_busy = False
         self.web_ai_face(False)
         self.web_ai_entry.set_sensitive(True)
@@ -4826,6 +4832,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.web_next_pending.discard("wallhaven")
             self.web_loading = False
         self.drop_web_ask()                       # and Next's web ask for the old one
+        self.drop_first_ask()                     # and a first Ask AI answer still on its way
         self.web_query = query
         self.web_page_no = 0
         self.web_last_page = 1 if query else 0
@@ -4947,6 +4954,32 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         theme_ai.cancel()
         self.web_ai_busy = False
         self.web_ai_face(False)
+        self.web_busy()
+
+    def drop_first_ask(self):
+        """The first Ask AI request no longer fits: its answer is stale."""
+        self.web_epoch += 1
+        if self.web_ai_busy and "web" not in self.web_next_pending:
+            theme_ai.cancel()
+            self.web_ai_busy = False
+            self.web_ai_face(False)
+            self.web_ai_entry.set_sensitive(True)
+            self.web_busy()
+
+    def drop_web_requests(self):
+        """Another theme: every request still running for the page is stale."""
+        self.web_generation += 1                  # wallhaven answers of the old search
+        self.web_next_token += 1                  # what Next started
+        self.web_next_stop.set()
+        if "wallhaven" in self.web_next_pending or self.web_loading:
+            self.web_next_pending.discard("wallhaven")
+            self.web_loading = False
+        if "web" in self.web_next_pending:
+            self.web_next_pending.discard("web")
+            theme_ai.cancel()
+            self.web_ai_busy = False
+            self.web_ai_face(False)
+        self.drop_first_ask()
         self.web_busy()
 
     def web_cancel_next(self):

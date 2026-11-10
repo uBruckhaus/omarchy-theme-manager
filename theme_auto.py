@@ -153,6 +153,16 @@ def update_settings(**values) -> None:
     theme_core._update_settings(theme_core.settings_file(), **values)
 
 
+def store_default_settings() -> None:
+    """Defaults that are on stored as on, so settings.json and a backup show
+    them: Search the web for wallpapers (only a missing value; yours stays)."""
+    if not isinstance(settings().get("ask_ai_web"), bool):
+        try:
+            update_settings(ask_ai_web=True)
+        except OSError:
+            pass
+
+
 def workspace_wallpapers_enabled() -> bool:
     return settings().get("workspace_wallpapers") is True
 

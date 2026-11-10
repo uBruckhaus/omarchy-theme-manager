@@ -1,6 +1,7 @@
 """Wallpaper pictures from the web (Ask AI with web tools): only public
 https picture links, only public addresses, only real picture bytes; and the
 wallpaper prompt, its answer check and the helpers' web tools."""
+import os
 import sys
 import tempfile
 import unittest
@@ -101,6 +102,32 @@ class FetchTests(unittest.TestCase):
             self.assertTrue(web_images.already_added(self.roots, "nord", item))
             with self.assertRaises(FileExistsError):
                 web_images.download(self.roots, "nord", item)
+
+    def test_a_cached_picture_is_only_a_small_own_file_in_a_private_folder(self):
+        with patch.object(web_images, "resolve", lambda h: ["93.184.216.34"]), \
+                patch.object(web_images, "fetch_pinned", self.fetch):
+            url = "https://img.example.com/Snowy%20Hill.jpg"
+            path = web_images.get(url)
+            folder = web_images.cache_dir()
+            self.assertEqual(os.stat(folder).st_mode & 0o777, 0o700)
+            os.chmod(folder, 0o755)
+            self.assertIsNone(web_images.cached(url))             # open to others: not trusted
+            web_images.get(url)                                   # fetched again, folder closed again
+            self.assertEqual(os.stat(folder).st_mode & 0o777, 0o700)
+            data = path.read_bytes()
+            path.unlink()
+            secret = folder.parent / "elsewhere.png"
+            secret.write_bytes(data)
+            path.symlink_to(secret)
+            self.assertIsNone(web_images.cached(url))             # a link is never used
+            with self.assertRaises(OSError):
+                web_images.read_cached(path)
+            path.unlink()
+            with open(path, "wb") as big:
+                big.truncate(theme_core.MAX_BACKGROUND_BYTES + 1)
+            self.assertIsNone(web_images.cached(url))             # over the wallpaper limit
+            with self.assertRaises(OSError):
+                web_images.read_cached(path)
 
     def test_curl_is_pinned_https_only_without_redirects(self):
         with patch.object(theme_core, "read_bounded_output", return_value=(b"x", True)) as run:
@@ -229,6 +256,16 @@ class WebToolTests(unittest.TestCase):
         self.assertTrue(theme_ai.searches_web("claude", {"ask_ai_web": True}))
         self.assertFalse(theme_ai.searches_web("claude", {"ask_ai_web": False}))
         self.assertFalse(theme_ai.searches_web("codex", {"ask_ai_web": True}))
+
+    def test_web_search_is_stored_as_on_and_a_choice_stays(self):
+        import theme_auto
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(theme_core, "settings_file", lambda: Path(tmp) / "settings.json"):
+            theme_auto.store_default_settings()
+            self.assertIs(theme_auto.settings()["ask_ai_web"], True)
+            theme_auto.update_settings(ask_ai_web=False)
+            theme_auto.store_default_settings()
+            self.assertIs(theme_auto.settings()["ask_ai_web"], False)
 
     def test_the_setting_is_a_checked_boolean(self):
         theme_backup._validate_settings({"ask_ai_web": False})
