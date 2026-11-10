@@ -459,3 +459,14 @@ CORNER_TRANSLATIONS = {
         nl='Hoeken van de pop-up, zijn kaarten en alle bedieningselementen (knoppen, keuzelijsten, velden). „Zoals vensters” volgt de vensterafronding van Hyprland.',
         pl='Narożniki okna, jego kart i wszystkich kontrolek (przyciski, listy wyboru, pola). „Jak okna” podąża za zaokrągleniem okien Hyprlanda.'),
 }
+
+
+# The microphone beside the Ask AI fields (dictation.py).
+EXTRA["Speak instead of typing: {0} writes what you say at the cursor. Click again to stop."] = dict(
+    de="Sprechen statt tippen: {0} schreibt, was du sagst, an die Stelle des Cursors. Noch einmal klicken zum Beenden.",
+    fr="Parler au lieu de taper : {0} écrit ce que tu dis à l'endroit du curseur. Clique encore pour arrêter.",
+    es="Hablar en lugar de escribir: {0} escribe lo que dices donde está el cursor. Haz clic otra vez para parar.",
+    it="Parla invece di scrivere: {0} scrive quello che dici dove si trova il cursore. Clicca di nuovo per fermare.",
+    pt="Falar em vez de escrever: {0} escreve o que dizes onde está o cursor. Clica outra vez para parar.",
+    nl="Spreken in plaats van typen: {0} schrijft wat je zegt op de plek van de cursor. Klik nog eens om te stoppen.",
+    pl="Mów zamiast pisać: {0} wpisuje to, co mówisz, w miejscu kursora. Kliknij ponownie, aby zakończyć.")

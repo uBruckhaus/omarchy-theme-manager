@@ -18,6 +18,7 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Gdk, GLib, Graphene, Gtk, Pango  # noqa: E402
 
 import corners  # noqa: E402
+import dictation  # noqa: E402
 import theme_ai  # noqa: E402
 import theme_auto  # noqa: E402
 import theme_core  # noqa: E402
@@ -176,6 +177,9 @@ class AskPageMixin:
         entry.connect("activate", lambda *_args: self.ask_now())
         prompt_row.append(entry)
         self.ask_entry = entry
+        mic = dictation.mic_button(entry)               # speak the request (Omarchy's dictation)
+        if mic is not None:
+            prompt_row.append(mic)
         ask = Gtk.Button()
         ask.add_css_class("tm-paste")
         ask.add_css_class("suggested")
@@ -1031,6 +1035,9 @@ class AskPageMixin:
         entry.connect("activate", send)
         go.connect("clicked", send)
         row.append(entry)
+        mic = dictation.mic_button(entry)
+        if mic is not None:
+            row.append(mic)
         row.append(go)
         card.append(row)
         card.tm_refine = entry
