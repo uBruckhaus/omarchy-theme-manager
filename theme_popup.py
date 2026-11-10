@@ -763,6 +763,17 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_ai_button.add_css_class("suggested")
         self.web_ai_button.connect("clicked", lambda *_: self.web_ai_stop() if self.web_ai_busy else self.web_ai_ask())
         ai_row.append(self.web_ai_button)
+        # Pictures per batch (remembered): what Ask asks for from the web, and what Next shows.
+        self.web_count_drop = Gtk.DropDown.new_from_strings(
+            [_("{0} pictures").format(n) for n in theme_ai.WALLPAPER_COUNTS])
+        self.web_count_drop.add_css_class("tm-count")
+        self.web_count_drop.set_valign(Gtk.Align.CENTER)
+        self.web_count_drop.set_tooltip_text(
+            _("Pictures per batch: from the web and from wallhaven.cc; Next shows the next batch"))
+        self.web_count_drop.update_property([Gtk.AccessibleProperty.LABEL], [_("Pictures per batch")])
+        self.web_count_drop.set_selected(theme_ai.WALLPAPER_COUNTS.index(theme_ai.wallpaper_count(theme_auto.settings())))
+        self.web_count_drop.connect("notify::selected", lambda *_: self.web_count_changed())
+        ai_row.append(self.web_count_drop)
         self.web_ai_box.append(ai_row)
         self.web_ai_chips = ws_wrap()
         self.web_ai_chips.set_visible(False)
@@ -788,8 +799,6 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         ws_scroller = Gtk.ScrolledWindow()
         ws_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
         ws_scroller.set_vexpand(True)
-        ws_scroller.connect("edge-reached", lambda _s, pos: pos == Gtk.PositionType.BOTTOM
-                            and self.load_more_web_results())
         self.web_grid = Gtk.FlowBox()
         self.web_grid.add_css_class("tm-grid")
         self.web_grid.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -797,12 +806,27 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_grid.set_column_spacing(8)
         self.web_grid.set_row_spacing(8)
         self.web_grid.set_valign(Gtk.Align.START)
-        ws_scroller.set_child(self.web_grid)
+        # One batch at a time; Next at the end of the grid shows (or asks for) the next one.
+        results_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        results_box.append(self.web_grid)
+        self.web_next = Gtk.Button()
+        self.web_next.add_css_class("tm-paste")
+        self.web_next.set_halign(Gtk.Align.CENTER)
+        self.web_next.set_margin_top(4)
+        self.web_next.set_margin_bottom(8)
+        self.web_next.connect("clicked", lambda *_: self.web_next_batch())
+        self.web_next.set_visible(False)
+        results_box.append(self.web_next)
+        ws_scroller.set_child(results_box)
         web_page.append(ws_scroller)
         stack.add_named(web_page, "websearch")
         self.web_query = ""
         self.web_page_no = 0
         self.web_last_page = 0
+        self.web_results = []       # wallhaven results loaded so far
+        self.web_shown = 0          # of them shown (one batch more per Next)
+        self.web_more = False       # the last web ask brought pictures: Next asks again
+        self.web_ai_request = ""
         self.web_loading = False
         self.web_generation = 0     # a new search makes late answers of an old one stale
         self.web_pictures = {}      # id -> Gtk.Picture waiting for its thumbnail
@@ -3661,6 +3685,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-line dropdown > button {{ min-height: 0; padding: 2px 8px; border: 1px solid alpha({fg_hex}, 0.35);
             border-radius: {control}px; background: transparent; }}
         .tm-line dropdown label {{ font-size: 11px; }}
+        dropdown.tm-count > button {{ min-height: 0; padding: 4px 8px; border: 1px solid alpha({fg_hex}, 0.35);
+            border-radius: {control}px; background: transparent; }}
         .tm-line switch {{ min-height: 16px; min-width: 36px; }}
         .tm-line switch slider {{ min-width: 14px; min-height: 14px; margin: 1px; }}
         .tm-line button.sc-small {{ font-size: 11px; min-height: 0; padding: 2px 8px;
@@ -4558,6 +4584,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.web_ai_button.set_tooltip_text(
                 _("Ask {0} for search words: it gets your words and this theme's name and colors; the search "
                   "itself uses no tokens").format(helper["name"]))
+        self.web_count_drop.set_selected(theme_ai.WALLPAPER_COUNTS.index(self.web_count()))
+        self.update_web_next()
         (self.web_ai_entry if ask and helper is not None else self.web_search).grab_focus()
 
     @staticmethod
@@ -4599,7 +4627,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if web else _("Asking {0} for wallpaper ideas…").format(helper["name"])))
         colors = dict(theme_custom.load_palette(theme).colors)
         rejected = list(self.web_ai_searched[-20:])
-        self._async(lambda: theme_ai.ask_wallpapers(helper["id"], words, theme.name, colors, rejected, web=web),
+        count = self.web_count()
+        self.web_ai_request = words
+        self.update_web_next()
+        self._async(lambda: theme_ai.ask_wallpapers(helper["id"], words, theme.name, colors, rejected, web=web,
+                                                    count=count),
                     self.web_ai_done)
 
     def web_ai_stop(self):
@@ -4613,8 +4645,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if error is not None or not result:
             self.web_hint.set_label(self.web_hint_text(_("Ask AI failed: {0}").format(
                 error or _("no usable search words in the answer"))))
+            self.update_web_next()
             return
         summary, queries, images = result
+        self.web_more = bool(images)
         clear(self.web_ai_chips)
         if summary:
             label = Gtk.Label(label=summary, xalign=0, wrap=True, max_width_chars=40)
@@ -4659,7 +4693,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return
         self.web_query = query
         self.web_page_no = 0
-        self.web_last_page = 1
+        self.web_last_page = 1 if query else 0
+        self.web_results = []
+        self.web_shown = 0
         self.web_generation += 1
         self.web_pictures = {}
         self.web_items = list(self.web_pics)       # Ask AI's pictures from the web first
@@ -4674,6 +4710,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if self.web_pics:
             self.load_web_thumbs(list(self.web_pics), self.web_generation)
         self.load_more_web_results()
+        self.update_web_next()
 
     def rebuild_web_tiles(self):
         """The search results shown so far, again at the current tile size."""
@@ -4700,41 +4737,150 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return web_images.already_added(None, theme.slug, item)
         return wallpaper_search.already_added(None, theme.slug, item)
 
+    def web_count(self) -> int:
+        return theme_ai.wallpaper_count(theme_auto.settings())
+
+    def web_count_changed(self):
+        index = self.web_count_drop.get_selected()
+        if 0 <= index < len(theme_ai.WALLPAPER_COUNTS):
+            count = theme_ai.WALLPAPER_COUNTS[index]
+            if count != self.web_count():
+                self.save_setting(wallpaper_count=count)
+        self.update_web_next()
+
+    def web_more_results(self) -> bool:
+        return bool(self.web_query) and (len(self.web_results) > self.web_shown or
+                                         self.web_page_no < self.web_last_page)
+
+    def update_web_next(self):
+        """Next at the end of the grid: what it does, in its tooltip."""
+        count = self.web_count()
+        helper = self.web_ai_helper
+        web = self.web_more and helper is not None and bool(self.web_ai_request)
+        wallhaven = self.web_more_results()
+        self.web_next.set_visible((web or wallhaven) and not self.web_ai_busy and not self.web_loading)
+        face = Gtk.Box(spacing=6)
+        face.append(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        face.append(Gtk.Label(label=_("Next {0}").format(count)))
+        self.web_next.set_child(face)
+        tips = []
+        if web:
+            tips.append(_("{0} more from the web (asks {1} again)").format(count, helper["name"]))
+        if wallhaven:
+            tips.append(_("{0} more from {1}").format(count, wallpaper_search.SOURCE))
+        self.web_next.set_tooltip_text(" · ".join(tips) or None)
+
+    def web_next_batch(self):
+        """The next batch of each kind: pictures from the web (asks the helper
+        again, without the ones shown; tokens), wallhaven results (no tokens)."""
+        if self.web_more and self.web_ai_helper is not None and self.web_ai_request and not self.web_ai_busy:
+            self.web_more_from_web()
+        if self.web_more_results():
+            self.load_more_web_results()
+
+    def web_more_from_web(self):
+        theme, helper = self.active_theme, self.web_ai_helper
+        if theme is None or helper is None:
+            return
+        self.web_ai_busy = True
+        self.web_ai_face(True)
+        self.web_busy()
+        self.update_web_next()
+        self.web_hint.set_label(self.web_hint_text(
+            _("Asking {0} for more pictures from the web…").format(helper["name"])))
+        colors = dict(theme_custom.load_palette(theme).colors)
+        rejected = list(self.web_ai_searched[-20:])
+        seen = [p.url for p in self.web_pics][:theme_ai.MAX_SEEN]
+        words, count = self.web_ai_request, self.web_count()
+        self._async(lambda: theme_ai.ask_wallpapers(helper["id"], words, theme.name, colors, rejected, web=True,
+                                                    count=count, seen=seen),
+                    self.web_more_done)
+
+    def web_more_done(self, result, error):
+        self.web_ai_busy = False
+        self.web_ai_face(False)
+        self.web_busy()
+        if error is not None or not result:
+            self.web_hint.set_label(self.web_hint_text(_("Ask AI failed: {0}").format(
+                error or _("no usable search words in the answer"))))
+            self.web_more = False
+            self.update_web_next()
+            return
+        known = {p.url for p in self.web_pics}
+        fresh = [web_images.picture(i) for i in result[2] if i["url"] not in known]
+        theme = self.active_theme
+        at = len(self.web_pics)                   # after the web pictures shown, before wallhaven's
+        for offset, item in enumerate(fresh):
+            added = theme is not None and web_images.already_added(None, theme.slug, item)
+            self.web_grid.insert(self.build_web_tile(item, added), at + offset)
+        self.web_pics.extend(fresh)
+        self.web_items = list(self.web_pics) + self.web_results[:self.web_shown]
+        self.web_more = bool(fresh)
+        self.web_hint.set_label(self.web_hint_text(
+            _("{0} more pictures from the web.").format(len(fresh)) if fresh else _("No more pictures from the web.")))
+        if fresh:
+            self.load_web_thumbs(fresh, self.web_generation)
+        self.update_web_next()
+
     def load_more_web_results(self):
-        if self.web_loading or not self.web_query or self.web_page_no >= self.web_last_page:
+        """The next batch of wallhaven results, loading pages as needed."""
+        if self.web_loading or not self.web_more_results():
             return
         self.web_loading = True
         self.web_busy()
-        query, page, generation = self.web_query, self.web_page_no + 1, self.web_generation
-        self.web_hint.set_label(self.web_hint_text(f"Searching {wallpaper_search.SOURCE} for “{query}”…"))
-        self._async(lambda: wallpaper_search.search(query, page),
-                    lambda result, error: self.show_web_results(generation, page, result, error))
+        self.update_web_next()
+        want = self.web_shown + self.web_count()
+        query, generation = self.web_query, self.web_generation
+        have, page, last = len(self.web_results), self.web_page_no, self.web_last_page
+        known = {r.id for r in self.web_results}
+        self.web_hint.set_label(self.web_hint_text(
+            _("Searching {0} for “{1}”…").format(wallpaper_search.SOURCE, query)))
 
-    def show_web_results(self, generation, page, result, error):
+        def fetch():
+            found, error, p, lp = [], None, page, last
+            while have + len(found) < want and p < lp:
+                try:
+                    results, lp = wallpaper_search.search(query, p + 1)
+                except (OSError, ValueError) as exc:
+                    error = exc
+                    break
+                p += 1
+                fresh = [r for r in results if r.id not in known]
+                known.update(r.id for r in fresh)
+                found += fresh
+                if not fresh:
+                    break
+            return found, p, lp, error
+        self._async(fetch, lambda result, error: self.show_web_results(generation, want, result, error))
+
+    def show_web_results(self, generation, want, result, error):
         if generation != self.web_generation:
             return  # answer to an older search
         self.web_loading = False
         self.web_busy()
-        if error is not None or result is None:
-            self.web_hint.set_label(self.web_hint_text(_("Search failed: {0}").format(error)))
-            return
-        results, last_page = result
+        found, page, last_page, fetch_error = result if result else ([], self.web_page_no, self.web_page_no, error)
+        error = error or fetch_error
         self.web_page_no, self.web_last_page = page, last_page
+        self.web_results += found
+        batch = self.web_results[self.web_shown:want]
+        self.web_shown = min(want, len(self.web_results))
         theme = self.active_theme
-        for item in results:
+        for item in batch:
             added = theme is not None and wallpaper_search.already_added(None, theme.slug, item)
             self.web_grid.append(self.build_web_tile(item, added))
-            self.web_items = getattr(self, "web_items", []) + [item]
-        shown = len(self.children_of(self.web_grid))
-        if not shown:
-            status = _("Nothing found for “{0}”. Try other words.").format(self.web_query)
-        elif len(self.web_pics) == shown:
-            status = _("{0} pictures from the web.").format(shown)
+        self.web_items = list(self.web_pics) + self.web_results[:self.web_shown]
+        if error is not None and not batch:
+            status = _("Search failed: {0}").format(error)
+        elif not self.web_results:
+            status = (_("{0} pictures from the web.").format(len(self.web_pics)) if self.web_pics
+                      else _("Nothing found for “{0}”. Try other words.").format(self.web_query))
         else:
-            more = " " + _("Scroll down for more.") if page < last_page else ""
-            status = _("{0} wallpapers for “{1}”.").format(shown, self.web_query) + more + " " + _("Enter on a tile adds it.")
+            more = _(" Next shows more.") if self.web_more_results() else ""
+            status = _("{0} of {1}+ wallpapers for “{2}”.{3}").format(
+                self.web_shown, len(self.web_results), self.web_query, more) + " " + _("Enter on a tile adds it.")
         self.web_hint.set_label(self.web_hint_text(status))
-        self.load_web_thumbs([r for r in results if r.id in self.web_pictures], generation)
+        self.load_web_thumbs([r for r in batch if r.id in self.web_pictures], generation)
+        self.update_web_next()
 
     @staticmethod
     def children_of(widget) -> list:

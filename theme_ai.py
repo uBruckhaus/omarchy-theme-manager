@@ -700,7 +700,17 @@ def build_prompt(request: str, themes, catalog, fonts, previous: dict | None = N
     return prompt[:MAX_PROMPT]
 
 
-MAX_WEB_IMAGES = 8           # picture links of the wallpaper page's Ask AI
+MAX_WEB_IMAGES = 8           # picture links of the wallpaper page's Ask AI (default batch below)
+WALLPAPER_COUNTS = (5, 10, 20)   # Settings key wallpaper_count: pictures per batch, chosen next to Ask
+DEFAULT_WALLPAPER_COUNT = 10
+MAX_SEEN = 60                # web pictures already shown that a repeat ask leaves out
+
+
+def wallpaper_count(settings: dict) -> int:
+    """Pictures per batch on the wallpaper search page (5, 10 or 20)."""
+    value = settings.get("wallpaper_count")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value in WALLPAPER_COUNTS \
+        else DEFAULT_WALLPAPER_COUNT
 MAX_CANDIDATE_IMAGES = 3     # per theme suggestion
 MAX_WALLPAPER_QUERIES = 3
 QUERY_WORD_RE = re.compile(r"^[^\W_](?:[^\W_]|['-])*$")
@@ -718,7 +728,8 @@ def _rules(web: bool) -> str:
              "Do not use tools, do not read files.") + " Answer with ONE JSON object only.")
 
 
-def build_wallpaper_prompt(request: str, name: str, colors: dict, rejected=None, web: bool = False) -> str:
+def build_wallpaper_prompt(request: str, name: str, colors: dict, rejected=None, web: bool = False,
+                           count: int = MAX_WEB_IMAGES, seen=None) -> str:
     """Ask for wallhaven.cc search words (and, with web tools, picture links)
     for one theme: the user's words, the theme's name and main colors only."""
     theme = {"name": _data(name, 60),
@@ -733,6 +744,9 @@ def build_wallpaper_prompt(request: str, name: str, colors: dict, rejected=None,
     if rejected:
         lines.append("already searched (try other words): " +
                      json.dumps([_data(r, 80) for r in rejected][:20], ensure_ascii=False))
+    if seen:
+        lines.append("pictures already shown (give other ones): " +
+                     json.dumps([_data(u, 300) for u in seen][:MAX_SEEN], ensure_ascii=False))
     lines += [
         "</data>",
         "",
@@ -743,7 +757,7 @@ def build_wallpaper_prompt(request: str, name: str, colors: dict, rejected=None,
         "Fit the words to the request and, when the request leaves it open, to the theme's mood and colors.",
     ]
     if web:
-        lines += ["", f"Also search the web for up to {MAX_WEB_IMAGES} fitting wallpaper pictures beyond "
+        lines += ["", f"Also search the web for up to {count} fitting wallpaper pictures beyond "
                       "wallhaven.cc. " + WEB_IMAGE_RULES]
     lines += [
         "",
@@ -1222,17 +1236,23 @@ def ask(helper_id: str, request: str, previous: dict | None = None, rejected=Non
     return verify(first_json(text), themes, catalog, fonts, parent, limit, web=web)
 
 
-def ask_wallpapers(helper_id: str, request: str, name: str, colors: dict, rejected=None, web: bool = False):
-    """Words for the wallpaper search of one theme, and (web) picture links:
-    (summary, queries, images). Raises RuntimeError/ValueError."""
+def ask_wallpapers(helper_id: str, request: str, name: str, colors: dict, rejected=None, web: bool = False,
+                   count: int = DEFAULT_WALLPAPER_COUNT, seen=None):
+    """Words for the wallpaper search of one theme, and (web) up to `count`
+    picture links, none of `seen` (the web pictures already shown, so Next
+    gets other ones): (summary, queries, images). Raises RuntimeError/ValueError."""
     request = " ".join(str(request).split())
     if not request or len(request) > MAX_REQUEST:
         raise ValueError("request")
+    count = max(1, min(int(count), max(WALLPAPER_COUNTS)))
+    seen = [url for url in (web_images.public_https_url(u) for u in list(seen or [])[:MAX_SEEN]) if url]
     web = web and can_search_web(helper_id)
-    text = run(helper_id, build_wallpaper_prompt(request, name, colors, rejected, web=web), web=web)
+    text = run(helper_id, build_wallpaper_prompt(request, name, colors, rejected, web=web, count=count, seen=seen),
+               web=web)
     answer = first_json(text)
     summary, queries = verify_wallpaper_answer(answer)
-    images = web_images.verify_images(answer.get("images"), MAX_WEB_IMAGES) if web else []
+    images = [i for i in web_images.verify_images(answer.get("images"), max(WALLPAPER_COUNTS))
+              if i["url"] not in seen][:count] if web else []
     if not queries and not images:
         raise ValueError("no usable search words in the answer")
     return summary, queries, images

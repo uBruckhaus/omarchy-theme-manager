@@ -157,6 +157,38 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(len(refined[0]["wallpaper_images"]), 3)
 
 
+class BatchTests(unittest.TestCase):
+    def test_wallpaper_count_is_5_10_or_20_default_10(self):
+        self.assertEqual(theme_ai.wallpaper_count({}), 10)
+        self.assertEqual(theme_ai.wallpaper_count({"wallpaper_count": 20}), 20)
+        for bad in (7, "5", True, None, 0):
+            self.assertEqual(theme_ai.wallpaper_count({"wallpaper_count": bad}), 10, bad)
+        theme_backup._validate_settings({"wallpaper_count": 5})
+        for bad in (7, "10", True, 0):
+            with self.assertRaises(ValueError):
+                theme_backup._validate_settings({"wallpaper_count": bad})
+
+    def test_a_repeat_ask_leaves_out_what_was_shown_and_keeps_to_count(self):
+        seen_prompt = {}
+
+        def fake_run(helper, argv_extra, prompt, timeout, web=False):
+            seen_prompt["prompt"] = prompt
+            images = ", ".join(f'{{"url": "https://img.example.com/{i}.jpg"}}' for i in range(8))
+            return '{"summary": "s", "queries": [], "images": [' + images + ']}'
+        seen = ["https://img.example.com/0.jpg", "https://img.example.com/1.jpg", "http://evil.example/x.jpg",
+                "https://192.168.1.1/x.jpg"]
+        with patch.object(theme_ai, "_run_helper", fake_run):
+            _summary, _queries, images = theme_ai.ask_wallpapers("claude", "snow", "Nord", COLORS, web=True,
+                                                                 count=5, seen=seen)
+        self.assertEqual([i["url"] for i in images], [f"https://img.example.com/{i}.jpg" for i in range(2, 7)])
+        prompt = seen_prompt["prompt"]
+        self.assertIn("pictures already shown (give other ones)", prompt)
+        self.assertIn("https://img.example.com/1.jpg", prompt)
+        self.assertNotIn("evil.example", prompt)                    # only public https links go back
+        self.assertNotIn("192.168.1.1", prompt)
+        self.assertIn("up to 5 fitting wallpaper pictures", prompt)
+
+
 class WebToolTests(unittest.TestCase):
     def test_claude_gets_only_web_search_and_fetch(self):
         claude = theme_ai.HELPERS["claude"]

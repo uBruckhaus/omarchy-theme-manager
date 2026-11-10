@@ -1043,20 +1043,66 @@ class ViewLayerTest(unittest.TestCase):
                 entries[label.get_label()] = button
         return entries
 
-    def test_web_search_lists_results_and_pages(self):
+    def test_web_search_shows_a_batch_and_next_shows_more(self):
+        import theme_ai
         theme = self.make_theme("user", "alpha")
+        self.app.save_setting(wallpaper_count=5)
+        pages = {1: ("aa1111", "bb2222", "cc3333"), 2: ("dd4444", "ee5555", "ff6666"), 3: ("gg7777", "hh8888", "ii9999")}
+
+        def search(query, page=1):
+            self.searches.append((query, page))
+            like = self.web_results[0]
+            return [like.__class__(wid, f"https://wallhaven.cc/w/{wid}", like.thumb, like.full, "2560x1440", 10)
+                    for wid in pages.get(page, ())], 3
+        self.ws.search = search
         self.app.open_wallpapers_for(theme)
         self.app.open_web_search()
         self.assertEqual(self.app.stack.get_visible_child_name(), "websearch")
         self.app.web_search.set_text("misty  forest")
         self.app.run_web_search()
-        self.assertEqual(self.searches, [("misty forest", 1)])
-        self.assertEqual(len(self.children(self.app.web_grid)), 3)
-        self.assertIn("Scroll down for more", self.app.web_hint.get_label())
-        self.app.load_more_web_results()
-        self.assertEqual(self.searches[-1], ("misty forest", 2))
-        self.app.load_more_web_results()          # last page reached: no request
-        self.assertEqual(len(self.searches), 2)
+        self.assertEqual(self.searches, [("misty forest", 1), ("misty forest", 2)])   # pages as needed for 5
+        self.assertEqual(len(self.children(self.app.web_grid)), 5)                  # one batch, not all
+        self.assertIn("5 of 6+ wallpapers", self.app.web_hint.get_label())
+        self.assertIn("Next shows more", self.app.web_hint.get_label())
+        self.assertTrue(self.app.web_next.get_visible())
+        self.assertEqual(self.app.web_next.get_tooltip_text(), "5 more from wallhaven.cc")    # no Ask AI: no tokens
+        self.app.web_next.emit("clicked")
+        self.assertEqual(self.searches[-1], ("misty forest", 3))
+        self.assertEqual(len(self.children(self.app.web_grid)), 9)
+        self.assertFalse(self.app.web_next.get_visible())                            # nothing more
+        self.app.load_more_web_results()                                             # last page: no request
+        self.assertEqual(len(self.searches), 3)
+
+    def test_web_next_asks_again_without_the_pictures_shown(self):
+        import theme_ai
+        import web_images
+        theme = self.make_theme("user", "alpha")
+        self.app.save_setting(ask_ai=True, wallpaper_count=5)
+        helper = {"id": "claude", "name": "Claude Code", "signed_in": True, "web": True}
+        first = ("Calm", [], [{"url": f"https://img.example.com/{i}.jpg", "title": f"P{i}"} for i in range(5)])
+        more = ("Calm", [], [{"url": "https://img.example.com/5.jpg", "title": "P5"}])
+        with patch.object(theme_ai, "ready_helpers", return_value=[helper]):
+            self.app.open_wallpapers_for(theme)
+            self.app.open_web_search(ask=True)
+        self.assertEqual(self.app.web_count_drop.get_selected(), theme_ai.WALLPAPER_COUNTS.index(5))
+        with patch.object(self.app, "load_web_thumbs"), \
+                patch.object(theme_ai, "ask_wallpapers", side_effect=[first, more, ("Calm", [], [])]) as ask:
+            self.app.web_ai_entry.set_text("calm")
+            self.app.web_ai_ask()
+            self.assertEqual(ask.call_args.kwargs["count"], 5)
+            self.assertEqual(len(self.children(self.app.web_grid)), 5)
+            self.assertTrue(self.app.web_next.get_visible())
+            self.assertIn("asks Claude Code again", self.app.web_next.get_tooltip_text())
+            self.app.web_next.emit("clicked")
+            self.assertEqual(ask.call_args.kwargs["seen"], [f"https://img.example.com/{i}.jpg" for i in range(5)])
+            self.assertEqual(len(self.children(self.app.web_grid)), 6)
+            self.assertIn("1 more pictures from the web", self.app.web_hint.get_label())
+            self.app.web_next.emit("clicked")
+            self.assertIn("No more pictures from the web", self.app.web_hint.get_label())
+            self.assertFalse(self.app.web_next.get_visible())
+        self.assertIsInstance(self.children(self.app.web_grid)[5].tm_web, web_images.WebPicture)
+        self.app.web_count_drop.set_selected(theme_ai.WALLPAPER_COUNTS.index(20))   # remembered
+        self.assertEqual(theme_ai.wallpaper_count(self.auto.settings()), 20)
 
     def test_web_add_saves_and_marks_tile(self):
         theme = self.make_theme("user", "alpha")

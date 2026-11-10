@@ -125,6 +125,9 @@ def _validate_settings(value: dict) -> None:
             value.pop("ask_ai_helper")      # an unknown or retired helper (Antigravity): the first ready one
     if any(key in value and not isinstance(value[key], bool) for key in boolean):
         raise ValueError("invalid settings")
+    if "wallpaper_count" in value and (isinstance(value["wallpaper_count"], bool)
+                                       or value["wallpaper_count"] not in theme_ai.WALLPAPER_COUNTS):
+        raise ValueError("invalid settings")
     if "ask_prompts" in value and value["ask_prompts"] is not None and \
             not theme_ai.valid_prompts(value["ask_prompts"]):
         raise ValueError("invalid settings")
