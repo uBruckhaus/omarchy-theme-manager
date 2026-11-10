@@ -11,7 +11,9 @@ Omarchy there is no button."""
 from __future__ import annotations
 
 import json
+import os
 import re
+import selectors
 import shutil
 import subprocess
 import time
@@ -22,6 +24,54 @@ from i18n import _
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 _cache = {"at": 0.0, "backend": None}
+OUTPUT_LIMIT = 64 * 1024          # bytes read from a helper's answer; more ends it
+# The one microphone that is recording (a single recorder for the whole app): its "switch off".
+_active = {"off": None}
+
+
+def read_output(argv: list, timeout: float = 3.0, limit: int = OUTPUT_LIMIT) -> tuple[int, str] | None:
+    """Run argv (no shell) and read at most `limit` bytes of its output within `timeout` seconds;
+    None when it fails, takes too long or says too much (then it is ended). Undecodable bytes are
+    replaced, so a broken helper cannot raise here."""
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return None
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    sel = selectors.DefaultSelector()
+    try:
+        sel.register(proc.stdout, selectors.EVENT_READ)
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not sel.select(left):
+                raise TimeoutError
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > limit:
+                raise OverflowError
+        code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        return code, data.decode("utf-8", errors="replace")
+    except (OSError, ValueError, TimeoutError, OverflowError, subprocess.SubprocessError):
+        proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.SubprocessError:
+            pass
+        return None
+    finally:
+        sel.close()
+        proc.stdout.close()
+
+
+def stop_all():
+    """The popup closes: a dictation it started must not go on writing into another window."""
+    off = _active["off"]
+    if off is not None:
+        off()
 
 
 SETUP_ROUTE = "setup.default.dictation"      # Omarchy's menu: Setup › Defaults › Dictation
@@ -40,15 +90,12 @@ def backend(fresh: bool = False) -> str | None:
         return _cache["backend"]
     found = None
     if shutil.which("omarchy-dictation") and shutil.which("omarchy-default-dictation"):
-        try:
-            out = subprocess.run(["omarchy-default-dictation"], capture_output=True, text=True, timeout=3,
-                                 stdin=subprocess.DEVNULL)
-            name = out.stdout.strip()
-            if out.returncode == 0 and NAME.match(name) and shutil.which(f"omarchy-dictation-{name}") \
-                    and shutil.which(name):
+        answer = read_output(["omarchy-default-dictation"], limit=256)
+        if answer is not None:
+            code, text = answer
+            name = text.strip()
+            if code == 0 and NAME.match(name) and shutil.which(f"omarchy-dictation-{name}") and shutil.which(name):
                 found = name
-        except (OSError, subprocess.SubprocessError):
-            found = None
     _cache.update(at=now, backend=found)
     return found
 
@@ -83,12 +130,14 @@ def recording(name: str) -> bool | None:
     """Superwhisper says whether it records; other backends: unknown (None)."""
     if name != "superwhisper" or not shutil.which("superwhisper"):
         return None
-    try:
-        out = subprocess.run(["superwhisper", "status"], capture_output=True, text=True, timeout=3,
-                             stdin=subprocess.DEVNULL)
-        return json.loads(out.stdout[:200_000]).get("phase") == "recording"
-    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+    answer = read_output(["superwhisper", "status"])
+    if answer is None:
         return None
+    try:
+        status = json.loads(answer[1])
+    except ValueError:
+        return None
+    return status.get("phase") == "recording" if isinstance(status, dict) else None
 
 
 def setup_popover(button: Gtk.Widget):
@@ -138,6 +187,14 @@ def mic_button(field) -> Gtk.ToggleButton | None:
         state["quiet"] = True
         button.set_active(False)
         state["quiet"] = False
+        if _active["off"] is stop_here:
+            _active["off"] = None
+
+    def stop_here():
+        """Stop the dictation this button started (the popup closes, or another field takes over)."""
+        if button.get_active():
+            run("stop")
+            quietly_off()
 
     def watch():
         if recording(state["name"]) is False and button.get_active():   # stopped with its own shortcut
@@ -162,7 +219,14 @@ def mic_button(field) -> Gtk.ToggleButton | None:
             field.get_buffer().place_cursor(field.get_buffer().get_end_iter())
         else:
             field.set_position(-1)
+        if btn.get_active():
+            other = _active["off"]
+            if other is not None and other is not stop_here:
+                other()                                 # one recorder: the other field stops first
+            _active["off"] = stop_here
         run("start" if btn.get_active() else "stop")
+        if not btn.get_active() and _active["off"] is stop_here:
+            _active["off"] = None
         if btn.get_active() and not state["poll"]:
             state["poll"] = GLib.timeout_add(1000, watch)
     button.connect("toggled", toggled)

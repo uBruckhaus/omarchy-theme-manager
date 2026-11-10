@@ -47,6 +47,7 @@ else:
 import atexit
 
 import corners
+import dictation
 import more_catalog
 import more_plugins
 import theme_auto
@@ -6072,6 +6073,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.cancel_confirm()  # never reopen onto a stale question
         if self.shot_dialog_open():
             self.finish_screenshot_note(True)      # a note already typed is kept (none typed, no file)
+        dictation.stop_all()                    # no dictation goes on into another window
         self.ws_hover_hide()
         if self.settings_previous_size is not None:
             self.stack.set_visible_child_name("themes")
