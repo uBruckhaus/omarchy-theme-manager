@@ -1073,6 +1073,52 @@ class ViewLayerTest(unittest.TestCase):
         self.app.load_more_web_results()                                             # last page: no request
         self.assertEqual(len(self.searches), 3)
 
+    def test_web_next_becomes_cancel_and_cancel_stops_what_it_started(self):
+        import theme_ai
+        theme = self.make_theme("user", "alpha")
+        self.app.save_setting(ask_ai=True, wallpaper_count=5)
+        helper = {"id": "claude", "name": "Claude Code", "signed_in": True, "web": True}
+        pages = {p: [f"{c}{c}{p}{p}{p}{p}" for c in "abc"] for p in (1, 2, 3)}
+
+        def search(query, page=1):
+            self.searches.append((query, page))
+            like = self.web_results[0]
+            return [like.__class__(wid, f"https://wallhaven.cc/w/{wid}", like.thumb, like.full, "2560x1440", 10)
+                    for wid in pages.get(page, ())], 3
+        self.ws.search = search
+        first = ("Calm", ["misty forest"], [{"url": f"https://img.example.com/{i}.jpg"} for i in range(2)])
+        with patch.object(theme_ai, "ready_helpers", return_value=[helper]):
+            self.app.open_wallpapers_for(theme)
+            self.app.open_web_search(ask=True)
+        label = lambda: next(c.get_label() for c in self.descendants(self.app.web_next) if isinstance(c, Gtk.Label))
+        with patch.object(self.app, "load_web_thumbs"), \
+                patch.object(theme_ai, "ask_wallpapers", return_value=first) as ask:
+            self.app.web_ai_entry.set_text("calm")
+            self.app.web_ai_ask()
+            tiles = len(self.children(self.app.web_grid))
+            self.assertEqual(tiles, 2 + 5)
+            self.assertEqual(label(), "Next 5")
+            started = []                              # Next's work, held back: still fetching
+            with patch.object(self.app, "_async", side_effect=lambda work, done: started.append((work, done))), \
+                    patch.object(theme_ai, "cancel") as cancel:
+                self.app.web_next.emit("clicked")
+                self.assertEqual(len(started), 2)         # the web ask and the wallhaven pages
+                self.assertTrue(self.app.web_next.get_visible())
+                self.assertEqual(label(), "Cancel")
+                self.app.web_next.emit("clicked")         # Cancel
+                cancel.assert_called_once()
+            self.assertIn("Cancelled.", self.app.web_hint.get_label())
+            self.assertEqual(label(), "Next 5")           # Next works again
+            self.assertTrue(self.app.web_next.get_visible())
+            ask.return_value = ("Calm", [], [{"url": "https://img.example.com/9.jpg"}])
+            for work, done in started:                    # late answers are not shown
+                done(work(), None)
+            self.assertEqual(len(self.children(self.app.web_grid)), tiles)
+            self.assertIn("Cancelled.", self.app.web_hint.get_label())
+            self.assertFalse(self.app.web_ai_busy or self.app.web_loading)
+            self.app.web_next.emit("clicked")             # and Next still fetches
+            self.assertEqual(len(self.children(self.app.web_grid)), tiles + 1 + 4)
+
     def test_web_next_asks_again_without_the_pictures_shown(self):
         import theme_ai
         import web_images

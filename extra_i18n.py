@@ -435,6 +435,7 @@ ASK_TRANSLATIONS = {
     '{0} pictures': dict(de='{0} Bilder', fr='{0} images', es='{0} imágenes', it='{0} immagini', pt='{0} imagens', nl='{0} afbeeldingen', pl='{0} obrazów'),
     'Pictures per batch': dict(de='Bilder pro Durchgang', fr='Images par lot', es='Imágenes por tanda', it='Immagini per gruppo', pt='Imagens por lote', nl='Afbeeldingen per reeks', pl='Obrazy na partię'),
     'Pictures per batch: from the web and from wallhaven.cc; Next shows the next batch': dict(de='Bilder pro Durchgang: aus dem Web und von wallhaven.cc; „Weitere“ zeigt den nächsten Durchgang', fr='Images par lot : du web et de wallhaven.cc ; « Suivants » affiche le lot suivant', es='Imágenes por tanda: de la web y de wallhaven.cc; «Siguientes» muestra la siguiente tanda', it='Immagini per gruppo: dal web e da wallhaven.cc; «Altri» mostra il gruppo successivo', pt='Imagens por lote: da web e de wallhaven.cc; «Seguintes» mostra o lote seguinte', nl='Afbeeldingen per reeks: van het web en van wallhaven.cc; Volgende toont de volgende reeks', pl='Obrazy na partię: z sieci i z wallhaven.cc; Dalej pokazuje następną partię'),
+    'Cancelled.': dict(de='Abgebrochen.', fr='Annulé.', es='Cancelado.', it='Annullato.', pt='Cancelado.', nl='Geannuleerd.', pl='Anulowano.'),
 }
 
 

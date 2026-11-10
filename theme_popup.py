@@ -814,7 +814,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_next.set_halign(Gtk.Align.CENTER)
         self.web_next.set_margin_top(4)
         self.web_next.set_margin_bottom(8)
-        self.web_next.connect("clicked", lambda *_: self.web_next_batch())
+        self.web_next.connect("clicked", lambda *_: self.web_cancel_next() if self.web_next_pending
+                              else self.web_next_batch())
         self.web_next.set_visible(False)
         results_box.append(self.web_next)
         ws_scroller.set_child(results_box)
@@ -826,6 +827,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_results = []       # wallhaven results loaded so far
         self.web_shown = 0          # of them shown (one batch more per Next)
         self.web_more = False       # the last web ask brought pictures: Next asks again
+        self.web_next_token = 0     # a Cancel makes the answers of what Next started stale
+        self.web_next_pending = set()   # what Next started and is still running: "web", "wallhaven"
+        self.web_next_stop = threading.Event()  # ends Next's page loading between two pages
         self.web_ai_request = ""
         self.web_loading = False
         self.web_generation = 0     # a new search makes late answers of an old one stale
@@ -4691,6 +4695,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         query = wallpaper_search.clean_query(self.web_search.get_text()) if not force else ""
         if not query and not force:
             return
+        if "wallhaven" in self.web_next_pending:
+            self.web_next_stop.set()              # a new search: Next's page loading for the old one ends
+            self.web_next_pending.discard("wallhaven")
+            self.web_loading = False
         self.web_query = query
         self.web_page_no = 0
         self.web_last_page = 1 if query else 0
@@ -4756,6 +4764,15 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         """Next at the end of the grid: what it does, in its tooltip."""
         count = self.web_count()
         helper = self.web_ai_helper
+        if self.web_next_pending:
+            # While Next fetches it is Cancel (as the other stop buttons).
+            face = Gtk.Box(spacing=6)
+            face.append(Gtk.Image.new_from_icon_name("process-stop-symbolic"))
+            face.append(Gtk.Label(label=_("Cancel")))
+            self.web_next.set_child(face)
+            self.web_next.set_tooltip_text(None)
+            self.web_next.set_visible(True)
+            return
         web = self.web_more and helper is not None and bool(self.web_ai_request)
         wallhaven = self.web_more_results()
         self.web_next.set_visible((web or wallhaven) and not self.web_ai_busy and not self.web_loading)
@@ -4773,14 +4790,47 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def web_next_batch(self):
         """The next batch of each kind: pictures from the web (asks the helper
         again, without the ones shown; tokens), wallhaven results (no tokens)."""
+        self.web_next_token += 1
+        self.web_next_stop = threading.Event()
+        token = self.web_next_token
         if self.web_more and self.web_ai_helper is not None and self.web_ai_request and not self.web_ai_busy:
-            self.web_more_from_web()
-        if self.web_more_results():
-            self.load_more_web_results()
+            self.web_next_pending.add("web")
+            self.web_more_from_web(token)
+        if self.web_more_results() and not self.web_loading:
+            self.web_next_pending.add("wallhaven")
+            self.load_more_web_results(token)
+        self.update_web_next()
 
-    def web_more_from_web(self):
+    def web_next_done(self, kind: str, token) -> bool:
+        """Whether an answer of what Next started still counts (not cancelled)."""
+        if token is None:
+            return True
+        if token != self.web_next_token:
+            return False
+        self.web_next_pending.discard(kind)
+        return True
+
+    def web_cancel_next(self):
+        """Cancel: stop the helper's web ask and the page loading Next started;
+        what is shown stays, Next works again."""
+        pending = set(self.web_next_pending)
+        self.web_next_token += 1                 # their answers are stale now
+        self.web_next_stop.set()
+        self.web_next_pending.clear()
+        if "web" in pending:
+            theme_ai.cancel()
+            self.web_ai_busy = False
+            self.web_ai_face(False)
+        if "wallhaven" in pending:
+            self.web_loading = False
+        self.web_busy()
+        self.web_hint.set_label(self.web_hint_text(_("Cancelled.")))
+        self.update_web_next()
+
+    def web_more_from_web(self, token=None):
         theme, helper = self.active_theme, self.web_ai_helper
         if theme is None or helper is None:
+            self.web_next_pending.discard("web")
             return
         self.web_ai_busy = True
         self.web_ai_face(True)
@@ -4794,9 +4844,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         words, count = self.web_ai_request, self.web_count()
         self._async(lambda: theme_ai.ask_wallpapers(helper["id"], words, theme.name, colors, rejected, web=True,
                                                     count=count, seen=seen),
-                    self.web_more_done)
+                    lambda result, error: self.web_more_done(result, error, token))
 
-    def web_more_done(self, result, error):
+    def web_more_done(self, result, error, token=None):
+        if not self.web_next_done("web", token):
+            return                                # cancelled: nothing it brings is shown
         self.web_ai_busy = False
         self.web_ai_face(False)
         self.web_busy()
@@ -4822,9 +4874,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.load_web_thumbs(fresh, self.web_generation)
         self.update_web_next()
 
-    def load_more_web_results(self):
+    def load_more_web_results(self, token=None):
         """The next batch of wallhaven results, loading pages as needed."""
         if self.web_loading or not self.web_more_results():
+            self.web_next_pending.discard("wallhaven")
             return
         self.web_loading = True
         self.web_busy()
@@ -4833,12 +4886,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         query, generation = self.web_query, self.web_generation
         have, page, last = len(self.web_results), self.web_page_no, self.web_last_page
         known = {r.id for r in self.web_results}
+        stop = self.web_next_stop if token is not None else threading.Event()
         self.web_hint.set_label(self.web_hint_text(
             _("Searching {0} for “{1}”…").format(wallpaper_search.SOURCE, query)))
 
         def fetch():
             found, error, p, lp = [], None, page, last
-            while have + len(found) < want and p < lp:
+            while have + len(found) < want and p < lp and not stop.is_set():
                 try:
                     results, lp = wallpaper_search.search(query, p + 1)
                 except (OSError, ValueError) as exc:
@@ -4851,11 +4905,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 if not fresh:
                     break
             return found, p, lp, error
-        self._async(fetch, lambda result, error: self.show_web_results(generation, want, result, error))
+        self._async(fetch, lambda result, error: self.show_web_results(generation, want, result, error, token))
 
-    def show_web_results(self, generation, want, result, error):
-        if generation != self.web_generation:
-            return  # answer to an older search
+    def show_web_results(self, generation, want, result, error, token=None):
+        if generation != self.web_generation or not self.web_next_done("wallhaven", token):
+            return  # answer to an older search, or Next was cancelled
         self.web_loading = False
         self.web_busy()
         found, page, last_page, fetch_error = result if result else ([], self.web_page_no, self.web_page_no, error)
