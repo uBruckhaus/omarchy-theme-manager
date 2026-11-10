@@ -97,8 +97,7 @@ def display_name(name: str) -> str:
 def open_setup():
     """Omarchy's menu at Setup › Defaults › Dictation (argv, not waited for)."""
     if supported() and shutil.which("omarchy-menu"):
-        subprocess.Popen(["omarchy-menu", "summon", SETUP_ROUTE], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        _spawn(["omarchy-menu", "summon", SETUP_ROUTE])
 
 
 SETUP_TITLE = "Set up dictation"
@@ -112,8 +111,16 @@ NOT_SET_UP_TIP = "Speak instead of typing: no dictation program is set up yet. C
 def toggle():
     """omarchy-dictation toggle, as the dictation key does: argv, no shell, not waited for."""
     if supported():
-        subprocess.Popen(["omarchy-dictation", "toggle"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        _spawn(["omarchy-dictation", "toggle"])
+
+
+def _spawn(argv: list):
+    """Start an Omarchy command (argv, no shell, not waited for); one removed meanwhile is ignored."""
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
 
 
 def setup_popover(button: Gtk.Widget):

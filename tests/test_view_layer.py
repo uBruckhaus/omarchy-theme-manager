@@ -896,13 +896,18 @@ class ViewLayerTest(unittest.TestCase):
         previews = self.switcher_dir / "previews"
         (previews / "gamma.png").symlink_to(self.roots.system_themes / "gamma")
         (self.switcher_dir / "fast-signature").write_text("v1")
+        # Since 2.0 the picker cache is rebuilt and waited for (refresh_switcher_cache) off the main
+        # loop; run that call at once here and record the wrapper it goes through.
+        refreshed: list[str] = []
+        self.app._async = lambda fn, on_done: on_done(fn(), None)
+        original = theme_core.refresh_switcher_cache
+        theme_core.refresh_switcher_cache = lambda wrapper, timeout=60.0: refreshed.append(str(wrapper)) or True
+        self.addCleanup(lambda: setattr(theme_core, "refresh_switcher_cache", original))
         self.app.set_theme_hidden(theme, True)
         self.assertFalse((previews / "gamma.png").is_symlink())
-        self.assertEqual(self.preloads, [])
         self.app.set_theme_hidden(theme, False)
         self.assertFalse((self.switcher_dir / "fast-signature").exists())
-        self.assertEqual(len(self.preloads), 1)
-        self.assertTrue(self.preloads[0].endswith("theme-switcher"))
+        self.assertTrue(refreshed and refreshed[-1].endswith("theme-switcher"))
 
 
     def test_resting_pointer_does_not_steal_selection(self):

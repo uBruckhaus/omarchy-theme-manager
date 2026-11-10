@@ -130,3 +130,35 @@ class ScreenshotTests(TestCase):
             self.assertEqual(note.stat().st_mode & 0o777, 0o600)
             with self.assertRaises(FileExistsError):
                 screenshots.save_note(picture, "another")
+
+
+class ScreenshotHardeningTest(TestCase):
+    def test_note_refused_in_a_folder_others_may_write(self):
+        import os
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "shots"
+            folder.mkdir()
+            os.chmod(folder, 0o777)
+            with self.assertRaises(ValueError):
+                screenshots.save_note(folder / "theme-manager-1.png", "a note")
+            self.assertEqual(list(folder.iterdir()), [])
+
+    def test_note_through_a_linked_folder_refused(self):
+        with TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real"
+            real.mkdir(mode=0o700)
+            link = Path(tmp) / "link"
+            link.symlink_to(real)
+            with self.assertRaises(OSError):
+                screenshots.save_note(link / "theme-manager-1.png", "a note")
+            self.assertEqual(list(real.iterdir()), [])
+
+    def test_failed_note_write_leaves_nothing(self):
+        import os
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            os.chmod(folder, 0o700)
+            with patch.object(screenshots.os, "fsync", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    screenshots.save_note(folder / "theme-manager-1.png", "a note")
+            self.assertFalse((folder / "theme-manager-1.txt").exists())

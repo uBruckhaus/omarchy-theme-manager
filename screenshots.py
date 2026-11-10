@@ -99,11 +99,15 @@ def capture(geometry: tuple[int, int, int, int], folder: Path | None = None,
                     while copied < size:
                         chunk = os.read(source, min(1024 * 1024, size - copied))
                         if not chunk:
-                            break
-                        os.write(target, chunk)
+                            raise OSError("the screenshot ended early")
+                        _write_all(target, chunk)
                         copied += len(chunk)
-                finally:
+                    os.fsync(target)
+                except BaseException:
                     os.close(target)
+                    os.unlink(name, dir_fd=dir_fd)      # nothing cut off is left or reported as saved
+                    raise
+                os.close(target)
                 return folder / name
             finally:
                 os.close(source)
@@ -113,6 +117,22 @@ def capture(geometry: tuple[int, int, int, int], folder: Path | None = None,
             os.rmdir(private)
     finally:
         os.close(dir_fd)
+
+
+def _write_all(fd: int, data: bytes):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def _private_folder(folder: Path) -> int:
+    """A handle on a screenshot folder that is yours and closed to others (no link)."""
+    dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    info = os.fstat(dir_fd)
+    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        os.close(dir_fd)
+        raise ValueError("the screenshot folder must be yours and not writable by others")
+    return dir_fd
 
 
 def _taken(dir_fd: int, name: str) -> bool:
@@ -142,7 +162,18 @@ def save_note(picture: Path, note: str) -> Path | None:
     if len(note) > 1000:
         raise ValueError("screenshot note is too long")
     path = picture.with_suffix(".txt")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as output:
-        output.write(note + "\n")
+    dir_fd = _private_folder(picture.parent)           # checked again, then written through its handle
+    try:
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                     dir_fd=dir_fd)
+        try:
+            _write_all(fd, (note + "\n").encode("utf-8"))
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            os.unlink(path.name, dir_fd=dir_fd)
+            raise
+        os.close(fd)
+    finally:
+        os.close(dir_fd)
     return path

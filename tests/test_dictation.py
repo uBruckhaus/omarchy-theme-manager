@@ -76,6 +76,11 @@ class BackendTest(unittest.TestCase):
         self.assertEqual((code, text), (0, "a\ufffdb"))                                       # no UnicodeDecodeError
         self.assertIsNone(dictation.read_output(["/nonexistent/program"]))
 
+    def test_program_removed_meanwhile_is_ignored(self):
+        with mock.patch.object(dictation, "supported", return_value=True), \
+                mock.patch.object(dictation.subprocess, "Popen", side_effect=FileNotFoundError):
+            dictation.toggle()                                # no exception reaches the button
+
 
 if __name__ == "__main__":
     unittest.main()
