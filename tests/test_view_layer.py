@@ -1164,6 +1164,48 @@ class ViewLayerTest(unittest.TestCase):
         self.assertTrue(tile.tm_added)
         self.assertIn("Already added", self.web_menu(item))
 
+    def test_web_apply_adds_applies_and_sets_the_background(self):
+        import theme_auto
+        alpha = self.make_theme("user", "alpha")
+        beta = self.make_theme("user", "beta")
+        self.assertTrue(alpha.current and not beta.current)
+        self.app.open_wallpapers_for(alpha)
+        self.app.open_web_search()
+        self.app.web_search.set_text("city")
+        self.app.run_web_search()
+        item = self.web_results[0]
+        self.assertEqual(self.web_menu(item)["Apply"].get_tooltip_text(),
+                         "Adds it to Alpha and sets it as the background")
+        self.app.open_wallpapers_for(beta)                   # beta is not in use
+        self.app.open_web_search()
+        steps = []
+        download = self.ws.download
+        self.ws.download = lambda roots, slug, i: steps.append(("add", slug)) or download(roots, slug, i)
+        added = self.roots.user_backgrounds / "beta" / item.file_name
+        menu = self.web_menu(item)
+        self.assertEqual(list(menu)[0], "Apply")              # first in the menu
+        self.assertNotIn("Add and set as background", menu)
+        self.assertEqual(menu["Apply"].get_tooltip_text(), "Adds it to Beta, applies Beta and sets it as the background")
+        try:
+            with patch.object(theme_auto, "apply_theme",
+                              side_effect=lambda slug, **_kw: steps.append(("apply", slug)) or True), \
+                    patch.object(theme_core, "set_desktop_background",
+                                 side_effect=lambda path: steps.append(("set", Path(path))) or True), \
+                    patch.object(theme_auto, "remember_base_wallpaper",
+                                 side_effect=lambda slug, path: steps.append(("remember", slug, Path(path)))):
+                menu["Apply"].emit("clicked")
+                # Applied first: Omarchy's theme switch sets its own background, ours comes after it.
+                self.assertEqual(steps, [("add", "beta"), ("apply", "beta"), ("set", added),
+                                         ("remember", "beta", added)])
+                self.assertIn(f"Applied Beta with {item.file_name}.", self.app.web_hint.get_label())
+                tile = next(t for t in self.children(self.app.web_grid) if t.tm_web == item)
+                self.assertTrue(tile.tm_added)
+                steps.clear()
+                self.web_menu(item)["Apply"].emit("clicked")      # already added: its copy, no download
+                self.assertEqual(steps, [("apply", "beta"), ("set", added), ("remember", "beta", added)])
+        finally:
+            self.ws.download = download
+
     def test_web_open_page_needs_browser(self):
         theme = self.make_theme("user", "alpha")
         self.app.open_wallpapers_for(theme)

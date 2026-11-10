@@ -5042,14 +5042,18 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return self.menu_item(box, popover, label, handler, icon_name, **kwargs)
 
         web = self.is_web_picture(item)
+        if theme is not None:
+            name = theme_core.plain_text(theme.name)
+            # Apply in one step: the picture into the theme (or its copy there), as its
+            # wallpaper, and the theme applied when it is not in use.
+            entry(_("Apply"), lambda: self.apply_web_wallpaper(item), "object-select-symbolic",
+                  tooltip=_("Adds it to {0} and sets it as the background").format(name) if theme.current
+                  else _("Adds it to {0}, applies {0} and sets it as the background").format(name))
         if theme is not None and self.web_already_added(theme, item):
             entry(_("Already added"), lambda: None, "object-select-symbolic", sensitive=False)
         elif theme is not None:
             entry(_("Add to {0}").format(theme_core.plain_text(theme.name)), lambda: self.add_web_wallpaper(item, False),
                   "list-add-symbolic", tooltip=_("Saved in {0}").format(f"~/.config/omarchy/backgrounds/{theme.slug}/"))
-            if theme.current:
-                entry(_("Add and set as background"), lambda: self.add_web_wallpaper(item, True),
-                      "preferences-desktop-wallpaper-symbolic")
         entry(_("Preview on desktop"), lambda: self.preview_web(item, PREVIEW_SECONDS), "view-reveal-symbolic",
               tooltip=_("Loads the full image and shows it for {0} seconds; or hold Space on the tile").format(PREVIEW_SECONDS))
         self.menu_separator(box)
@@ -5063,6 +5067,72 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             entry(_("Open page (no browser)"), lambda: None, "web-browser-symbolic", sensitive=False,
                   tooltip=_("No default web browser is set"))
         return box
+
+    def web_added_copy(self, theme, item) -> Path | None:
+        """The picture's copy among the theme's wallpapers (by file name), or None."""
+        if self.is_web_picture(item):
+            cached = web_images.cached(item.url)
+            if cached is None:
+                return None
+            name = web_images.file_name_of(item.url, cached)
+        else:
+            name = item.file_name
+        return next((w.path for w in theme_core.list_backgrounds(None, theme) if w.name == name), None)
+
+    def apply_web_wallpaper(self, item):
+        """Apply: add the picture to the theme (or use its copy there), apply the
+        theme when it is not in use, then make the picture its background
+        (remembered as the theme's wallpaper, as the editor's Save and apply does)."""
+        theme = self.active_theme
+        if theme is None:
+            return
+        self.web_hint.set_label(self.web_hint_text(_("Applying {0}…").format(item.file_name)))
+
+        def work():
+            path = self.web_added_copy(theme, item)
+            added = path is None
+            if added:
+                fetch = web_images.download if self.is_web_picture(item) else wallpaper_search.download
+                path = fetch(None, theme.slug, item)
+            if not theme.current and not theme_auto.apply_theme(theme.slug):
+                raise RuntimeError(_("omarchy theme set failed"))
+            if not theme_core.set_desktop_background(path):
+                raise RuntimeError(_("Could not set background"))
+            theme_auto.remember_base_wallpaper(theme.slug, path)
+            return path, added
+        self._async(work, lambda result, error: self.after_web_apply(theme, item, result, error))
+
+    def after_web_apply(self, theme, item, result, error):
+        name = theme_core.plain_text(theme.name)
+        if error is not None or not result:
+            text = _("Could not apply {0}: {1}").format(item.file_name, error)
+            self.web_hint.set_label(self.web_hint_text(text))
+            theme_core.notify(_("Could not apply theme"), text)
+            return
+        path, added = result
+        text = _("Applied {0} with {1}.").format(name, item.file_name)
+        self.web_hint.set_label(self.web_hint_text(text))
+        theme_core.notify(_("Theme applied"), text)
+        if added:
+            self.mark_web_added(item)
+        if not theme.current:
+            # The popup takes on the theme's colors, and it is the theme in use now.
+            self.current_slug = theme_core.current_theme()
+            if self.theme.reload():
+                self.apply_theme_css()
+            self.active_theme = next((t for t in theme_core.discover_themes() if t.slug == theme.slug), theme)
+
+    def mark_web_added(self, item):
+        for child in self.children_of(self.web_grid):
+            if getattr(child, "tm_web", None) == item:
+                index = child.get_index()
+                self.web_grid.remove(child)
+                self.web_pictures.pop(item.id, None)
+                self.web_grid.insert(self.build_web_tile(item, True), index)
+                thumb = web_images.cached(item.url) if self.is_web_picture(item) else wallpaper_search.thumb_path(item)
+                if thumb is not None and thumb.is_file():
+                    self.show_web_thumb(item.id, str(thumb))
+                break
 
     def add_web_wallpaper(self, item, set_background: bool):
         theme = self.active_theme
