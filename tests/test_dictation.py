@@ -55,6 +55,24 @@ class BackendTest(unittest.TestCase):
             self.assertTrue(dictation.recording("superwhisper"))
         self.assertIsNone(dictation.recording("voxtype"))
 
+    def test_backend_without_its_program_counts_as_not_set_up(self):
+        def which(name):
+            return None if name == "superwhisper" else "/usr/bin/" + name
+        with mock.patch.object(dictation.shutil, "which", side_effect=which), \
+                mock.patch.object(dictation.subprocess, "run",
+                                  return_value=SimpleNamespace(returncode=0, stdout="superwhisper\n")):
+            self.assertIsNone(dictation.backend(fresh=True))
+
+    def test_open_setup_summons_omarchys_dictation_menu(self):
+        with mock.patch.object(dictation.shutil, "which", return_value="/usr/bin/omarchy-menu"), \
+                mock.patch.object(dictation.subprocess, "Popen") as popen:
+            dictation.open_setup()
+        self.assertEqual(popen.call_args.args[0], ["omarchy-menu", "summon", "setup.default.dictation"])
+
+    def test_no_button_away_from_omarchy(self):
+        with mock.patch.object(dictation.shutil, "which", return_value=None):
+            self.assertFalse(dictation.supported())
+
 
 if __name__ == "__main__":
     unittest.main()
