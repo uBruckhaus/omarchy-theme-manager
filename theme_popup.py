@@ -4696,7 +4696,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if theme is None:
             return
         if theme.slug != self.web_theme_slug:
-            self.drop_web_requests()              # another theme's answers never land here
+            self.drop_web_requests()              # another theme's answers never land here (leaving drops them too)
         self.web_theme_slug = theme.slug
         self.browser = theme_catalog.default_browser()
         self.ws_title.set_label(_("{0} — search wallpapers").format(theme_core.plain_text(theme.name)))
@@ -4812,6 +4812,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.run_web_search()
 
     def close_web_search(self):
+        self.drop_web_requests()                  # leaving the page: nothing it started lands later
         self.stop_preview()
         self.stack.set_visible_child_name("wallpapers")
         self.refresh_wallpapers()
@@ -5183,7 +5184,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                         path = web_images.get(item.url)
                     except (OSError, ValueError):
                         path = None
-                        GLib.idle_add(self.drop_web_picture, item)   # no usable picture: left out
+                        GLib.idle_add(self.drop_web_picture, item, generation)   # no usable picture: left out
                 else:
                     path = wallpaper_search.fetch_thumb(item)
                 if path is not None:
@@ -5192,7 +5193,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         for _ in range(min(PREVIEW_WORKERS, len(queue))):
             threading.Thread(target=worker, daemon=True).start()
 
-    def drop_web_picture(self, item):
+    def drop_web_picture(self, item, generation=None):
+        if generation is not None and generation != self.web_generation:
+            return GLib.SOURCE_REMOVE             # an older search's failure: the new tiles stay
         if item in self.web_pics:
             self.web_pics.remove(item)
         self.web_items = [i for i in getattr(self, "web_items", []) if i != item]

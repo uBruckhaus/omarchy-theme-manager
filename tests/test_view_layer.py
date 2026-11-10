@@ -2834,6 +2834,23 @@ class StaleWebAskTests(unittest.TestCase):
         self.assertFalse(app.web_loading)
         self.assertEqual(app.web_next_token, 4)
 
+    def test_an_older_searchs_failed_picture_never_removes_a_new_tile(self):
+        from types import SimpleNamespace
+        item = SimpleNamespace(id="w1")
+        app = SimpleNamespace(web_generation=5, web_pics=[item], web_items=[item], web_pictures={"w1": 1})
+        theme_popup.ThemeManager.drop_web_picture(app, item, 4)
+        self.assertEqual(app.web_pics, [item])
+        self.assertEqual(app.web_pictures, {"w1": 1})
+
+    def test_leaving_the_page_drops_what_it_started(self):
+        from types import SimpleNamespace
+        calls = []
+        app = SimpleNamespace(drop_web_requests=lambda: calls.append("drop"), stop_preview=lambda: None,
+                              stack=SimpleNamespace(set_visible_child_name=lambda n: calls.append(n)),
+                              refresh_wallpapers=lambda: None)
+        theme_popup.ThemeManager.close_web_search(app)
+        self.assertEqual(calls[0], "drop")
+
     def test_an_answer_after_a_new_search_is_stale(self):
         app, _calls = self.fake()
         with patch.object(theme_popup.theme_ai, "cancel"):
