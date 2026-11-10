@@ -217,7 +217,7 @@ class BatchTests(unittest.TestCase):
     def test_a_repeat_ask_leaves_out_what_was_shown_and_keeps_to_count(self):
         seen_prompt = {}
 
-        def fake_run(helper, argv_extra, prompt, timeout, web=False):
+        def fake_run(helper, argv_extra, prompt, timeout, web=False, run_id=None):
             seen_prompt["prompt"] = prompt
             images = ", ".join(f'{{"url": "https://img.example.com/{i}.jpg"}}' for i in range(8))
             return '{"summary": "s", "queries": [], "images": [' + images + ']}'
@@ -283,7 +283,7 @@ class WebToolTests(unittest.TestCase):
     def test_a_web_ask_runs_the_helper_with_web_tools(self):
         seen = {}
 
-        def fake_run(helper, argv_extra, prompt, timeout, web=False):
+        def fake_run(helper, argv_extra, prompt, timeout, web=False, run_id=None):
             seen.update(web=web, prompt=prompt)
             return '{"summary": "s", "queries": ["snow"], "images": [{"url": "https://img.example.com/a.jpg"}]}'
         with patch.object(theme_ai, "_run_helper", fake_run):
