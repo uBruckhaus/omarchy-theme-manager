@@ -833,6 +833,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_shown = 0          # of them shown (one batch more per Next)
         self.web_more = False       # the last web ask brought pictures: Next asks again
         self.web_next_token = 0     # a Cancel makes the answers of what Next started stale
+        self.web_theme_slug = None  # the theme the wallpaper search page was opened for
         self.web_next_pending = set()   # what Next started and is still running: "web", "wallhaven"
         self.web_next_stop = threading.Event()  # ends Next's page loading between two pages
         self.web_ai_request = ""
@@ -4692,6 +4693,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         theme = self.active_theme
         if theme is None:
             return
+        if theme.slug != self.web_theme_slug:
+            self.drop_web_ask()                   # another theme's pictures never land here
+        self.web_theme_slug = theme.slug
         self.browser = theme_catalog.default_browser()
         self.ws_title.set_label(_("{0} — search wallpapers").format(theme_core.plain_text(theme.name)))
         self.stack.set_visible_child_name("websearch")
@@ -4821,6 +4825,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.web_next_stop.set()              # a new search: Next's page loading for the old one ends
             self.web_next_pending.discard("wallhaven")
             self.web_loading = False
+        self.drop_web_ask()                       # and Next's web ask for the old one
         self.web_query = query
         self.web_page_no = 0
         self.web_last_page = 1 if query else 0
@@ -4932,6 +4937,18 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_next_pending.discard(kind)
         return True
 
+    def drop_web_ask(self):
+        """A web ask Next started no longer fits (new search, other theme):
+        its answer is stale, the helper's request ends."""
+        if "web" not in self.web_next_pending:
+            return
+        self.web_next_token += 1
+        self.web_next_pending.discard("web")
+        theme_ai.cancel()
+        self.web_ai_busy = False
+        self.web_ai_face(False)
+        self.web_busy()
+
     def web_cancel_next(self):
         """Cancel: stop the helper's web ask and the page loading Next started;
         what is shown stays, Next works again."""
@@ -4964,13 +4981,19 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         rejected = list(self.web_ai_searched[-20:])
         seen = [p.url for p in self.web_pics][:theme_ai.MAX_SEEN]
         words, count = self.web_ai_request, self.web_count()
+        slug = theme.slug
         self._async(lambda: theme_ai.ask_wallpapers(helper["id"], words, theme.name, colors, rejected, web=True,
                                                     count=count, seen=seen),
-                    lambda result, error: self.web_more_done(result, error, token))
+                    lambda result, error: self.web_more_done(result, error, token, slug))
 
-    def web_more_done(self, result, error, token=None):
+    def web_more_done(self, result, error, token=None, slug=None):
         if not self.web_next_done("web", token):
             return                                # cancelled: nothing it brings is shown
+        if slug is not None and (self.active_theme is None or self.active_theme.slug != slug):
+            self.web_ai_busy = False              # asked for another theme: not shown here
+            self.web_ai_face(False)
+            self.web_busy()
+            return
         self.web_ai_busy = False
         self.web_ai_face(False)
         self.web_busy()

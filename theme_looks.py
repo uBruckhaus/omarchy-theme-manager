@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -498,6 +499,31 @@ def rewrite_generated(folder: Path, old: str, new: str) -> list[str]:
     return changed
 
 
+def _own_config_bytes(path: Path) -> bytes:
+    """A generated theme config for Omarchy's shell, the way omarchy-theme-set
+    hands it over (base64 arguments): only a regular file of this user, not a
+    link, at most MAX_CONFIG_BYTES; anything else is sent empty."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return b""
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > MAX_CONFIG_BYTES:
+            return b""
+        data = b""
+        while len(data) <= MAX_CONFIG_BYTES:
+            more = os.read(fd, MAX_CONFIG_BYTES + 1 - len(data))
+            if not more:
+                break
+            data += more
+        return data if len(data) <= MAX_CONFIG_BYTES else b""
+    except OSError:
+        return b""
+    finally:
+        os.close(fd)
+
+
 def reload_apps(changed: list[str]) -> list[str]:
     """Omarchy's own commands for the apps that read the changed configs."""
     commands = []
@@ -515,8 +541,7 @@ def reload_apps(changed: list[str]) -> list[str]:
         folder = current_theme_dir()
         payload = []
         for name in ("colors.toml", "shell.toml"):
-            path = folder / name
-            payload.append(base64.b64encode(path.read_bytes()).decode() if path.is_file() else "")
+            payload.append(base64.b64encode(_own_config_bytes(folder / name)).decode())
         try:
             subprocess.run(["omarchy-shell", "shell", "applyTheme", *payload], stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)

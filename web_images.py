@@ -20,6 +20,7 @@ import ipaddress
 import os
 import re
 import socket
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,13 +138,29 @@ def _public_v4(ip: ipaddress.IPv4Address) -> bool:
                 or (a == 198 and b == 51 and c == 100) or (a == 203 and b == 0 and c == 113) or a >= 224)
 
 
+RESOLVE_TIMEOUT = 5.0
+
+
 def resolve(host: str) -> list[str]:
-    """The host's addresses (system resolver)."""
-    socket.setdefaulttimeout(5)
-    try:
-        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    finally:
-        socket.setdefaulttimeout(None)
+    """The host's addresses (system resolver), within RESOLVE_TIMEOUT seconds:
+    the lookup runs in a daemon thread, a stalled resolver raises OSError
+    (the process-wide socket timeout is never touched)."""
+    box = {}
+
+    def lookup():
+        try:
+            box["infos"] = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except OSError as error:
+            box["error"] = error
+
+    worker = threading.Thread(target=lookup, daemon=True)
+    worker.start()
+    worker.join(RESOLVE_TIMEOUT)
+    if "error" in box:
+        raise box["error"]
+    if "infos" not in box:
+        raise OSError(f"looking up {host} took too long")
+    infos = box["infos"]
     out = []
     for info in infos:
         address = info[4][0]
@@ -159,7 +176,7 @@ def fetch_pinned(url: str, address: str, max_bytes: int, timeout: float = 60.0) 
     ip = f"[{address}]" if ":" in address else address
     data, ok = theme_core.read_bounded_output(
         ["curl", "--silent", "--fail", "--proto", "=https", "--max-redirs", "0",
-         "--resolve", f"{host}:443:{ip}",
+         "--noproxy", "*", "--resolve", f"{host}:443:{ip}",   # no proxy: the checked address is the one used
          "--max-time", str(int(timeout)), "--max-filesize", str(max_bytes), "--", url],
         max_bytes=max_bytes, timeout=timeout + 2)
     return data if ok and data else None

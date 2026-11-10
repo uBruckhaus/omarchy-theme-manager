@@ -2774,5 +2774,44 @@ class ViewLayerTest(unittest.TestCase):
         return out
 
 
+
+class StaleWebAskTests(unittest.TestCase):
+    """Next's web ask for one search/theme never lands in another."""
+
+    def fake(self, slug="a"):
+        from types import SimpleNamespace
+        calls = []
+        app = SimpleNamespace(web_next_pending={"web"}, web_next_token=3, web_ai_busy=True,
+                              active_theme=SimpleNamespace(slug=slug), web_pics=[],
+                              web_ai_face=lambda on: calls.append(("face", on)),
+                              web_busy=lambda: calls.append("busy"))
+        app.web_next_done = lambda kind, token: theme_popup.ThemeManager.web_next_done(app, kind, token)
+        return app, calls
+
+    def test_a_new_search_or_theme_drops_the_running_web_ask(self):
+        app, _calls = self.fake()
+        with patch.object(theme_popup.theme_ai, "cancel") as cancel:
+            theme_popup.ThemeManager.drop_web_ask(app)
+        cancel.assert_called_once()
+        self.assertEqual(app.web_next_token, 4)
+        self.assertNotIn("web", app.web_next_pending)
+        self.assertFalse(app.web_ai_busy)
+
+    def test_an_answer_for_another_theme_is_not_shown(self):
+        app, _calls = self.fake(slug="b")
+        theme_popup.ThemeManager.web_more_done(app, ("", [], [{"url": "https://x.example.com/a.jpg"}]), None,
+                                               token=3, slug="a")
+        self.assertEqual(app.web_pics, [])
+        self.assertFalse(app.web_ai_busy)
+
+    def test_an_answer_after_a_new_search_is_stale(self):
+        app, _calls = self.fake()
+        with patch.object(theme_popup.theme_ai, "cancel"):
+            theme_popup.ThemeManager.drop_web_ask(app)
+        theme_popup.ThemeManager.web_more_done(app, ("", [], [{"url": "https://x.example.com/a.jpg"}]), None,
+                                               token=3, slug="a")
+        self.assertEqual(app.web_pics, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

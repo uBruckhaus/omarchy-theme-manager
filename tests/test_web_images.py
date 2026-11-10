@@ -110,6 +110,25 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--resolve") + 1], "img.example.com:443:[2606:4700::1111]")
         self.assertEqual(argv[argv.index("--proto") + 1], "=https")
         self.assertEqual(argv[argv.index("--max-redirs") + 1], "0")
+        self.assertEqual(argv[argv.index("--noproxy") + 1], "*")   # a proxy would resolve the host itself
+
+    def test_a_stalled_resolver_ends_after_the_deadline_without_touching_socket_defaults(self):
+        import socket
+        import threading
+        import time
+        release = threading.Event()
+
+        def stalled(*_a, **_k):
+            release.wait(10)
+            return []
+        before = socket.getdefaulttimeout()
+        with patch.object(web_images, "RESOLVE_TIMEOUT", 0.2), patch.object(socket, "getaddrinfo", stalled):
+            started = time.monotonic()
+            with self.assertRaises(OSError):
+                web_images.resolve("slow.example.com")
+            self.assertLess(time.monotonic() - started, 2)
+        release.set()
+        self.assertEqual(socket.getdefaulttimeout(), before)
 
 
 class PromptTests(unittest.TestCase):

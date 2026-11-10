@@ -444,5 +444,24 @@ class TextColourTests(LooksTestCase):
         self.assertAlmostEqual(theme_looks.contrast_ratio("#ffffff", "#000000"), 21.0)
 
 
+
+class ShellPayloadTests(unittest.TestCase):
+    def test_only_small_own_regular_files_are_sent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "colors.toml").write_text('foreground = "#ffffff"\n')
+            self.assertEqual(theme_looks._own_config_bytes(folder / "colors.toml"), b'foreground = "#ffffff"\n')
+            secret = folder / "secret"
+            secret.write_text("private")
+            (folder / "shell.toml").symlink_to(secret)
+            self.assertEqual(theme_looks._own_config_bytes(folder / "shell.toml"), b"")   # a link: never followed
+            big = folder / "big.toml"
+            big.write_bytes(b"x" * (theme_looks.MAX_CONFIG_BYTES + 1))
+            self.assertEqual(theme_looks._own_config_bytes(big), b"")
+            os.mkfifo(folder / "fifo.toml")
+            self.assertEqual(theme_looks._own_config_bytes(folder / "fifo.toml"), b"")   # never waited on
+            self.assertEqual(theme_looks._own_config_bytes(folder / "missing.toml"), b"")
+
+
 if __name__ == "__main__":
     unittest.main()
