@@ -1,6 +1,7 @@
 """Ask AI: what goes to the agent, and what of its answer is kept."""
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -168,7 +169,7 @@ class AskAiTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 theme_ai.run("claude", "PROMPT")
 
-    def test_jail_hides_home_and_shows_the_agents_folder_as_a_counted_layer(self):
+    def test_jail_hides_home_and_gives_the_agent_an_empty_folder_with_its_sign_in(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, work = Path(tmp) / "home", Path(tmp) / "work"
             (home / ".codex").mkdir(parents=True)
@@ -181,8 +182,9 @@ class AskAiTests(unittest.TestCase):
             joined = " ".join(argv)
             self.assertIn(f"--size {theme_ai.JAIL_TMPFS} --tmpfs {home}", joined)    # an empty, capped home
             self.assertIn(f"--size {theme_ai.JAIL_TMPFS} --tmpfs /tmp", joined)
-            self.assertIn(f"--overlay-src {home}/.codex --overlay {work}/.layers/0/up {work}/.layers/0/wk {home}/.codex",
-                          joined)                                     # its writes land in the counted work folder
+            self.assertIn(f"--perms 0700 --dir {home}/.codex", joined)     # a new, empty folder of its own
+            self.assertNotIn("--overlay", joined)                     # the real ~/.codex is never shown
+            self.assertLess(joined.index(f"--dir {home}/.codex"), joined.index(f"--bind {home}/.codex/auth.json"))
             self.assertIn(f"--bind {home}/.codex/auth.json {home}/.codex/auth.json", joined)   # sign-in kept
             self.assertIn("--unsetenv DBUS_SESSION_BUS_ADDRESS", joined)   # no keyring, no portals
             self.assertIn(f"--ro-bind {home}/.local/share/mise/installs", joined)
@@ -196,6 +198,51 @@ class AskAiTests(unittest.TestCase):
             with patch.object(theme_ai, "real_binary", return_value=binary):
                 joined = " ".join(theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex"], work, home=home, environ={}))
             self.assertNotIn("auth.json", joined)                      # a link is never bound
+
+    @unittest.skipUnless(shutil.which("bwrap"), "needs bubblewrap")
+    def test_in_the_real_jail_codex_sees_only_its_sign_in_and_your_files_stay(self):
+        """A fake codex inside the real bubblewrap jail: your config.toml (with an
+        MCP server), instructions, history and sessions are absent; the sign-in
+        is there and written through; nothing else of yours changes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home, work = Path(tmp) / "home", Path(tmp) / "work"
+            codex_dir = home / ".codex"
+            (codex_dir / "sessions").mkdir(parents=True)
+            work.mkdir(mode=0o700)
+            mine = {
+                "config.toml": '[mcp_servers.sentinel]\nurl = "https://mcp.example.com/sentinel"\n'
+                               'bearer_token_env_var = "SENTINEL_TOKEN"\n',
+                "AGENTS.md": "SENTINEL instructions\n",
+                "history.jsonl": '{"text": "SENTINEL history"}\n',
+                "sessions/rollout-sentinel.jsonl": '{"SENTINEL": 1}\n',
+            }
+            for name, text in mine.items():
+                (codex_dir / name).write_text(text)
+            (codex_dir / "auth.json").write_text('{"token": "old"}')
+            fake = home / ".local/bin/codex"
+            fake.parent.mkdir(parents=True)
+            fake.write_text(
+                "#!/bin/sh\n"
+                'ls -A "$HOME/.codex" > "$1/seen.txt"\n'
+                'cat "$HOME/.codex/config.toml" "$HOME/.codex/AGENTS.md" >> "$1/seen.txt" 2>/dev/null\n'
+                'printf \'{"token": "new"}\' > "$HOME/.codex/auth.json"\n'
+                'echo "[mcp_servers.planted]" > "$HOME/.codex/config.toml"\n'
+                'mkdir -p "$HOME/.codex/sessions" && echo planted > "$HOME/.codex/sessions/new.jsonl"\n')
+            fake.chmod(0o755)
+            with patch.object(theme_ai, "real_binary", return_value=str(fake)):
+                argv = theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex", str(work)], work, home=home,
+                                          environ={})
+            done = subprocess.run(argv, capture_output=True, timeout=30, env={"PATH": "/usr/bin"})
+            if done.returncode != 0 and b"setting up uid map" in done.stderr + done.stdout:
+                self.skipTest("no user namespaces here")
+            self.assertEqual(done.returncode, 0, done.stderr)
+            seen = (work / "seen.txt").read_text()
+            self.assertEqual(seen.split(), ["auth.json"])          # only the sign-in, nothing of yours
+            self.assertNotIn("SENTINEL", seen)
+            self.assertEqual((codex_dir / "auth.json").read_text(), '{"token": "new"}')   # written through
+            for name, text in mine.items():
+                self.assertEqual((codex_dir / name).read_text(), text, name)            # unchanged
+            self.assertEqual(sorted(p.name for p in (codex_dir / "sessions").iterdir()), ["rollout-sentinel.jsonl"])
 
     def test_failed_jail_setup_removes_the_folder_and_antigravity_is_gone(self):
         folders = []

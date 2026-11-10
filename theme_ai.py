@@ -135,10 +135,11 @@ HELPERS = {
         "files": [".codex/auth.json"], "env": ["OPENAI_API_KEY"],
         "login": "codex login",
         # It can read files: it runs in a bubblewrap jail that shows it no
-        # home folder but its own (see jail_argv).
-        # Its folder is an overlay whose writes vanish (no config, hook or MCP
-        # change outlives the Ask); only the sign-in file is written through.
-        "jail": {"overlay": [".codex"], "keep": [".codex/auth.json"]},
+        # home folder (see jail_argv). Its own folder there is a new, empty one
+        # holding only the sign-in file (written through, a refreshed token
+        # stays): none of your config.toml, MCP servers, instructions, history
+        # or sessions, and nothing it writes there outlives the Ask.
+        "jail": {"dirs": [".codex"], "keep": [".codex/auth.json"]},
     },
 }
 
@@ -815,8 +816,8 @@ JAIL_TMPFS = 64 * 1024 * 1024     # the jail's /tmp and empty home: each at most
 
 def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = None, environ=None) -> list[str]:
     """argv inside bubblewrap: the system read-only, an empty home with only
-    the agent's own folders (as throw-away overlays, its sign-in file written
-    through), the private work folder, the network. None of the user's files
+    the agent's own folders (new and empty, only its sign-in file bound in and
+    written through), the private work folder, the network. None of the user's files
     can be read, and nothing it writes outside its work folder and sign-in
     outlives the Ask."""
     home = home or Path.home()
@@ -839,17 +840,11 @@ def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = Non
         if root == home or home.is_relative_to(root):
             root = Path(binary)
         args += ["--ro-bind", str(root), str(root)]
-    for index, folder in enumerate(jail["overlay"]):
-        # The agent sees its own folder, but every write goes to a layer in
-        # the private work folder (counted against WORK_MAX, removed after
-        # the Ask): it cannot plant config, hooks, plugins or MCP servers for
-        # the next time you run it yourself.
-        source = home / folder
-        if source.is_dir() and not source.is_symlink():
-            layer = work / ".layers" / str(index)
-            (layer / "up").mkdir(parents=True, mode=0o700)
-            (layer / "wk").mkdir(mode=0o700)
-            args += ["--overlay-src", str(source), "--overlay", str(layer / "up"), str(layer / "wk"), str(source)]
+    for folder in jail["dirs"]:
+        # The agent's own folder: new and empty on the jail's capped home
+        # tmpfs (none of the real folder's config, MCP servers, instructions,
+        # history or sessions); what it writes there vanishes with the Ask.
+        args += ["--perms", "0700", "--dir", str(home / folder)]
     for name in jail["keep"]:
         # Its sign-in alone is written through (a refreshed token must stay).
         path = home / name
@@ -878,9 +873,8 @@ def helper_env(helper: dict, environ=None) -> dict:
 
 
 def remove_work(work: Path) -> None:
-    """The Ask's private folder, all of it: overlayfs leaves its helper folder
-    unreadable (mode 000), so access is granted back before removing (links
-    are never followed)."""
+    """The Ask's private folder, all of it: a folder left unreadable (mode
+    000) gets access back before removing (links are never followed)."""
     def grant(func, path, _error):
         for target in (os.path.dirname(path), path):
             try:
