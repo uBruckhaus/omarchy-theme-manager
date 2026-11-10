@@ -162,3 +162,37 @@ class ScreenshotHardeningTest(TestCase):
                 with self.assertRaises(OSError):
                     screenshots.save_note(folder / "theme-manager-1.png", "a note")
             self.assertFalse((folder / "theme-manager-1.txt").exists())
+
+
+class ScreenshotLowsTest(TestCase):
+    def test_write_returning_zero_fails_instead_of_spinning(self):
+        with patch.object(screenshots.os, "write", return_value=0):
+            with self.assertRaises(OSError):
+                screenshots._write_all(5, b"data")
+
+    def test_default_folder_readable_by_others_is_closed(self):
+        import os
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "ThemeManager"
+            folder.mkdir(mode=0o755)
+            os.chmod(folder, 0o755)
+            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(screenshots, "default_folder", return_value=folder):
+                    screenshots._close_default(folder, fd, os.fstat(fd).st_mode)
+            finally:
+                os.close(fd)
+            self.assertEqual(os.stat(folder).st_mode & 0o777, 0o700)
+
+    def test_custom_folder_keeps_its_permissions(self):
+        import os
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Mine"
+            folder.mkdir(mode=0o755)
+            os.chmod(folder, 0o755)
+            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                screenshots._close_default(folder, fd, os.fstat(fd).st_mode)
+            finally:
+                os.close(fd)
+            self.assertEqual(os.stat(folder).st_mode & 0o777, 0o755)

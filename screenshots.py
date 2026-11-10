@@ -68,6 +68,7 @@ def capture(geometry: tuple[int, int, int, int], folder: Path | None = None,
         info = os.fstat(dir_fd)
         if info.st_uid != os.getuid() or info.st_mode & 0o022:
             raise ValueError("the screenshot folder must be yours and not writable by others")
+        _close_default(folder, dir_fd, info.st_mode)
         private = _private_dir()
         shot = os.path.join(private, "shot.png")
         try:
@@ -122,7 +123,17 @@ def capture(geometry: tuple[int, int, int, int], folder: Path | None = None,
 def _write_all(fd: int, data: bytes):
     view = memoryview(data)
     while view:
-        view = view[os.write(fd, view):]
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("the screenshot could not be written")
+        view = view[written:]
+
+
+def _close_default(folder: Path, dir_fd: int, mode: int):
+    """Theme Manager's own default folder: nobody else may even list the pictures' names. A folder
+    chosen in the settings keeps its permissions."""
+    if mode & 0o077 and folder == default_folder():
+        os.fchmod(dir_fd, 0o700)
 
 
 def _private_folder(folder: Path) -> int:
