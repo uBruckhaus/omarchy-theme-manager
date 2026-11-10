@@ -38,20 +38,6 @@ class BackendTest(unittest.TestCase):
                 mock.patch.object(dictation, "read_output", return_value=(0, "../evil; rm\n")):
             self.assertIsNone(dictation.backend())
 
-    def test_run_uses_argv_and_only_known_actions(self):
-        with mock.patch.object(dictation.subprocess, "Popen") as popen:
-            dictation.run("start")
-            dictation.run("rm -rf")
-        self.assertEqual(popen.call_count, 1)
-        self.assertEqual(popen.call_args.args[0], ["omarchy-dictation", "start"])
-        self.assertNotIn("shell", popen.call_args.kwargs)
-
-    def test_recording_from_superwhisper_status(self):
-        with mock.patch.object(dictation.shutil, "which", return_value="/usr/bin/superwhisper"), \
-                mock.patch.object(dictation, "read_output", return_value=(0, '{"phase": "recording"}')):
-            self.assertTrue(dictation.recording("superwhisper"))
-        self.assertIsNone(dictation.recording("voxtype"))
-
     def test_backend_without_its_program_counts_as_not_set_up(self):
         def which(name):
             return None if name == "superwhisper" else "/usr/bin/" + name
@@ -59,8 +45,21 @@ class BackendTest(unittest.TestCase):
                 mock.patch.object(dictation, "read_output", return_value=(0, "superwhisper\n")):
             self.assertIsNone(dictation.backend(fresh=True))
 
+    def test_toggle_runs_omarchy_dictation_toggle_only_on_omarchy(self):
+        with mock.patch.object(dictation, "supported", return_value=True), \
+                mock.patch.object(dictation.subprocess, "Popen") as popen:
+            dictation.toggle()
+        self.assertEqual(popen.call_args.args[0], ["omarchy-dictation", "toggle"])
+        self.assertNotIn("shell", popen.call_args.kwargs)
+        with mock.patch.object(dictation, "supported", return_value=False), \
+                mock.patch.object(dictation.subprocess, "Popen") as popen:
+            dictation.toggle()
+            dictation.open_setup()
+        popen.assert_not_called()
+
     def test_open_setup_summons_omarchys_dictation_menu(self):
         with mock.patch.object(dictation.shutil, "which", return_value="/usr/bin/omarchy-menu"), \
+                mock.patch.object(dictation, "supported", return_value=True), \
                 mock.patch.object(dictation.subprocess, "Popen") as popen:
             dictation.open_setup()
         self.assertEqual(popen.call_args.args[0], ["omarchy-menu", "summon", "setup.default.dictation"])
@@ -76,19 +75,6 @@ class BackendTest(unittest.TestCase):
         code, text = dictation.read_output([sh, "-c", "printf 'a\\377b'"])
         self.assertEqual((code, text), (0, "a\ufffdb"))                                       # no UnicodeDecodeError
         self.assertIsNone(dictation.read_output(["/nonexistent/program"]))
-
-    def test_garbage_status_is_unknown(self):
-        with mock.patch.object(dictation.shutil, "which", return_value="/usr/bin/superwhisper"), \
-                mock.patch.object(dictation, "read_output", return_value=(0, "[1, 2]")):
-            self.assertIsNone(dictation.recording("superwhisper"))
-
-    def test_stop_all_stops_the_active_recorder(self):
-        calls = []
-        dictation._active["off"] = lambda: calls.append("off")
-        dictation.stop_all()
-        self.assertEqual(calls, ["off"])
-        dictation._active["off"] = None
-        dictation.stop_all()                                  # nothing active: nothing happens
 
 
 if __name__ == "__main__":

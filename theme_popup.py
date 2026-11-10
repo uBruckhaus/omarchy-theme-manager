@@ -47,7 +47,6 @@ else:
 import atexit
 
 import corners
-import dictation
 import more_catalog
 import more_plugins
 import theme_auto
@@ -3643,7 +3642,6 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-grid flowboxchild {{ border-radius: {radius}px; padding: 0; outline: none; }}
         .tm-grid flowboxchild:focus .tm-tile {{ border-color: {accent_hex}; background: alpha({accent_hex}, 0.12); }}
         .tm-paste {{ font-weight: 500; font-size: 14px; }}
-        button.tm-dictate:checked {{ color: {red_hex}; border-color: {red_hex}; }}
         button.tm-paste.danger {{ background: {red_hex}; color: #ffffff; }}
         button.tm-paste.danger:hover {{ background: shade({red_hex}, 1.1); }}
         popover.tm-popover contents {{ background-color: {bg_hex}; color: {fg_hex};
@@ -6073,7 +6071,6 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.cancel_confirm()  # never reopen onto a stale question
         if self.shot_dialog_open():
             self.finish_screenshot_note(True)      # a note already typed is kept (none typed, no file)
-        dictation.stop_all()                    # no dictation goes on into another window
         self.ws_hover_hide()
         if self.settings_previous_size is not None:
             self.stack.set_visible_child_name("themes")
