@@ -57,6 +57,7 @@ import theme_looks
 import theme_shortcuts as shortcuts
 from layer_watch import LayerWatch
 import wallpaper_search
+import web_images
 from palette import ThemePalette
 import pidfile
 import i18n
@@ -68,7 +69,7 @@ import header_order
 import workspace_state
 import theme_ai
 import workspaces_page
-from workspaces_page import WorkspacesPageMixin
+from workspaces_page import WorkspacesPageMixin, clear, ws_wrap
 import ask_page
 from ask_page import AskPageMixin
 from i18n import _, N_, ngettext
@@ -688,9 +689,21 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         web_button.set_child(web_box)
         web_button.set_tooltip_text(_("Find wallpapers on wallhaven.cc (Ctrl+F)"))
         web_button.connect("clicked", lambda *_: self.open_web_search())
+        # Ask AI for wallpapers: only while Ask AI is on and a helper is ready.
+        self.wp_ask_button = Gtk.Button()
+        self.wp_ask_button.add_css_class("tm-paste")
+        ask_box = Gtk.Box(spacing=6)
+        ask_box.append(Gtk.Image.new_from_icon_name("mail-send-symbolic"))
+        ask_box.append(Gtk.Label(label=_("Ask AI…")))
+        self.wp_ask_button.set_child(ask_box)
+        self.wp_ask_button.set_tooltip_text(
+            _("Describe the wallpaper you want: Ask AI turns it into searches on wallhaven.cc"))
+        self.wp_ask_button.connect("clicked", lambda *_: self.open_web_search(ask=True))
+        self.wp_ask_button.set_visible(False)
         buttons = Gtk.Box(spacing=8)
         buttons.append(self.paste_button)
         buttons.append(web_button)
+        buttons.append(self.wp_ask_button)
         self.wp_toolbar.append(buttons)
         wallpaper_page.append(self.wp_toolbar)
         # Where dropped and pasted images are stored (the add tile's tooltip).
@@ -734,9 +747,44 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_search.connect("activate", lambda *_: self.run_web_search())
         self.guard_text_field(self.web_search)
         web_page.append(self.web_search)
-        self.web_hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=40)
+        # Ask AI (only while it is on and a helper is ready): your words become
+        # search phrases, and a helper with web tools also finds pictures on the web.
+        self.web_ai_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        ai_row = Gtk.Box(spacing=6)
+        self.web_ai_entry = Gtk.Entry(hexpand=True,
+                                      placeholder_text=_("Ask AI, e.g. “calm and wintry, fits this theme”"))
+        self.web_ai_entry.set_max_length(theme_ai.MAX_REQUEST)
+        self.web_ai_entry.update_property([Gtk.AccessibleProperty.LABEL], [_("Ask AI")])
+        self.guard_text_field(self.web_ai_entry)
+        self.web_ai_entry.connect("activate", lambda *_: self.web_ai_ask())
+        ai_row.append(self.web_ai_entry)
+        self.web_ai_button = Gtk.Button()
+        self.web_ai_button.add_css_class("tm-paste")
+        self.web_ai_button.add_css_class("suggested")
+        self.web_ai_button.connect("clicked", lambda *_: self.web_ai_stop() if self.web_ai_busy else self.web_ai_ask())
+        ai_row.append(self.web_ai_button)
+        self.web_ai_box.append(ai_row)
+        self.web_ai_chips = ws_wrap()
+        self.web_ai_chips.set_visible(False)
+        self.web_ai_box.append(self.web_ai_chips)
+        self.web_ai_box.set_visible(False)
+        web_page.append(self.web_ai_box)
+        self.web_ai_helper = None
+        self.web_ai_web = False
+        self.web_ai_busy = False
+        self.web_ai_searched = []
+        self.web_pics = []            # web_images.WebPicture Ask AI found, shown first
+        self.web_ai_face(False)
+        hint_row = Gtk.Box(spacing=8)
+        # Busy: Ask AI is thinking or a search is loading.
+        self.web_spinner = Gtk.Spinner()
+        self.web_spinner.set_visible(False)
+        self.web_spinner.set_valign(Gtk.Align.START)
+        hint_row.append(self.web_spinner)
+        self.web_hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=40, hexpand=True)
         self.web_hint.add_css_class("tm-hint")
-        web_page.append(self.web_hint)
+        hint_row.append(self.web_hint)
+        web_page.append(hint_row)
         ws_scroller = Gtk.ScrolledWindow()
         ws_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
         ws_scroller.set_vexpand(True)
@@ -1985,6 +2033,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if hints:
             line.append(self.maprisma_help_button(lambda: hint))
         box.append(line)
+        self.setting_line(box, _("Search the web for wallpapers"),
+                          _("A helper that can search the web (now Claude Code) also looks for wallpaper pictures "
+                            "beyond wallhaven.cc. It takes longer and uses more of your plan or tokens. The pictures "
+                            "are downloaded only from public https addresses and checked before they are shown."),
+                          self.switch(theme_auto.settings().get("ask_ai_web") is not False,
+                                      lambda on: self.save_setting(ask_ai_web=on)))
         self.setting_line(box, _("Maprisma hints"),
                           _("A ? here and on the Ask AI page opens the note on easy AI setup with Maprisma."),
                           self.switch(hints, self.set_maprisma_hints))
@@ -2997,8 +3051,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return ed["wallpaper"].path
         if ed.get("ask_wallpaper") is not None:
             # The Ask AI card's picture: its thumbnail is already cached.
-            thumb = wallpaper_search.thumb_path(ed["ask_wallpaper"])
-            if thumb.is_file() and not thumb.is_symlink():
+            wall = ed["ask_wallpaper"]
+            thumb = web_images.cached(wall.url) if self.is_web_picture(wall) else wallpaper_search.thumb_path(wall)
+            if thumb is not None and thumb.is_file() and not thumb.is_symlink():
                 return thumb
         if ed["edit"] or ed["wallpapers"]:
             walls = [w.path for w in theme_core.list_backgrounds(None, ed["base"]) if not w.hidden]
@@ -3273,10 +3328,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
     @staticmethod
     def download_ask_wallpaper(slug, item):
-        """The wallhaven picture an Ask AI card showed, into the saved theme."""
+        """The picture an Ask AI card showed (wallhaven or the web), into the saved theme."""
         if item is None:
             return None
         try:
+            if isinstance(item, web_images.WebPicture):
+                return web_images.download(None, slug, item)
             return wallpaper_search.download(None, slug, item)
         except FileExistsError:
             return None
@@ -3442,7 +3499,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 theme_core.notify(_("No preview"), _("{0} could not be loaded").format(item.file_name))
             elif self.preview == f"web:{item.id}":   # Space still held
                 self.start_preview(path, seconds)
-        self._async(lambda: wallpaper_search.fetch_preview(item), show)
+        if self.is_web_picture(item):
+            self._async(lambda: web_images.get(item.url), show)
+        else:
+            self._async(lambda: wallpaper_search.fetch_preview(item), show)
 
     def on_key_released(self, _controller, keyval, _keycode, _state):
         if keyval == Gdk.KEY_space and self.preview is not None and not self.preview_timer:
@@ -3489,6 +3549,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         red_hex = colors.get("red", "#f04452")
         accent_hex = colors.get("accent", "#89b4fa")
         green_hex = colors.get("green", "#66c98b")
+        # The frame of the theme in use: its own green, its accent without one.
+        current_hex = colors.get("green") or accent_hex
         yellow_hex = colors.get("yellow", "#e5c07b")
         orange_hex = colors.get("orange", colors.get("red", "#e08a5f"))
 
@@ -3619,6 +3681,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45); }}
         .tm-preview picture {{ border-radius: {max(2, radius - 6) if radius else 0}px; }}
         .tm-list flowboxchild:hover .tm-preview {{ border-color: {accent_hex}; }}
+        /* The theme in use: a wider frame in its green (also under the pointer), the
+           padding one less so the preview keeps its size. */
+        .tm-list flowboxchild.tm-current-row .tm-preview,
+        .tm-list flowboxchild.tm-current-row:hover .tm-preview {{ border: 2px solid {current_hex}; padding: 2px; }}
         .tm-badge {{ background: alpha({fg_hex}, 0.10); border-radius: {small}px;
             padding: 2px 10px; }}
         .tm-badge label {{ font-size: 12px; font-weight: 600; color: {muted_hex}; }}
@@ -3641,6 +3707,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-tile-badge:not(.current):not(.workspace) label {{ color: #ffffff; }}
         .tm-grid flowboxchild {{ border-radius: {radius}px; padding: 0; outline: none; }}
         .tm-grid flowboxchild:focus .tm-tile {{ border-color: {accent_hex}; background: alpha({accent_hex}, 0.12); }}
+        .tm-list flowboxchild.tm-current-row .tm-tile,
+        .tm-list flowboxchild.tm-current-row:hover .tm-tile,
+        .tm-list flowboxchild.tm-current-row:focus .tm-tile {{ border: 2px solid {current_hex}; padding: 2px; }}
         .tm-paste {{ font-weight: 500; font-size: 14px; }}
         button.tm-paste.danger {{ background: {red_hex}; color: #ffffff; }}
         button.tm-paste.danger:hover {{ background: shade({red_hex}, 1.1); }}
@@ -3784,6 +3853,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.workspace_theme_map = theme_auto.load_workspace_themes()
         ordered = theme_auto.order_themes(self.theme_list, self.favorites, theme_auto.load_recent(),
                                           theme_auto.sort_order())
+        # The theme in use first; the rest keep their order.
+        ordered = [t for t in ordered if t.current] + [t for t in ordered if not t.current]
         for theme in ordered:
             is_hidden = theme.slug in self.hidden
             # The active theme is always listed (marked when hidden), as in
@@ -3877,6 +3948,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         row.tm_theme = theme
         if is_hidden:
             row.add_css_class("tm-row-hidden")
+        if theme.current:
+            row.add_css_class("tm-current-row")      # framed in the theme's own green
         line = Gtk.Box(spacing=8)
 
         line.set_spacing(12)
@@ -4022,6 +4095,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         child = Gtk.FlowBoxChild()
         child.set_child(tile)
         child.tm_theme = theme
+        if theme.current:
+            child.add_css_class("tm-current-row")    # framed in the theme's own green
         child.actions_button = actions
         return child
 
@@ -4437,6 +4512,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             + (" — " + _("stored in your per-theme folder") if system else ""))
         self.drop_note = (_("Stored in your wallpaper folder for this theme, next to its own wallpapers.")
                           if system else _("Stored in the theme's user wallpaper folder."))
+        self.wp_ask_button.set_visible(self.wallpaper_ai_helper() is not None)
         self.refresh_wallpapers()
         self.stack.set_visible_child_name("wallpapers")
 
@@ -4465,7 +4541,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
     # --- wallpapers from the web (wallhaven.cc) ----------------------------------------
 
-    def open_web_search(self):
+    def open_web_search(self, ask: bool = False):
         theme = self.active_theme
         if theme is None:
             return
@@ -4474,7 +4550,96 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.stack.set_visible_child_name("websearch")
         if not self.web_query:
             self.web_hint.set_label(self.web_hint_text())
-        self.web_search.grab_focus()
+        helper = self.wallpaper_ai_helper()
+        self.web_ai_helper = helper
+        self.web_ai_web = helper is not None and theme_ai.searches_web(helper["id"], theme_auto.settings())
+        self.web_ai_box.set_visible(helper is not None)
+        if helper is not None:
+            self.web_ai_button.set_tooltip_text(
+                _("Ask {0} for search words: it gets your words and this theme's name and colors; the search "
+                  "itself uses no tokens").format(helper["name"]))
+        (self.web_ai_entry if ask and helper is not None else self.web_search).grab_focus()
+
+    @staticmethod
+    def wallpaper_ai_helper():
+        """The helper wallpaper prompts use (the chosen one, else the first
+        ready), or None while Ask AI is off or none is ready."""
+        settings = theme_auto.settings()
+        if not ask_page.enabled(settings):
+            return None
+        ready = theme_ai.ready_helpers()
+        chosen = settings.get("ask_ai_helper")
+        return next((h for h in ready if h["id"] == chosen), ready[0] if ready else None)
+
+    def web_ai_face(self, busy: bool):
+        """Ask, or Stop while the helper thinks (as the Ask AI page's button)."""
+        face = Gtk.Box(spacing=6)
+        face.append(Gtk.Image.new_from_icon_name("process-stop-symbolic" if busy else "mail-send-symbolic"))
+        face.append(Gtk.Label(label=_("Stop") if busy else _("Ask")))
+        self.web_ai_button.set_child(face)
+
+    def web_busy(self):
+        """The spinner while Ask AI thinks or a search loads."""
+        on = self.web_ai_busy or self.web_loading
+        self.web_spinner.set_visible(on)
+        (self.web_spinner.start if on else self.web_spinner.stop)()
+
+    def web_ai_ask(self):
+        theme, helper = self.active_theme, self.web_ai_helper
+        words = " ".join(self.web_ai_entry.get_text().split())
+        if theme is None or helper is None or not words or self.web_ai_busy:
+            return
+        self.web_ai_busy = True
+        self.web_ai_face(True)
+        self.web_ai_entry.set_sensitive(False)
+        self.web_busy()
+        web = self.web_ai_web
+        self.web_hint.set_label(self.web_hint_text(
+            _("Asking {0} for wallpaper ideas and searching the web… (this can take a few minutes)").format(helper["name"])
+            if web else _("Asking {0} for wallpaper ideas…").format(helper["name"])))
+        colors = dict(theme_custom.load_palette(theme).colors)
+        rejected = list(self.web_ai_searched[-20:])
+        self._async(lambda: theme_ai.ask_wallpapers(helper["id"], words, theme.name, colors, rejected, web=web),
+                    self.web_ai_done)
+
+    def web_ai_stop(self):
+        theme_ai.cancel()
+
+    def web_ai_done(self, result, error):
+        self.web_ai_busy = False
+        self.web_ai_face(False)
+        self.web_ai_entry.set_sensitive(True)
+        self.web_busy()
+        if error is not None or not result:
+            self.web_hint.set_label(self.web_hint_text(_("Ask AI failed: {0}").format(
+                error or _("no usable search words in the answer"))))
+            return
+        summary, queries, images = result
+        clear(self.web_ai_chips)
+        if summary:
+            label = Gtk.Label(label=summary, xalign=0, wrap=True, max_width_chars=40)
+            label.add_css_class("tm-hint")
+            self.web_ai_chips.append(label)
+        for phrase in queries:
+            chip = Gtk.Button(label=phrase)
+            chip.add_css_class("tm-settings-chip")
+            chip.set_tooltip_text(_("Search for “{0}”").format(phrase))
+            chip.connect("clicked", lambda _b, q=phrase: self.web_ai_search_for(q))
+            self.web_ai_chips.append(chip)
+        self.web_ai_chips.set_visible(bool(summary or queries))
+        self.web_pics = [web_images.picture(i) for i in images]
+        if queries:
+            self.web_ai_search_for(queries[0])
+        else:
+            self.web_query = ""
+            self.run_web_search(force=True)
+            self.web_hint.set_label(self.web_hint_text(_("{0} pictures from the web.").format(len(self.web_pics))))
+
+    def web_ai_search_for(self, phrase: str):
+        if phrase not in self.web_ai_searched:
+            self.web_ai_searched.append(phrase)
+        self.web_search.set_text(phrase)
+        self.run_web_search()
 
     def close_web_search(self):
         self.stop_preview()
@@ -4488,20 +4653,26 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             text += " " + _("No default web browser is set, so wallpaper pages can't be opened.")
         return text
 
-    def run_web_search(self):
-        query = wallpaper_search.clean_query(self.web_search.get_text())
-        if not query:
+    def run_web_search(self, force: bool = False):
+        query = wallpaper_search.clean_query(self.web_search.get_text()) if not force else ""
+        if not query and not force:
             return
         self.web_query = query
         self.web_page_no = 0
         self.web_last_page = 1
         self.web_generation += 1
         self.web_pictures = {}
-        self.web_items = []
+        self.web_items = list(self.web_pics)       # Ask AI's pictures from the web first
         child = self.web_grid.get_first_child()
         while child is not None:
             self.web_grid.remove(child)
             child = self.web_grid.get_first_child()
+        theme = self.active_theme
+        for item in self.web_pics:
+            added = theme is not None and web_images.already_added(None, theme.slug, item)
+            self.web_grid.append(self.build_web_tile(item, added))
+        if self.web_pics:
+            self.load_web_thumbs(list(self.web_pics), self.web_generation)
         self.load_more_web_results()
 
     def rebuild_web_tiles(self):
@@ -4516,14 +4687,24 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_pictures = {}
         theme = self.active_theme
         for item in items:
-            added = theme is not None and wallpaper_search.already_added(None, theme.slug, item)
+            added = theme is not None and self.web_already_added(theme, item)
             self.web_grid.append(self.build_web_tile(item, added))
         self.load_web_thumbs([r for r in items if r.id in self.web_pictures], self.web_generation)
+
+    @staticmethod
+    def is_web_picture(item) -> bool:
+        return isinstance(item, web_images.WebPicture)
+
+    def web_already_added(self, theme, item) -> bool:
+        if self.is_web_picture(item):
+            return web_images.already_added(None, theme.slug, item)
+        return wallpaper_search.already_added(None, theme.slug, item)
 
     def load_more_web_results(self):
         if self.web_loading or not self.web_query or self.web_page_no >= self.web_last_page:
             return
         self.web_loading = True
+        self.web_busy()
         query, page, generation = self.web_query, self.web_page_no + 1, self.web_generation
         self.web_hint.set_label(self.web_hint_text(f"Searching {wallpaper_search.SOURCE} for “{query}”…"))
         self._async(lambda: wallpaper_search.search(query, page),
@@ -4533,6 +4714,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if generation != self.web_generation:
             return  # answer to an older search
         self.web_loading = False
+        self.web_busy()
         if error is not None or result is None:
             self.web_hint.set_label(self.web_hint_text(_("Search failed: {0}").format(error)))
             return
@@ -4546,6 +4728,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         shown = len(self.children_of(self.web_grid))
         if not shown:
             status = _("Nothing found for “{0}”. Try other words.").format(self.web_query)
+        elif len(self.web_pics) == shown:
+            status = _("{0} pictures from the web.").format(shown)
         else:
             more = " " + _("Scroll down for more.") if page < last_page else ""
             status = _("{0} wallpapers for “{1}”.").format(shown, self.web_query) + more + " " + _("Enter on a tile adds it.")
@@ -4579,16 +4763,22 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         actions.set_tooltip_text(_("Wallpaper actions (Enter)"))
         actions.connect("clicked", lambda button, i=item: self.show_web_menu(button, i))
         frame.add_overlay(actions)
-        if added:
-            badge = Gtk.Box()
-            badge.add_css_class("tm-badge")
-            badge.add_css_class("tm-tile-badge")
-            badge.set_halign(Gtk.Align.START)
-            badge.set_valign(Gtk.Align.END)
-            badge.append(Gtk.Label(label=_("added")))
-            frame.add_overlay(badge)
+        badges = Gtk.Box(spacing=4)
+        badges.set_halign(Gtk.Align.START)
+        badges.set_valign(Gtk.Align.END)
+        for text, shown in ((_("web"), self.is_web_picture(item)), (_("added"), added)):
+            if shown:
+                badge = Gtk.Box()
+                badge.add_css_class("tm-badge")
+                badge.add_css_class("tm-tile-badge")
+                badge.append(Gtk.Label(label=text))
+                badges.append(badge)
+        if self.is_web_picture(item):
+            badges.set_tooltip_text(item.url)
+        frame.add_overlay(badges)
         tile.append(frame)
-        caption = Gtk.Label(label=item.resolution.replace("x", " × "), xalign=0.5)
+        caption = Gtk.Label(label=item.file_name if self.is_web_picture(item) else item.resolution.replace("x", " × "),
+                            xalign=0.5)
         caption.add_css_class("tm-tile-label")
         caption.set_ellipsize(Pango.EllipsizeMode.END)
         caption.set_max_width_chars(1)
@@ -4610,12 +4800,30 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                     if not queue:
                         return
                     item = queue.pop(0)
-                path = wallpaper_search.fetch_thumb(item)
+                if self.is_web_picture(item):
+                    try:
+                        path = web_images.get(item.url)
+                    except (OSError, ValueError):
+                        path = None
+                        GLib.idle_add(self.drop_web_picture, item)   # no usable picture: left out
+                else:
+                    path = wallpaper_search.fetch_thumb(item)
                 if path is not None:
                     GLib.idle_add(self.show_web_thumb, item.id, str(path))
 
         for _ in range(min(PREVIEW_WORKERS, len(queue))):
             threading.Thread(target=worker, daemon=True).start()
+
+    def drop_web_picture(self, item):
+        if item in self.web_pics:
+            self.web_pics.remove(item)
+        self.web_items = [i for i in getattr(self, "web_items", []) if i != item]
+        self.web_pictures.pop(item.id, None)
+        for child in self.children_of(self.web_grid):
+            if getattr(child, "tm_web", None) == item:
+                self.web_grid.remove(child)
+                break
+        return GLib.SOURCE_REMOVE
 
     def show_web_thumb(self, wid: str, path: str):
         picture = self.web_pictures.pop(wid, None)
@@ -4633,7 +4841,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         def entry(label, handler, icon_name, **kwargs):
             return self.menu_item(box, popover, label, handler, icon_name, **kwargs)
 
-        if theme is not None and wallpaper_search.already_added(None, theme.slug, item):
+        web = self.is_web_picture(item)
+        if theme is not None and self.web_already_added(theme, item):
             entry(_("Already added"), lambda: None, "object-select-symbolic", sensitive=False)
         elif theme is not None:
             entry(_("Add to {0}").format(theme_core.plain_text(theme.name)), lambda: self.add_web_wallpaper(item, False),
@@ -4644,7 +4853,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         entry(_("Preview on desktop"), lambda: self.preview_web(item, PREVIEW_SECONDS), "view-reveal-symbolic",
               tooltip=_("Loads the full image and shows it for {0} seconds; or hold Space on the tile").format(PREVIEW_SECONDS))
         self.menu_separator(box)
-        if self.browser is not None:
+        if self.browser is not None and web:
+            entry(_("Open on {0}").format(item.host), lambda: web_images.open_page(item),
+                  "web-browser-symbolic", tooltip=item.page or item.url)
+        elif self.browser is not None:
             entry(_("Open on {0}").format(wallpaper_search.SOURCE), lambda: wallpaper_search.open_page(item),
                   "web-browser-symbolic", tooltip=item.page)
         else:
@@ -4657,7 +4869,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if theme is None:
             return
         self.web_hint.set_label(self.web_hint_text(f"Downloading {item.file_name}…"))
-        self._async(lambda: wallpaper_search.download(None, theme.slug, item),
+        fetch = web_images.download if self.is_web_picture(item) else wallpaper_search.download
+        self._async(lambda: fetch(None, theme.slug, item),
                     lambda path, error: self.after_web_add(theme, item, path, error, set_background))
 
     def after_web_add(self, theme, item, path, error, set_background: bool):
@@ -4673,8 +4886,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 self.web_grid.remove(child)
                 self.web_pictures.pop(item.id, None)
                 self.web_grid.insert(self.build_web_tile(item, True), index)
-                thumb = wallpaper_search.thumb_path(item)
-                if thumb.is_file():
+                thumb = web_images.cached(item.url) if self.is_web_picture(item) else wallpaper_search.thumb_path(item)
+                if thumb is not None and thumb.is_file():
                     self.show_web_thumb(item.id, str(thumb))
                 break
         if set_background and theme.current:
@@ -5743,6 +5956,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
     def on_web_key(self, keyval) -> bool:
         focus = self.window.get_focus()
+        if focus is not None and (focus is self.web_ai_entry or focus.is_ancestor(self.web_ai_entry)):
+            return False          # the Ask AI field takes its own keys (Enter asks, Esc leaves)
         in_search = focus is not None and (focus is self.web_search or focus.is_ancestor(self.web_search))
         tile = self.focused_web_tile()
         if tile is not None and keyval == Gdk.KEY_space:

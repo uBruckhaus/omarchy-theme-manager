@@ -1273,9 +1273,10 @@ class ViewLayerTest(unittest.TestCase):
         self.app.refresh_themes()
         entries = self.menu_entries(next(t for t in theme_core.discover_themes() if t.slug == "gamma"))
         entries["Add to favorites"].emit("clicked")
-        self.assertEqual([r.tm_theme.slug for r in self.rows_list()][0], "gamma")
+        # The theme in use (alpha) stays on top; favorites come right after it.
+        self.assertEqual([r.tm_theme.slug for r in self.rows_list()][:2], ["alpha", "gamma"])
         self.assertEqual(self.auto.load_favorites(), ["gamma"])
-        gamma = self.rows_list()[0]
+        gamma = self.rows_list()[1]
         self.assertTrue(any(isinstance(w, gi.repository.Gtk.Label) and w.get_label() == "★"
                             for w in self.descendants(gamma)))
         self.assertIn("Remove from favorites", self.menu_entries(gamma.tm_theme))
@@ -1286,7 +1287,61 @@ class ViewLayerTest(unittest.TestCase):
         self.auto.record_recent("gamma", when=10.0)
         self.auto.record_recent("beta", when=5.0)
         self.app.save_setting(sort="recent")
-        self.assertEqual([r.tm_theme.slug for r in self.rows_list()], ["gamma", "beta", "alpha"])
+        # The theme in use (alpha) first, then the most recently used.
+        self.assertEqual([r.tm_theme.slug for r in self.rows_list()], ["alpha", "gamma", "beta"])
+
+    def test_wallpaper_ask_ai_only_when_on_and_ready_web_pictures_first(self):
+        import theme_ai
+        import wallpaper_search
+        import web_images
+        self.make_theme("system", "alpha")
+        theme = next(t for t in theme_core.discover_themes() if t.slug == "alpha")
+        helper = {"id": "claude", "name": "Claude Code", "signed_in": True, "web": True}
+        with patch.object(theme_ai, "ready_helpers", return_value=[helper]):
+            self.app.save_setting(ask_ai=False)
+            self.app.open_wallpapers_for(theme)
+            self.assertFalse(self.app.wp_ask_button.get_visible())          # Ask AI off: nothing shows
+            self.app.save_setting(ask_ai=True)
+            self.app.open_wallpapers_for(theme)
+            self.assertTrue(self.app.wp_ask_button.get_visible())
+            self.app.open_web_search(ask=True)
+        self.assertTrue(self.app.web_ai_box.get_visible())
+        self.assertTrue(self.app.web_ai_web)
+        with patch.object(theme_ai, "ready_helpers", return_value=[]):
+            self.app.open_wallpapers_for(theme)
+            self.assertFalse(self.app.wp_ask_button.get_visible())      # no helper ready: nothing shows
+            self.app.open_web_search()
+        self.assertFalse(self.app.web_ai_box.get_visible())
+        with patch.object(theme_ai, "ready_helpers", return_value=[helper]):
+            self.app.open_web_search(ask=True)
+        answer = ("Calm snow", ["snowy forest", "winter lake"],
+                  [{"url": "https://img.example.com/a.jpg", "title": "Snow peak"}])
+        with patch.object(self.app, "_async", side_effect=lambda work, done: done(work(), None)), \
+                patch.object(theme_ai, "ask_wallpapers", return_value=answer) as ask, \
+                patch.object(wallpaper_search, "search", return_value=([], 1)), \
+                patch.object(self.app, "load_web_thumbs"):
+            self.app.web_ai_entry.set_text("calm and wintry")
+            self.app.web_ai_ask()
+        self.assertTrue(ask.call_args.kwargs["web"])
+        self.assertEqual(self.app.web_search.get_text(), "snowy forest")
+        chips = [w.get_label() for w in self.descendants(self.app.web_ai_chips) if isinstance(w, Gtk.Button)]
+        self.assertEqual(chips, ["snowy forest", "winter lake"])
+        tiles = self.app.children_of(self.app.web_grid)
+        self.assertIsInstance(tiles[0].tm_web, web_images.WebPicture)
+        self.assertTrue(any(isinstance(w, Gtk.Label) and w.get_label() == "web" for w in self.descendants(tiles[0])))
+        self.app.drop_web_picture(tiles[0].tm_web)                     # a link that is no picture: left out
+        self.assertEqual(self.app.children_of(self.app.web_grid), [])
+        self.assertFalse(self.app.web_ai_busy)
+
+    def test_the_theme_in_use_comes_first_framed(self):
+        for slug in ("alpha", "beta", "gamma"):
+            self.make_theme("system", slug)
+        self.app.refresh_themes()
+        rows = self.rows_list()
+        current = [r for r in rows if r.tm_theme.current]
+        self.assertEqual(rows[0], current[0])
+        self.assertTrue(rows[0].has_css_class("tm-current-row"))
+        self.assertFalse(any(r.has_css_class("tm-current-row") for r in rows[1:]))
 
     def test_applying_records_recent_use(self):
         theme = self.make_theme("system", "gamma")
@@ -1666,6 +1721,33 @@ class ViewLayerTest(unittest.TestCase):
             self.assertEqual(self.app.ask_rejected, ["Blue Pup"])
         self.assertEqual(ask_page.AskPageMixin.ask_refine_example({"query": ""}).count("{0}"), 0)
 
+    def test_ask_card_shows_web_pictures_with_badge_label_and_page(self):
+        import web_images
+        self.make_theme("system", "gamma")
+        colors = {"background": "#101820", "foreground": "#e0e0e0", "accent": "#1e66f5"}
+        candidate = {"kind": "edit", "base": "gamma", "base_name": "Gamma", "name": "Gamma", "colors": colors,
+                     "font": None, "query": "", "reason": "r",
+                     "wallpaper_images": [{"url": "https://img.example.com/a.jpg", "page": "https://img.example.com/a",
+                                           "title": "Snow peak"},
+                                          {"url": "https://img.example.com/b.jpg"}]}
+        self.app.ask_ready = [{"id": "claude", "name": "Claude Code"}]
+        opened = []
+        # Downloads stay pending (a failed one would be left out, see drop in ask_wallpaper_row).
+        with patch.object(self.app, "_async", side_effect=lambda work, done: None), \
+                patch.object(web_images, "open_page", side_effect=lambda item: opened.append(item.page) or True):
+            self.app.ask_candidates = [candidate]
+            self.app.ask_show()
+            card = self.app.ask_results.get_child_at_index(0).get_child()
+            labels = [w.get_label() for w in self.descendants(card) if isinstance(w, Gtk.Label)]
+            self.assertIn("Snow peak · web · 1/2", labels)                # a row even without a search phrase
+            self.assertTrue(card.tm_web_badge.get_visible())
+            self.assertIsInstance(candidate["wallpaper"], web_images.WebPicture)
+            buttons = [w for w in self.descendants(card) if isinstance(w, Gtk.Button)
+                       and w.get_tooltip_text() == "Open on img.example.com"]
+            self.assertEqual(len(buttons), 1)
+            buttons[0].emit("clicked")
+        self.assertEqual(opened, ["https://img.example.com/a"])
+
     def test_refine_keeps_the_card_when_nothing_visible_changed_and_reopens_its_field(self):
         import theme_ai
         self.make_theme("system", "gamma")
@@ -1693,7 +1775,7 @@ class ViewLayerTest(unittest.TestCase):
             card = self.children(self.app.ask_results)[0].get_child()
             self.assertFalse(card.tm_busy.get_visible())                 # the no-op ended its spinner
             seen = []
-            ask.side_effect = lambda *a: seen.append((card.tm_busy.get_visible(), card.tm_busy_label.get_label())) \
+            ask.side_effect = lambda *a, **_kw: seen.append((card.tm_busy.get_visible(), card.tm_busy_label.get_label())) \
                 or ("Made darker.", [darker])
             self.app.ask_now(parent, "much darker")
             self.assertEqual(seen, [(True, "Refining with Codex…")])

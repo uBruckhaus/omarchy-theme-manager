@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import i18n  # noqa: E402
 
-SOURCES = ("theme_popup.py", "workspaces_page.py", "ask_page.py", "theme_core.py", "theme_catalog.py", "wallpaper_search.py",
+SOURCES = ("theme_popup.py", "workspaces_page.py", "ask_page.py", "theme_core.py", "theme_catalog.py", "wallpaper_search.py", "web_images.py",
            "theme_auto.py", "theme_custom.py", "theme_shortcuts.py")
 
 

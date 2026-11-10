@@ -24,6 +24,7 @@ import theme_auto  # noqa: E402
 import theme_core  # noqa: E402
 import theme_custom  # noqa: E402
 import wallpaper_search  # noqa: E402
+import web_images  # noqa: E402
 import theme_catalog  # noqa: E402
 from i18n import _, N_  # noqa: E402
 from workspaces_page import LookAlike, load_cover, preset_rects, rgba, clear, ws_wrap  # noqa: E402
@@ -631,7 +632,9 @@ class AskPageMixin:
                 card = self.ask_results.get_child_at_index(0)
                 if card is not None:
                     self.ask_refine_row(card.get_child(), candidates[0])
-        self._async(lambda: theme_ai.ask(helper, text, sent, rejected, previous), done)
+        # Every wallpaper prompt the same: a helper with web tools also searches the web.
+        web = theme_ai.searches_web(helper, theme_auto.settings())
+        self._async(lambda: theme_ai.ask(helper, text, sent, rejected, previous, web=web), done)
 
     def ask_progress(self, on, name=""):
         """A spinner and the seconds so far while the helper thinks."""
@@ -718,6 +721,15 @@ class AskPageMixin:
         busy.append(busy_label)
         busy.set_visible(False)
         overlay.add_overlay(busy)
+        # A picture from the web on the preview: marked as such.
+        web_badge = Gtk.Box(halign=Gtk.Align.START, valign=Gtk.Align.END)
+        web_badge.add_css_class("tm-badge")
+        web_badge.add_css_class("tm-tile-badge")
+        web_badge.append(Gtk.Label(label=_("web")))
+        web_badge.set_can_target(False)
+        web_badge.set_visible(False)
+        overlay.add_overlay(web_badge)
+        card.tm_web_badge = web_badge
         card.append(overlay)
         card.tm_busy, card.tm_busy_spinner, card.tm_busy_label, card.tm_busy_jobs = busy, busy_spinner, busy_label, {}
         strip = Gtk.Box()
@@ -745,7 +757,7 @@ class AskPageMixin:
             strip.append(self.ask_palette_strip(candidate))
         walls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         card.append(walls)
-        if candidate["query"]:
+        if candidate["query"] or candidate.get("wallpaper_images"):
             walls.append(self.ask_wallpaper_row(candidate, look, card))
         reason = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
         reason.add_css_class("tm-hint")
@@ -894,14 +906,37 @@ class AskPageMixin:
         label = Gtk.Label(label=_("Searching wallpapers for “{0}”…").format(candidate["query"]), xalign=0,
                           ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, hexpand=True)
         label.add_css_class("tm-hint")
+        # A web picture's page (shown only while one is on the card).
+        open_btn = Gtk.Button(icon_name="web-browser-symbolic")
+        open_btn.add_css_class("flat")
+        open_btn.set_visible(False)
         row.append(prev_btn)
         row.append(label)
+        row.append(open_btn)
         row.append(next_btn)
-        state = {"results": [], "index": 0}
+        # Pictures the helper found on the web (a web Ask) come first, then the
+        # wallhaven search; your own words (Wallpaper…) search wallhaven only.
+        web = [] if candidate.get("query_by_user") else \
+            [web_images.picture(i) for i in candidate.get("wallpaper_images") or []]
+        state = {"results": [], "index": 0, "web": web}
         width, height = self.ask_preview
 
         query = candidate["query"]          # this row's search; a newer row replaces it
         token = candidate["search_token"] = object()
+        web_badge = getattr(card, "tm_web_badge", None)
+
+        def drop(item):
+            if item in state["results"]:
+                state["results"].remove(item)
+                if state["results"]:
+                    show(state["index"])
+                else:
+                    label.set_label(_("No wallpapers found for “{0}”.").format(query) if query else "")
+                    open_btn.set_visible(False)
+                    if web_badge is not None:
+                        web_badge.set_visible(False)
+        open_btn.connect("clicked", lambda *_a: isinstance(candidate.get("wallpaper"), web_images.WebPicture)
+                         and web_images.open_page(candidate["wallpaper"]))
 
         def current() -> bool:
             return candidate.get("search_token") is token
@@ -913,7 +948,16 @@ class AskPageMixin:
             state["index"] = index % len(results)
             item = results[state["index"]]
             candidate["wallpaper"] = item
-            label.set_label(f"“{state.get('phrase') or query}” · {state['index'] + 1}/{len(results)}")
+            is_web = isinstance(item, web_images.WebPicture)
+            count = f"{state['index'] + 1}/{len(results)}"
+            label.set_label(f"{item.title or item.host} · {_('web')} · {count}" if is_web
+                            else f"“{state.get('phrase') or query}” · {count}")
+            open_btn.set_visible(is_web)
+            if is_web:
+                open_btn.set_tooltip_text(_("Open on {0}").format(item.host))
+                open_btn.update_property([Gtk.AccessibleProperty.LABEL], [_("Open on {0}").format(item.host)])
+            if web_badge is not None:
+                web_badge.set_visible(is_web)
 
             job = ("picture", object())         # one per picture: quick ‹ › clicks each end their own
             self.ask_card_busy(card, job, _("Loading the picture…"))
@@ -929,20 +973,28 @@ class AskPageMixin:
                     self._async(lambda: load_cover(str(path), width, height), picture)
                 else:
                     self.ask_card_busy(card, job)
-            self._async(lambda: wallpaper_search.fetch_thumb(item), thumb)
+                    if is_web and current():
+                        drop(item)             # a web link that is no usable picture is left out
+            if is_web:
+                self._async(lambda: web_images.get(item.url), thumb)
+            else:
+                self._async(lambda: wallpaper_search.fetch_thumb(item), thumb)
 
         def found(result, error):
             self.ask_card_busy(card, ("search", token))
             if not current():
                 return                       # another search took over meanwhile
-            if error is not None or not result or not result[0]:
+            found_walls = list(result[0]) if error is None and result else []
+            if not found_walls and not state["web"]:
                 label.set_label(_("No wallpapers found for “{0}”.").format(query))
                 return
-            state["results"], _last, state["phrase"] = result
-            candidate["found_query"] = state["phrase"]
+            if result:
+                _found, _last, state["phrase"] = result
+                candidate["found_query"] = state["phrase"]
+            state["results"] = state["web"] + found_walls
             # The picture chosen before (kept by a refine) stays chosen.
-            chosen = (candidate.get("wallpaper") or {}).get("id")
-            show(next((i for i, item in enumerate(state["results"]) if chosen and item.get("id") == chosen), 0))
+            chosen = getattr(candidate.get("wallpaper"), "id", None)
+            show(next((i for i, item in enumerate(state["results"]) if chosen and item.id == chosen), 0))
         prev_btn.connect("clicked", lambda *_args: show(state["index"] - 1))
         next_btn.connect("clicked", lambda *_args: show(state["index"] + 1))
         def search():
@@ -959,6 +1011,9 @@ class AskPageMixin:
                     # The phrase that found pictures; your words stay the query (Refine, title).
                     return results, last, phrase
             return [], 0, query
+        if not query:
+            found(None, None)                  # only pictures from the web
+            return row
         self.ask_card_busy(card, ("search", token), _("Searching wallpapers…"))
         self._async(search, found)
         return row
