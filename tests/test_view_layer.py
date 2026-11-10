@@ -747,6 +747,52 @@ class ViewLayerTest(unittest.TestCase):
             entries[label.get_label()] = button
         return entries
 
+    def test_font_and_effects_text_colour(self):
+        Gtk = gi.repository.Gtk
+        theme = self.make_theme("user", "alpha")                         # the theme in use
+        (self.roots.user_themes / "alpha" / "colors.toml").write_text(
+            'background = "#1e1e2e"\nforeground = "#cdd6f4"\naccent = "#89b4fa"\nmuted = "#7f849c"\n')
+        themed = self.roots.system_themes.parent / "default" / "themed"     # Omarchy's templates
+        themed.mkdir(parents=True)
+        (themed / "alacritty.toml.tpl").write_text('foreground = "{{ foreground }}"\n')
+        current = self.roots.state_current / "theme"
+        current.mkdir(parents=True, exist_ok=True)
+        (current / "alacritty.toml").write_text('foreground = "#cdd6f4"\n')
+        reloaded = []
+        with patch.object(self.looks, "reload_apps", side_effect=lambda changed: reloaded.append(changed) or []):
+            self.app.open_look_page(theme)
+            self.assertTrue(self.app.lk_text_row.get_visible())
+            labels = [w.get_label() for w in self.descendants(self.app.lk_text_row) if isinstance(w, Gtk.Label)]
+            self.assertIn("Text colour", labels)
+            self.assertIn("Theme's own: #cdd6f4", labels)
+            self.assertFalse(self.app.lk_text_own.get_sensitive())       # already the theme's own
+            self.assertFalse(self.app.lk_text_warn.get_visible())
+            self.assertFalse(self.app.lk_save.get_sensitive())
+            self.assertTrue(any(isinstance(w, Gtk.Label) and w.has_css_class("s-text")
+                                for w in self.descendants(self.app.lk_sample)))
+            self.app.set_look_text("#2A2A3A")                            # too close to the background
+            self.assertTrue(self.app.lk_text_warn.get_visible())
+            self.assertIn("contrast 1.", self.app.lk_text_warn.get_label())
+            self.app.set_look_text("#ffcc00")
+            self.assertFalse(self.app.lk_text_warn.get_visible())
+            self.assertTrue(self.app.lk_save.get_sensitive())
+            self.assertEqual(self.app.lk_text_hint.get_label(), "#ffcc00 for this theme")
+            self.app.save_look()                                         # the theme in use: right away
+        self.assertEqual(self.looks.look_of("alpha"), {"text_color": "#ffcc00"})
+        self.assertEqual((current / "alacritty.toml").read_text(), 'foreground = "#ffcc00"\n')
+        self.assertEqual(reloaded, [["alacritty.toml"]])
+        self.assertEqual((self.roots.user_themes / "alpha" / "colors.toml").read_text().count("#cdd6f4"), 1)
+        self.app.open_look_page(theme)
+        self.assertEqual(self.app.lk_text, "#ffcc00")
+        self.app.lk_text_own.emit("clicked")                             # Theme's own
+        self.assertIsNone(self.app.lk_text)
+        self.app.set_look_text("#CDD6F4")                                # its own colour is no override
+        self.assertIsNone(self.app.lk_text)
+        with patch.object(self.looks, "reload_apps", return_value=[]):
+            self.app.save_look()
+        self.assertEqual(self.looks.load_looks(), {})
+        self.assertEqual((current / "alacritty.toml").read_text(), 'foreground = "#cdd6f4"\n')
+
     def test_font_and_effects_one_save_applies_the_theme_in_use_and_undo(self):
         theme = self.make_theme("user", "alpha")
         other = self.make_theme("user", "beta")

@@ -60,7 +60,7 @@ FILES = {
     "presets.json": list,
     "shortcuts.json": dict,
     "workspaces.json": dict,   # workspace presets and App Presets (workspace_tiling)
-    "looks.json": dict,        # font and window style per theme (theme_looks)
+    "looks.json": dict,        # font, window style and text colour per theme (theme_looks)
 }
 
 

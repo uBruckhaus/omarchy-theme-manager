@@ -320,5 +320,129 @@ class BackupTests(LooksTestCase):
             theme_backup._validate_settings({"own_windows": "x; rm"})
 
 
+ALACRITTY_TPL = """[colors.primary]
+background = "{{ background }}"
+foreground = "{{ foreground }}"
+
+[colors.normal]
+white = "{{ foreground }}"
+bright_white = "{{ bright_foreground }}"
+"""
+FOOT_TPL = "[colors]\nforeground={{ foreground_strip }}\ncursor={{ background_strip }} {{ foreground_strip }}\n"
+KITTY_TPL = "foreground {{ foreground }}\nbackground {{ background }}\n"
+
+
+class TextColourTests(LooksTestCase):
+    """The text colour of a theme's look in the configs Omarchy generated."""
+
+    def setUp(self):
+        super().setUp()
+        themed = self.root / "default" / "themed"          # $OMARCHY_PATH/default/themed (beside themes/)
+        themed.mkdir(parents=True)
+        (themed / "alacritty.toml.tpl").write_text(ALACRITTY_TPL)
+        (themed / "foot.ini.tpl").write_text(FOOT_TPL)
+        (themed / "kitty.conf.tpl").write_text(KITTY_TPL)
+        old = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.root / "home-config")   # no templates of your own
+        self.addCleanup(lambda: os.environ.__setitem__("XDG_CONFIG_HOME", old) if old is not None
+                        else os.environ.pop("XDG_CONFIG_HOME", None))
+        self.reloaded = []
+        self.patch(theme_looks, "reload_apps", lambda changed: self.reloaded.append(sorted(changed)) or [])
+        self.switch("ristretto")
+
+    def switch(self, slug):
+        """omarchy theme set: the theme's configs rendered fresh, a new generation."""
+        state = self.roots.state_current
+        current = state / "theme"
+        if current.exists():
+            for f in current.iterdir():
+                f.unlink()
+            current.rmdir()
+        current.mkdir()
+        colors = {"background": "#2c2525", "foreground": "#e6d9db", "bright_foreground": "#e6d9db"}
+        render = lambda tpl: tpl.replace("{{ background }}", colors["background"]) \
+            .replace("{{ foreground }}", colors["foreground"]) \
+            .replace("{{ bright_foreground }}", colors["bright_foreground"]) \
+            .replace("{{ foreground_strip }}", colors["foreground"][1:]) \
+            .replace("{{ background_strip }}", colors["background"][1:])
+        (current / "alacritty.toml").write_text(render(ALACRITTY_TPL))
+        (current / "foot.ini").write_text(render(FOOT_TPL))
+        # The theme ships its own kitty.conf: not rendered from the template, never touched.
+        (current / "kitty.conf").write_text("# my own kitty\nforeground #e6d9db\n")
+        (current / "colors.toml").write_text('background = "#2c2525"\nforeground = "#e6d9db"\n')
+        self.use(slug)
+        self.generation = getattr(self, "generation", 0) + 1
+        (state / "theme.generation").write_text(f"gen-{self.generation}\n")
+
+    def read(self, name):
+        return (self.roots.state_current / "theme" / name).read_text()
+
+    def test_the_colour_is_stored_checked_and_backed_up(self):
+        theme_looks.set_look("ristretto", {"text_color": "#AABBCC"})
+        self.assertEqual(theme_looks.look_of("ristretto"), {"text_color": "#aabbcc"})
+        for bad in ("red", "#abc", "#aabbcc; rm", 3, "aabbcc"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                theme_looks.set_look("ristretto", {"text_color": bad})
+        # A backup's looks.json is checked the same way: a bad colour is dropped.
+        self.assertEqual(theme_looks.check_looks({"ristretto": {"text_color": "#AABBCC"},
+                                                  "tokyo-night": {"text_color": "url(evil)"}}),
+                         {"ristretto": {"text_color": "#aabbcc"}})
+        self.assertIn("text_color", theme_looks.caps())
+
+    def test_applying_swaps_only_the_foreground_lines_of_generated_configs(self):
+        theme_looks.set_look("ristretto", {"text_color": "#ffcc00"})
+        self.assertEqual(theme_looks.pending("ristretto"), ["text_color"])      # Reapply would bring it
+        self.assertEqual(theme_looks.apply_look("ristretto"), ["text_color"])
+        alacritty = self.read("alacritty.toml")
+        self.assertIn('foreground = "#ffcc00"', alacritty)
+        self.assertIn('white = "#ffcc00"', alacritty)
+        self.assertIn('bright_white = "#e6d9db"', alacritty)         # another key, same hex: kept
+        self.assertIn('background = "#2c2525"', alacritty)
+        self.assertEqual(self.read("foot.ini"), "[colors]\nforeground=ffcc00\ncursor=2c2525 ffcc00\n")
+        self.assertEqual(self.read("kitty.conf"), "# my own kitty\nforeground #e6d9db\n")   # the theme's own file
+        self.assertIn('foreground = "#ffcc00"', self.read("colors.toml"))
+        self.assertEqual(self.reloaded, [["alacritty.toml", "colors.toml", "foot.ini"]])
+        self.assertEqual((self.roots.system_themes / "ristretto" / "colors.toml").read_text(), COLORS)
+        self.assertEqual(theme_looks.pending("ristretto"), [])
+        self.assertEqual(theme_looks.apply_look("ristretto"), [])     # already shown
+        self.assertNotIn("own_text_color", json.dumps(self.settings()))   # nothing kept in settings
+
+    def test_reapply_changes_it_and_without_a_colour_the_theme_has_its_own_back(self):
+        theme_looks.set_look("ristretto", {"text_color": "#ffcc00"})
+        theme_looks.apply_look("ristretto")
+        theme_looks.set_look("ristretto", {"text_color": "#00ff88"})
+        self.assertEqual(theme_looks.apply_look("ristretto"), ["text_color"])
+        self.assertIn('foreground = "#00ff88"', self.read("alacritty.toml"))
+        theme_looks.set_look("ristretto", {})
+        self.assertEqual(theme_looks.pending("ristretto"), ["text_color"])
+        self.assertEqual(theme_looks.apply_look("ristretto"), ["text_color"])
+        self.assertIn('foreground = "#e6d9db"', self.read("alacritty.toml"))
+        self.assertEqual(self.read("foot.ini"), "[colors]\nforeground=e6d9db\ncursor=2c2525 e6d9db\n")
+        self.assertFalse(theme_looks.text_state_file().exists())
+
+    def test_a_new_switch_starts_from_the_theme_colours_again(self):
+        theme_looks.set_look("ristretto", {"text_color": "#ffcc00"})
+        theme_looks.apply_look("ristretto")
+        self.switch("ristretto")                                          # Omarchy rendered it fresh
+        theme_looks.set_look("ristretto", {"text_color": "#123456"})
+        self.assertEqual(theme_looks.apply_look("ristretto"), ["text_color"])
+        self.assertIn('foreground = "#123456"', self.read("alacritty.toml"))
+        self.switch("ristretto")
+        theme_looks.set_look("ristretto", {})
+        self.assertEqual(theme_looks.apply_look("ristretto"), [])          # its own already
+
+    def test_only_the_theme_in_use_and_whole_values(self):
+        theme_looks.set_look("tokyo-night", {"text_color": "#ffcc00"})
+        self.assertEqual(theme_looks.apply_look("tokyo-night"), [])        # not in place: nothing generated
+        self.assertEqual(theme_looks.pending("tokyo-night"), [])
+        data = theme_looks.look_data("tokyo-night")
+        self.assertEqual(data["own"]["text_color"], "#e6d9db")
+        self.assertEqual(data["colors"]["background"], "#2c2525")
+        self.assertEqual(theme_looks._swap("rgb = 130,30,46 30,30,46", "rgb = {{ foreground_rgb }} {{ x }}",
+                                           "#1e1e2e", "#ffffff"), "rgb = 130,30,46 255,255,255")
+        self.assertLess(theme_looks.contrast_ratio("#2a2a3a", "#1e1e2e"), theme_looks.MIN_CONTRAST)
+        self.assertAlmostEqual(theme_looks.contrast_ratio("#ffffff", "#000000"), 21.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2313,7 +2313,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     # --- Font & effects (theme_looks) ------------------------------------------------------
 
     WINDOW_LABELS = {"opaque": N_("Opaque"), "transparent": N_("Transparent"), "glassy": N_("Glassy (blur)")}
-    LOOK_FIELDS = {"mono_font": N_("font"), "windows": N_("window style")}
+    LOOK_FIELDS = {"mono_font": N_("font"), "windows": N_("window style"), "text_color": N_("text colour")}
 
     def build_look_page(self) -> Gtk.Widget:
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -2349,6 +2349,39 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.lk_windows_row = self.settings_row(
             box, _("Windows"), _("Glassy blurs what is behind see-through windows, the bar and menus, "
                                  "and gives terminals a see-through background"), self.lk_windows)
+        # Text colour: a swatch with the colour chooser and the theme's own back;
+        # a warning when it is hard to read, and a sample in the theme's colours.
+        text = Gtk.Box(spacing=6)
+        self.lk_text_swatch = Gtk.Button()
+        self.lk_text_swatch.add_css_class("tm-swatch")
+        self.lk_text_swatch.add_css_class("tm-lk-text-swatch")
+        self.lk_text_swatch.set_size_request(34, 26)
+        self.lk_text_swatch.set_valign(Gtk.Align.CENTER)
+        self.lk_text_swatch.set_tooltip_text(_("Pick a color"))
+        self.lk_text_swatch.update_property([Gtk.AccessibleProperty.LABEL], [_("Text colour")])
+        self.lk_text_swatch.connect("clicked", lambda button: self.show_look_text_picker(button))
+        text.append(self.lk_text_swatch)
+        self.lk_text_own = Gtk.Button(label=_("Theme's own"))
+        self.lk_text_own.add_css_class("sc-small")
+        self.lk_text_own.set_valign(Gtk.Align.CENTER)
+        self.lk_text_own.connect("clicked", lambda *_: self.set_look_text(None))
+        text.append(self.lk_text_own)
+        self.lk_text_row = self.settings_row(box, _("Text colour"), " ", text)
+        self.lk_text_hint = self.lk_text_row.get_first_child().get_last_child()
+        self.lk_text_warn = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
+        self.lk_text_warn.add_css_class("tm-hint")
+        self.lk_text_warn.add_css_class("tm-lk-warn")
+        box.append(self.lk_text_warn)
+        self.lk_sample = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.lk_sample.add_css_class("tm-lk-sample")
+        for line, css in ((_("The quick brown fox jumps over the lazy dog"), "s-text"),
+                          ("~/.config/omarchy $ ls", "s-text"), (_("a comment, dimmer"), "s-muted")):
+            label = Gtk.Label(label=line, xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+            label.add_css_class(css)
+            self.lk_sample.append(label)
+        box.append(self.lk_sample)
+        self.lk_text = None
+        self.lk_provider = None
         self.lk_status = Gtk.Label(xalign=0, wrap=True, max_width_chars=1)
         self.lk_status.add_css_class("tm-hint")
         box.append(self.lk_status)
@@ -2373,7 +2406,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.lk_slug = theme.slug
         self.lk_title.set_label(_("Font & effects — {0}").format(theme_core.plain_text(theme.name)))
         self.lk_status.set_label(_("Loading…"))
-        for widget in (self.lk_font, self.lk_windows, self.lk_save):
+        for widget in (self.lk_font, self.lk_windows, self.lk_save, self.lk_text_swatch, self.lk_text_own):
             widget.set_sensitive(False)
         self.stack.set_visible_child_name("look")
         self.lk_save.grab_focus()
@@ -2416,7 +2449,84 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.lk_windows.set_selected(self.lk_modes.index(mode) if mode in self.lk_modes else 0)
         self.lk_font.set_sensitive(True)
         self.lk_windows.set_sensitive(windows)
+        text = "text_color" in data["caps"] and {"background", "foreground"} <= set(data.get("colors", {}))
+        for widget in (self.lk_text_row, self.lk_text_warn, self.lk_sample):
+            widget.set_visible(text)
+        self.lk_text = look.get("text_color")
+        self.lk_text_swatch.set_sensitive(text)
+        if text:
+            self.update_look_text()
         self.update_look_buttons()
+
+    def look_text_color(self) -> str:
+        return self.lk_text or self.lk_data["colors"]["foreground"]
+
+    def show_look_text_picker(self, button):
+        def build(popover):
+            box = self.menu_box()
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                chooser = Gtk.ColorChooserWidget(use_alpha=False)
+            self.guard_text_fields_in(chooser)
+            color = Gdk.RGBA()
+            color.parse(self.look_text_color())
+            chooser.set_rgba(color)
+
+            def use(*_):
+                rgba = chooser.get_rgba()
+                value = "#" + "".join(f"{round(c * 255):02x}" for c in (rgba.red, rgba.green, rgba.blue))
+                popover.popdown()
+                self.set_look_text(value)
+            chooser.connect("color-activated", use)
+            box.append(chooser)
+            done = Gtk.Button(label=_("Use as text colour"))
+            done.add_css_class("tm-paste")
+            done.connect("clicked", use)
+            box.append(done)
+            return box
+        self.show_menu(button, build)
+
+    def set_look_text(self, value):
+        data = self.lk_data
+        if data is None or self.lk_busy or "foreground" not in data.get("colors", {}):
+            return
+        own = data["colors"]["foreground"].lower()
+        value = value.lower() if isinstance(value, str) and theme_custom.HEX_RE.match(value) else None
+        self.lk_text = None if value == own else value     # the theme's own colour is no override
+        self.update_look_text()
+        self.update_look_buttons()
+
+    def update_look_text(self):
+        """Swatch, hint, contrast warning and sample in the colour chosen."""
+        colors, text = self.lk_data["colors"], self.look_text_color()
+        self.lk_text_hint.set_label(_("{0} for this theme").format(text) if self.lk_text else
+                                    _("Theme's own: {0}").format(colors["foreground"]))
+        self.lk_text_own.set_sensitive(self.lk_text is not None)
+        self.lk_text_own.set_tooltip_text(_("The theme's own text colour, {0}").format(colors["foreground"]))
+        ratio = theme_looks.contrast_ratio(text, colors["background"])
+        self.lk_text_warn.set_visible(ratio < theme_looks.MIN_CONTRAST)
+        self.lk_text_warn.set_label(_("Hard to read on this theme's background: contrast {0}:1, at least 3:1 is "
+                                      "better.").format(f"{ratio:.1f}"))
+        muted = colors.get("muted") or colors["foreground"]
+        radius = corners.radius(theme_auto.settings().get("corners"), getattr(self, "window_rounding", None))
+        small, control = corners.small(radius), corners.control(radius)
+        css = "\n".join((
+            f".tm-lk-text-swatch {{ background: {text}; }}",
+            f"button.tm-swatch {{ border: 1px solid alpha(currentColor, 0.4); border-radius: {small}px;"
+            " min-height: 0; min-width: 0; padding: 0; }",
+            f".tm-lk-sample {{ background: {colors['background']}; border-radius: {control}px; padding: 8px 12px; }}",
+            f".tm-lk-sample label.s-text {{ color: {text}; }}",
+            f".tm-lk-sample label.s-muted {{ color: {muted}; }}",
+            f".tm-lk-warn {{ color: {self.theme.colors.get('red', '#f04452')}; }}",
+        ))
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css.encode("utf-8"))
+        display = Gdk.Display.get_default()
+        if self.lk_provider is not None:
+            Gtk.StyleContext.remove_provider_for_display(display, self.lk_provider)
+        Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.lk_provider = provider
 
     def look_edited(self) -> dict:
         edited = {}
@@ -2429,6 +2539,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             edited["windows"] = mode
         if "windows" not in self.lk_data["caps"] and self.lk_data["look"].get("windows"):
             edited["windows"] = self.lk_data["look"]["windows"]    # kept for an Omarchy that has it
+        if self.lk_text:
+            edited["text_color"] = self.lk_text
         return edited
 
     def update_look_buttons(self):
