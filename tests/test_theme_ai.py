@@ -119,6 +119,40 @@ class AskAiTests(unittest.TestCase):
         self.assertEqual(codex.sent, b"PROMPT")
         self.assertFalse(Path(codex.cwd).exists())                # the private folder is gone again
 
+    def test_a_helper_still_running_is_waited_for_and_only_an_earlier_stop_ends_it(self):
+        def slow(polls_running, on_poll=None):
+            class Slow:
+                def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False,
+                             env=None, preexec_fn=None):
+                    stdout.write(b'{"candidates": []}')
+                    stdout.flush()
+                    self.left, self.returncode, self.pid = polls_running, 0, 0
+
+                def poll(self):
+                    if on_poll:
+                        on_poll()
+                    if self.left:
+                        self.left -= 1
+                        return None
+                    return 0
+            return Slow
+        common = (patch.object(theme_ai, "jail_argv", side_effect=lambda h, argv, work: argv),
+                  patch.object(theme_ai.shutil, "which", return_value="/usr/bin/bwrap"),
+                  patch.object(theme_ai.time, "sleep", lambda _s: None),
+                  patch.object(theme_ai, "stop", lambda _p: None))
+        for c in common:
+            c.start()
+        try:
+            theme_ai.cancel()                                     # a Stop before this Ask: no effect on it
+            with patch.object(theme_ai.subprocess, "Popen", slow(3)):
+                self.assertEqual(theme_ai.run("codex", "PROMPT"), '{"candidates": []}')
+            with patch.object(theme_ai.subprocess, "Popen", slow(3, on_poll=theme_ai.cancel)):
+                with self.assertRaisesRegex(RuntimeError, "cancelled"):   # a Stop while it runs ends it
+                    theme_ai.run("codex", "PROMPT")
+        finally:
+            for c in common:
+                c.stop()
+
     def test_oversized_answer_is_refused_even_after_exit(self):
         class Big:
             def __init__(self, argv, stdin=None, stdout=None, stderr=None, cwd=None, start_new_session=False, env=None,

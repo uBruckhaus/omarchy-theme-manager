@@ -995,7 +995,7 @@ def run(helper_id: str, prompt: str, timeout: int = TIMEOUT, web: bool = False) 
             extra = ["--offline", "--provider", local["provider"], "--model", local["model"]]
     try:
         return _run_helper(helper, argv_extra=extra, prompt=prompt, timeout=timeout,
-                           web=web and helper.get("web") is not None)
+                           web=web and helper.get("web") is not None, run_id=run_id)
     finally:
         if local is not None:
             remember_loaded(local, before)
@@ -1020,7 +1020,10 @@ def local_model(helper_id: str | None) -> dict | None:
     return None
 
 
-def _run_helper(helper: dict, argv_extra: list, prompt: str, timeout: int, web: bool = False) -> str:
+def _run_helper(helper: dict, argv_extra: list, prompt: str, timeout: int, web: bool = False,
+                run_id: int | None = None) -> str:
+    if run_id is None:
+        run_id = _new_run()                    # called on its own: a Stop from now on ends it
     extra = argv_extra
     work = Path(tempfile.mkdtemp(prefix="theme-manager-ask-"))
     os.chmod(work, 0o700)
