@@ -1073,6 +1073,40 @@ class ViewLayerTest(unittest.TestCase):
         self.app.load_more_web_results()                                             # last page: no request
         self.assertEqual(len(self.searches), 3)
 
+    def test_batch_selector_next_to_the_search_without_ask_ai(self):
+        import theme_ai
+        theme = self.make_theme("user", "alpha")
+        self.app.save_setting(ask_ai=False)
+        pages = {p: [f"{c}{c}{p}{p}{p}{p}" for c in "abcd"] for p in (1, 2, 3)}
+
+        def search(query, page=1):
+            self.searches.append((query, page))
+            like = self.web_results[0]
+            return [like.__class__(wid, f"https://wallhaven.cc/w/{wid}", like.thumb, like.full, "2560x1440", 10)
+                    for wid in pages.get(page, ())], 3
+        self.ws.search = search
+        self.app.open_wallpapers_for(theme)
+        self.app.open_web_search()
+        self.assertFalse(self.app.web_ai_box.get_visible())
+        self.assertIs(self.app.web_count_drop.get_parent(), self.app.web_search_row)   # next to the search field
+        self.app.web_count_drop.set_selected(theme_ai.WALLPAPER_COUNTS.index(5))
+        self.assertEqual(theme_ai.wallpaper_count(self.auto.settings()), 5)
+        self.app.web_search.set_text("city")
+        self.app.run_web_search()
+        self.assertEqual(len(self.children(self.app.web_grid)), 5)
+        label = next(c.get_label() for c in self.descendants(self.app.web_next) if isinstance(c, Gtk.Label))
+        self.assertEqual(label, "Next 5")
+        self.app.web_count_drop.set_selected(theme_ai.WALLPAPER_COUNTS.index(10))      # applies to Next
+        self.app.web_next.emit("clicked")
+        self.assertEqual(len(self.children(self.app.web_grid)), 12)
+        self.app.save_setting(ask_ai=True)                                             # with Ask AI: in its row
+        with patch.object(theme_ai, "ready_helpers",
+                          return_value=[{"id": "claude", "name": "Claude Code", "signed_in": True, "web": True}]):
+            self.app.open_web_search()
+        self.assertIs(self.app.web_count_drop.get_parent(), self.app.web_ai_row)
+        self.assertEqual(sum(isinstance(w, Gtk.DropDown) and w.has_css_class("tm-count")
+                             for w in self.descendants(self.app.stack.get_child_by_name("websearch"))), 1)
+
     def test_web_next_becomes_cancel_and_cancel_stops_what_it_started(self):
         import theme_ai
         theme = self.make_theme("user", "alpha")

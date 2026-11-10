@@ -746,7 +746,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_search.set_placeholder_text(_("Search, e.g. misty forest, neon city"))
         self.web_search.connect("activate", lambda *_: self.run_web_search())
         self.guard_text_field(self.web_search)
-        web_page.append(self.web_search)
+        self.web_search.set_hexpand(True)
+        # The search field, and (without Ask AI) the pictures-per-batch selector next to it.
+        self.web_search_row = Gtk.Box(spacing=6)
+        self.web_search_row.append(self.web_search)
+        web_page.append(self.web_search_row)
         # Ask AI (only while it is on and a helper is ready): your words become
         # search phrases, and a helper with web tools also finds pictures on the web.
         self.web_ai_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -773,6 +777,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_count_drop.update_property([Gtk.AccessibleProperty.LABEL], [_("Pictures per batch")])
         self.web_count_drop.set_selected(theme_ai.WALLPAPER_COUNTS.index(theme_ai.wallpaper_count(theme_auto.settings())))
         self.web_count_drop.connect("notify::selected", lambda *_: self.web_count_changed())
+        self.web_ai_row = ai_row
         ai_row.append(self.web_count_drop)
         self.web_ai_box.append(ai_row)
         self.web_ai_chips = ws_wrap()
@@ -4588,6 +4593,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.web_ai_button.set_tooltip_text(
                 _("Ask {0} for search words: it gets your words and this theme's name and colors; the search "
                   "itself uses no tokens").format(helper["name"]))
+        # One selector: in the Ask AI row with Ask AI, else next to the search field.
+        place = self.web_ai_row if helper is not None else self.web_search_row
+        if self.web_count_drop.get_parent() is not place:
+            self.web_count_drop.get_parent().remove(self.web_count_drop)
+            place.append(self.web_count_drop)
         self.web_count_drop.set_selected(theme_ai.WALLPAPER_COUNTS.index(self.web_count()))
         self.update_web_next()
         (self.web_ai_entry if ask and helper is not None else self.web_search).grab_focus()
