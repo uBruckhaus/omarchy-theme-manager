@@ -742,6 +742,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.ws_title.add_css_class("tm-title")
         self.ws_title.set_hexpand(True)
         ws_header.append(self.ws_title)
+        self.ws_header = ws_header                # the helper choice sits at its right end (Ask AI on)
         web_page.append(ws_header)
         self.web_search = Gtk.SearchEntry()
         self.web_search.set_placeholder_text(_("Search, e.g. misty forest, neon city"))
@@ -767,7 +768,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.web_helper_drop.connect("notify::selected", lambda *_: self.web_helper_changed())
         self.web_ai_ready = []
         self.web_helper_filling = False
-        ai_row.append(self.web_helper_drop)
+        self.web_helper_drop.set_halign(Gtk.Align.END)
+        self.web_helper_drop.set_visible(False)
+        self.ws_header.append(self.web_helper_drop)
         self.web_ai_entry = Gtk.Entry(hexpand=True,
                                       placeholder_text=_("Ask AI, e.g. “calm and wintry, fits this theme”"))
         self.web_ai_entry.set_max_length(theme_ai.MAX_REQUEST)
@@ -4719,6 +4722,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.fill_web_helpers(helper)
         self.use_web_helper(helper)
         self.web_ai_box.set_visible(helper is not None)
+        self.web_helper_drop.set_visible(helper is not None)
         # One selector: in the Ask AI row with Ask AI, else next to the search field.
         place = self.web_ai_row if helper is not None else self.web_search_row
         if self.web_count_drop.get_parent() is not place:
