@@ -1,8 +1,11 @@
 """Every interface text in the sources has a translation in every language."""
 import ast
+import json
+import os
 import re
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +67,71 @@ class TranslationTests(unittest.TestCase):
                              "5 ukrytych motywów nie jest pokazanych.")
         finally:
             i18n._lang = None
+
+
+class LanguageSettingTests(unittest.TestCase):
+    """The language goes through the same settings lock, reader and writer."""
+
+    def setUp(self):
+        import tempfile
+        import theme_core  # noqa: F401  first: importing it points i18n at the real settings file
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "settings.json"
+        self.old = i18n.SETTINGS_FILE
+        i18n.SETTINGS_FILE = self.path
+        real = Path.home() / ".config/omarchy/theme-manager/settings.json"
+        self.assertNotEqual(Path(i18n.SETTINGS_FILE), real)   # never the user's own file
+
+    def tearDown(self):
+        i18n.SETTINGS_FILE = self.old
+        self.tmp.cleanup()
+
+    def test_overlapping_updates_are_never_lost(self):
+        import threading
+        import theme_core
+        self.path.write_text('{"sort": "name"}')
+        errors = []
+
+        def languages():
+            try:
+                for code in ("de", "fr", "auto") * 10:
+                    i18n.save_language(code)
+            except Exception as error:                    # noqa: BLE001
+                errors.append(error)
+
+        def counters():
+            try:
+                for n in range(30):
+                    theme_core._update_settings(self.path, counter=n)
+            except Exception as error:                    # noqa: BLE001
+                errors.append(error)
+        threads = [threading.Thread(target=languages), threading.Thread(target=counters)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["counter"], 29)             # the other writer's last value stays
+        self.assertEqual(data["sort"], "name")
+        self.assertNotIn("language", data)                # "auto" last
+
+    def test_a_non_regular_settings_file_is_never_waited_on(self):
+        os.mkfifo(self.path)
+        self.assertEqual(i18n.language_setting(), "auto")  # a FIFO: not read, no hang
+
+    def test_a_held_settings_lock_ends_in_an_error_not_a_hang(self):
+        import fcntl
+        import theme_core
+        lock = self.path.with_name(self.path.name + ".lock")
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with unittest.mock.patch.object(theme_core, "SETTINGS_LOCK_SECONDS", 0.2):
+                with self.assertRaises(TimeoutError):
+                    i18n.save_language("de")
+        finally:
+            os.close(fd)
 
 
 if __name__ == "__main__":

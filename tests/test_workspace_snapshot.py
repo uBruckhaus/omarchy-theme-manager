@@ -163,5 +163,22 @@ class SnapshotTests(unittest.TestCase):
         self.assertNotIn("argv", store["workspaceLayouts"]["4"]["apps"][0])
 
 
+class RuntimeLockTests(unittest.TestCase):
+    def test_a_window_waiting_too_long_for_the_lock_gives_up(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as run:
+            os.chmod(run, 0o700)
+            with patch.dict(os.environ, {"XDG_RUNTIME_DIR": run}), patch.object(tile, "LOCK_SECONDS", 0.2):
+                lock = Path(run) / "omarchy-simple-tile.lock"
+                fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    with self.assertRaises(TimeoutError):
+                        with tile.runtime_lock():
+                            self.fail("entered without the lock")
+                finally:
+                    os.close(fd)
+
+
 if __name__ == "__main__":
     unittest.main()

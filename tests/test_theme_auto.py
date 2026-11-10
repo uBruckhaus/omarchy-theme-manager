@@ -520,5 +520,20 @@ class CommandLineTests(AutoTestCase):
         self.assertEqual(self.applied, ["assigned", "night"])
 
 
+class LockDeadlineTests(AutoTestCase):
+    def test_a_step_waiting_too_long_for_the_lock_gives_up(self):
+        import fcntl
+        lock = theme_auto.state_file().with_suffix(".lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)                    # another step keeps it
+        try:
+            self.patch(theme_auto, "AUTOMATION_LOCK_SECONDS", 0.2)
+            self.patch(theme_auto, "tick", lambda: self.fail("ran without the lock"))
+            self.assertEqual(theme_auto.main(["tick"]), 1)
+        finally:
+            os.close(fd)
+
+
 if __name__ == "__main__":
     unittest.main()

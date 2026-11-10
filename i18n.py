@@ -34,47 +34,27 @@ def language_setting():
     """'auto' or a language code from the settings file."""
     if SETTINGS_FILE is None:
         return "auto"
-    try:
-        with open(SETTINGS_FILE, "rb") as fh:
-            data = json.loads(fh.read(64 * 1024) or b"{}")
-    except (OSError, ValueError):
-        return "auto"
-    value = data.get("language") if isinstance(data, dict) else None
+    import theme_core                     # here: theme_core imports this module
+    data = theme_core._load_settings(Path(SETTINGS_FILE))   # bounded, regular files only, never blocks
+    value = data.get("language")
     return value if value in CODES else "auto"
 
 
 def save_language(code):
-    """Store the choice (atomic, private); "auto" follows the system again."""
+    """Store the choice under the shared settings lock, through the same
+    reader and atomic writer as every other setting, so a concurrent update
+    is never overwritten; "auto" follows the system again."""
     if SETTINGS_FILE is None:
         return
+    import theme_core                     # here: theme_core imports this module
     path = Path(SETTINGS_FILE)
-    try:
-        with open(path, "rb") as fh:
-            data = json.loads(fh.read(64 * 1024) or b"{}")
-        data = data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        data = {}
-    if code == "auto":
-        data.pop("language", None)
-    elif code in CODES:
-        data["language"] = code
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
-    global _lang
-    _lang = None
+    with theme_core.settings_lock(path):
+        data = theme_core._load_settings(path)
+        if code == "auto":
+            data.pop("language", None)
+        elif code in CODES:
+            data["language"] = code
+        theme_core._atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o600)
 
 
 def current():

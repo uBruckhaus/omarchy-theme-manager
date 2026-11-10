@@ -510,6 +510,9 @@ def get_runtime_dir():
         return fallback
 
 
+LOCK_SECONDS = 60.0
+
+
 @contextmanager
 def runtime_lock():
     runtime_dir = get_runtime_dir()
@@ -534,7 +537,15 @@ def runtime_lock():
             raise RuntimeError(f"opened lock file descriptor is not a regular file: {lock_path}")
         if st.st_uid != os.getuid():
             raise RuntimeError(f"opened lock file descriptor not owned by current user: {lock_path}")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + LOCK_SECONDS     # never waits forever
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"the tiling lock stayed taken: {lock_path}") from None
+                time.sleep(0.05)
         try:
             yield
         finally:

@@ -67,10 +67,40 @@ BarWidget {
   }
 
   // One helper run at a time; while one runs, only the latest request waits.
+  // Each run is supervised: it ends (exit, failed start or the deadline) and
+  // is settled exactly once, then the waiting request runs.
   function run(args) {
-    if (helper.running) { pending = args; return }
+    if (helperBusy) { pending = args; return }
+    helperBusy = true
     helper.command = ["/usr/bin/python3", root.autoPath].concat(args)
+    helperDeadline.restart()
     helper.running = true
+    if (!helper.running) Qt.callLater(root.helperSettled)   // it did not start
+  }
+
+  property bool helperBusy: false
+
+  function helperSettled() {
+    if (!helperBusy || helper.running) return  // settled already, or still going
+    helperBusy = false
+    helperDeadline.stop()
+    if (root.pending !== null) {
+      var next = root.pending
+      root.pending = null
+      root.run(next)
+    }
+  }
+
+  // Applying a theme takes seconds; the helper itself gives up a lock wait
+  // after 60 s. A run still going after this is stopped.
+  Timer {
+    id: helperDeadline
+    interval: 90000
+    repeat: false
+    onTriggered: {
+      if (helper.running) helper.running = false   // its exit settles it
+      else root.helperSettled()
+    }
   }
 
   function syncFocusedWorkspace(force) {
@@ -91,13 +121,8 @@ BarWidget {
 
   Process {
     id: helper
-    onExited: {
-      if (root.pending !== null) {
-        var next = root.pending
-        root.pending = null
-        root.run(next)
-      }
-    }
+    // Not running any more: exited, killed at the deadline, or never started.
+    onRunningChanged: if (!running) Qt.callLater(root.helperSettled)
   }
 
   Process {
@@ -145,14 +170,41 @@ BarWidget {
   // One window at a time, as the plugin did: the helper re-reads the
   // workspaces under its lock, so a burst of windows never overfills one.
   function nextTilingWindow() {
-    if (tilingWorker.running || tilingQueue.length === 0) return
+    if (tilingBusy || tilingQueue.length === 0) return
     if (!tilingActive) { tilingQueue = []; return }
     var queue = tilingQueue.slice()
     var address = queue.shift()
     tilingQueue = queue
+    tilingBusy = true
     tilingWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--window", address]
+    tilingDeadline.restart()
     tilingWorker.running = true
+    if (!tilingWorker.running) Qt.callLater(root.tilingSettled)   // it did not start
   }
+
+  property bool tilingBusy: false
+
+  function tilingSettled() {
+    if (!tilingBusy || tilingWorker.running) return   // settled already, or still going
+    tilingBusy = false
+    tilingDeadline.stop()
+    tilingSettle.restart()                   // the next window, if any
+  }
+
+  // A window's helper waits at most 60 s for the shared lock; one still going
+  // after this is stopped and the queue goes on.
+  Timer {
+    id: tilingDeadline
+    interval: 75000
+    repeat: false
+    onTriggered: {
+      if (tilingWorker.running) tilingWorker.running = false   // its exit settles it
+      else root.tilingSettled()
+    }
+  }
+
+  // At most this many windows wait; a window already waiting is not added again.
+  readonly property int tilingQueueMax: 32
 
   Connections {
     target: Hyprland
@@ -160,7 +212,8 @@ BarWidget {
     function onRawEvent(event) {
       if (event.name !== "openwindow") return
       var address = event.data.split(",")[0]
-      if (!/^(0x)?[0-9a-fA-F]+$/.test(address)) return
+      if (!/^(0x)?[0-9a-fA-F]+$/.test(address) || address.length > 32) return
+      if (root.tilingQueue.indexOf(address) >= 0 || root.tilingQueue.length >= root.tilingQueueMax) return
       root.tilingQueue = root.tilingQueue.concat([address])
       tilingSettle.restart()
     }
@@ -168,7 +221,7 @@ BarWidget {
   Timer { id: tilingSettle; interval: 150; onTriggered: root.nextTilingWindow() }
   Process {
     id: tilingWorker
-    onExited: tilingSettle.restart()
+    onRunningChanged: if (!running) Qt.callLater(root.tilingSettled)
   }
 
   // At shell start, while the Workspace Presets plugin may still be on the

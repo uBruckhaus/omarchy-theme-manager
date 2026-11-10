@@ -126,6 +126,11 @@ def _valid_slug(slug) -> bool:
     return isinstance(slug, str) and bool(theme_core.SLUG_RE.match(slug))
 
 
+# A step that applies a theme takes seconds; one still waiting after this
+# gives up (exit 1) instead of hanging the bar's helper queue.
+AUTOMATION_LOCK_SECONDS = 60.0
+
+
 @contextlib.contextmanager
 def locked():
     """One automation step at a time: the bar widget exists once per
@@ -137,7 +142,7 @@ def locked():
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise PermissionError(f"{path} is not a private lock file")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        theme_core.flock_within(fd, AUTOMATION_LOCK_SECONDS)   # never waits forever
         yield
     finally:
         os.close(fd)
@@ -695,26 +700,33 @@ def main(argv: list[str]) -> int:
     if command == "bar-state" and not args:
         print(json.dumps(bar_state()))
         return 0
-    with locked():
-        if command == "workspace" and len(args) == 1 and args[0].isdigit():
-            apply_workspace(int(args[0]))
-        elif command == "tick" and not args:
-            tick()
-        elif command == "bg" and args in (["next"], ["prev"]):
-            step_background(1 if args[0] == "next" else -1)
-        elif command == "theme" and args in (["next"], ["prev"]):
-            step_theme(1 if args[0] == "next" else -1)
-        elif command == "apply" and len(args) == 1 and _valid_slug(args[0]):
-            try:
-                ok = apply_theme(args[0])
-            except FileNotFoundError:
-                return forget_dead_key(args[0])
-            if not ok:
-                theme_core.notify(_("Could not apply theme"), args[0])
-                return 1
-        else:
-            print(__doc__.strip(), file=sys.stderr)
-            return 2
+    try:
+        with locked():
+            return _locked_command(command, args)
+    except TimeoutError:
+        return 1                                  # another step kept the lock too long
+
+
+def _locked_command(command: str, args: list[str]) -> int:
+    if command == "workspace" and len(args) == 1 and args[0].isdigit():
+        apply_workspace(int(args[0]))
+    elif command == "tick" and not args:
+        tick()
+    elif command == "bg" and args in (["next"], ["prev"]):
+        step_background(1 if args[0] == "next" else -1)
+    elif command == "theme" and args in (["next"], ["prev"]):
+        step_theme(1 if args[0] == "next" else -1)
+    elif command == "apply" and len(args) == 1 and _valid_slug(args[0]):
+        try:
+            ok = apply_theme(args[0])
+        except FileNotFoundError:
+            return forget_dead_key(args[0])
+        if not ok:
+            theme_core.notify(_("Could not apply theme"), args[0])
+            return 1
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
     return 0
 
 

@@ -440,6 +440,23 @@ def _load_settings(path: Path) -> dict:
 _held_locks = threading.local()
 
 
+def flock_within(fd: int, seconds: float) -> None:
+    """An exclusive flock, waited for at most `seconds`: TimeoutError (an
+    OSError) when another process keeps it longer, so no helper hangs."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(errno.ETIMEDOUT, "a lock stayed taken", str(fd)) from None
+            time.sleep(0.05)
+
+
+SETTINGS_LOCK_SECONDS = 10.0
+
+
 @contextlib.contextmanager
 def file_lock(path: Path):
     """An exclusive `flock` on `path` (created 0600, never through a link),
@@ -456,7 +473,7 @@ def file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        flock_within(fd, SETTINGS_LOCK_SECONDS)
         held.add(key)
         try:
             yield
