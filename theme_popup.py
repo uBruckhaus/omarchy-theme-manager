@@ -3568,8 +3568,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
     FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme")
 
-    def save_setting(self, **values):
-        if any(key in values for key in self.FLIP_SETTINGS):
+    def save_setting(self, _now: bool = False, **values):
+        """`_now`: written at once (Reset to defaults: one write before a possible restart)."""
+        if not _now and any(key in values for key in self.FLIP_SETTINGS):
             # The 3D flip's settings: written by one settings worker in order (the shared lock may
             # wait), the cards rebuilt once it is stored, never a wait on GTK's loop.
             self._save_in_background(values)
@@ -3578,7 +3579,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             theme_auto.update_settings(**values)
         except OSError as error:
             theme_core.notify(_("Could not save the setting"), str(error))
-        if "sort" in values:
+        if "sort" in values or any(key in values for key in self.FLIP_SETTINGS):
             self.refresh_themes()
 
     def _save_in_background(self, values: dict):
@@ -3640,7 +3641,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def reset_settings(self):
         """Back to the defaults (see the button's tooltip). A new language
         restarts the popup (on this page), so it comes last."""
-        self.save_setting(sort="name", workspace_wallpapers=True, workspace_themes=False,
+        self.save_setting(_now=True, sort="name", workspace_wallpapers=True, workspace_themes=False,
                           slideshow_minutes=0, corners="windows",
                           screenshot_key=True, screenshot_folder=None,
                           ask_ai_web=True, preview_flip_3d=True,
@@ -5009,14 +5010,16 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                     self._pin_finished()
             self._async(lambda: theme_auto.remember_omarchy_theme_background(theme.slug, path), remembered)
             return
-        if theme.slug in self.hidden:
+        unhide = theme.slug in self.hidden
+        if unhide:
             self.hidden.discard(theme.slug)
-            try:
-                theme_core.unhide_theme(theme.slug)
-            except OSError:
-                pass
 
         def apply_with_wallpaper():
+            if unhide:                                   # a file write: on this worker too
+                try:
+                    theme_core.unhide_theme(theme.slug)
+                except OSError:
+                    pass
             theme_auto.remember_omarchy_theme_background(theme.slug, path)
             ok = theme_auto.apply_theme(theme.slug)
             if ok:
