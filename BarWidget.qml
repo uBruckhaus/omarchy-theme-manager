@@ -38,6 +38,15 @@ BarWidget {
   readonly property string systemLang: I18n.systemLanguage(Quickshell.env("LC_ALL"), Quickshell.env("LC_MESSAGES"), Quickshell.env("LANG"))
   readonly property string lang: I18n.resolve(languageSetting, systemLang)
   function t(key, args) { return I18n.tr(lang, key, args) }
+
+  // A finite helper (menu, bar state, store setup, mode sync, autostart) ends within its whole
+  // deadline: coreutils `timeout` stops it (SIGTERM, SIGKILL 5 s later), so a stalled one exits,
+  // its Process settles and the next try can run. --foreground: only the helper itself is
+  // stopped; apps it opened (through Hyprland) are never its children anyway. The popup, the
+  // event listener and the user's apps are not run this way.
+  function bounded(seconds, argv) {
+    return ["/usr/bin/timeout", "--foreground", "-k", "5", String(seconds)].concat(argv)
+  }
   // The bar exists once per monitor: only the first monitor's widget
   // follows workspaces and runs the timer (the helper is idempotent anyway).
   readonly property bool primary: !root.QsWindow.window || !root.QsWindow.window.screen
@@ -127,7 +136,7 @@ BarWidget {
 
   Process {
     id: menuLoader
-    command: ["/usr/bin/python3", root.autoPath, "menu"]
+    command: root.bounded(20, ["/usr/bin/python3", root.autoPath, "menu"])
     stdout: StdioCollector {
       onStreamFinished: {
         try {
@@ -145,7 +154,7 @@ BarWidget {
   // files only); the shell only parses its short answer.
   Process {
     id: barState
-    command: ["/usr/bin/python3", root.autoPath, "bar-state"]
+    command: root.bounded(20, ["/usr/bin/python3", root.autoPath, "bar-state"])
     stdout: StdioCollector {
       onStreamFinished: root.applyBarState(text)
     }
@@ -175,6 +184,7 @@ BarWidget {
     var queue = tilingQueue.slice()
     var address = queue.shift()
     tilingQueue = queue
+    markTilingSeen(address)
     tilingBusy = true
     tilingWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--window", address]
     tilingDeadline.restart()
@@ -188,6 +198,7 @@ BarWidget {
     if (!tilingBusy || tilingWorker.running) return   // settled already, or still going
     tilingBusy = false
     tilingDeadline.stop()
+    if (tilingQueue.length === 0 && tilingOverflow) rescanMissedWindows()
     tilingSettle.restart()                   // the next window, if any
   }
 
@@ -203,8 +214,56 @@ BarWidget {
     }
   }
 
-  // At most this many windows wait; a window already waiting is not added again.
+  // At most this many windows wait; a window already waiting is not added again. Windows that
+  // opened while the queue was full are not lost: once it has drained, the windows open now that
+  // were never handed to the helper are queued (again at most this many; more → once more).
   readonly property int tilingQueueMax: 32
+  readonly property int tilingSeenMax: 512
+  property bool tilingOverflow: false
+  property var tilingSeen: ({})               // windows handed to the helper (or open at start)
+  property var tilingSeenOrder: []
+
+  function tilingKey(address) {
+    var a = String(address || "").toLowerCase()
+    return a.indexOf("0x") === 0 ? a.slice(2) : a
+  }
+
+  function markTilingSeen(address) {
+    var key = tilingKey(address)
+    if (!key || tilingSeen[key]) return
+    tilingSeen[key] = true
+    tilingSeenOrder.push(key)
+    while (tilingSeenOrder.length > tilingSeenMax) delete tilingSeen[tilingSeenOrder.shift()]
+  }
+
+  function openWindows() {
+    var list = Hyprland.toplevels ? Hyprland.toplevels.values : []
+    var found = []
+    for (var i = 0; i < list.length && found.length < tilingSeenMax; i++) {
+      var key = tilingKey(list[i] ? list[i].address : "")
+      if (/^[0-9a-f]{1,30}$/.test(key)) found.push(key)
+    }
+    return found
+  }
+
+  function rescanMissedWindows() {
+    tilingOverflow = false
+    var queue = tilingQueue.slice()
+    var windows = openWindows()
+    for (var i = 0; i < windows.length; i++) {
+      if (tilingSeen[windows[i]] || queue.indexOf(windows[i]) >= 0) continue
+      if (queue.length >= tilingQueueMax) { tilingOverflow = true; break }
+      queue.push(windows[i])
+    }
+    tilingQueue = queue
+    if (queue.length > 0) tilingSettle.restart()
+  }
+
+  // The windows already open when tiling starts are not new: never queued by a rescan.
+  onTilingActiveChanged: if (tilingActive) {
+    var windows = openWindows()
+    for (var i = 0; i < windows.length; i++) markTilingSeen(windows[i])
+  }
 
   Connections {
     target: Hyprland
@@ -213,7 +272,11 @@ BarWidget {
       if (event.name !== "openwindow") return
       var address = event.data.split(",")[0]
       if (!/^(0x)?[0-9a-fA-F]+$/.test(address) || address.length > 32) return
-      if (root.tilingQueue.indexOf(address) >= 0 || root.tilingQueue.length >= root.tilingQueueMax) return
+      if (root.tilingQueue.indexOf(address) >= 0) return
+      if (root.tilingQueue.length >= root.tilingQueueMax) {
+        root.tilingOverflow = true            // picked up again once the queue has drained
+        return
+      }
       root.tilingQueue = root.tilingQueue.concat([address])
       tilingSettle.restart()
     }
@@ -231,7 +294,7 @@ BarWidget {
     interval: 1500
     running: root.primary
     repeat: false
-    onTriggered: Quickshell.execDetached(["/usr/bin/python3", "-I", root.tilingPath, "--init-store"])
+    onTriggered: Quickshell.execDetached(root.bounded(60, ["/usr/bin/python3", "-I", root.tilingPath, "--init-store"]))
   }
 
   // Once per shell start: Omarchy's workspace modes (Super + L) in step with the presets.
@@ -239,7 +302,7 @@ BarWidget {
     interval: 2500
     running: root.primary && root.hasWorkspacePresets
     repeat: false
-    onTriggered: Quickshell.execDetached(["/usr/bin/python3", "-I", root.tilingPath, "--sync-modes", "start"])
+    onTriggered: Quickshell.execDetached(root.bounded(60, ["/usr/bin/python3", "-I", root.tilingPath, "--sync-modes", "start"]))
   }
 
   // App Presets with autostart open once per Hyprland session (the helper
@@ -267,7 +330,7 @@ BarWidget {
     onTriggered: {
       if (autostartWorker.running) return
       if (++root.autostartAttempts > 15) { root.autostartFinished = true; return }
-      autostartWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--autostart"]
+      autostartWorker.command = root.bounded(120, ["/usr/bin/python3", "-I", root.tilingPath, "--autostart"])
       autostartWorker.running = true
     }
   }

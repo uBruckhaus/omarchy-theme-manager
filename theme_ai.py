@@ -837,7 +837,12 @@ def jail_argv(helper: dict, argv: list[str], work: Path, home: Path | None = Non
         # program right in the home folder is bound alone, never the home.
         installs = home / ".local/share/mise/installs"
         root = installs if binary.startswith(str(installs) + os.sep) else Path(binary).parent
-        if root == home or home.is_relative_to(root):
+        # Never a folder that is, holds or lies inside the agent's own folder (a codex installed
+        # as ~/.codex/codex would otherwise bring the real config.toml, MCP servers, history):
+        # then only the program file itself is bound.
+        private = [home / name for name in (*jail["dirs"], *jail["keep"])]
+        if root == home or home.is_relative_to(root) \
+                or any(root.is_relative_to(p) or p.is_relative_to(root) for p in private):
             root = Path(binary)
         args += ["--ro-bind", str(root), str(root)]
     for folder in jail["dirs"]:

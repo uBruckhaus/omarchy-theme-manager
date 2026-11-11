@@ -199,6 +199,20 @@ class AskAiTests(unittest.TestCase):
                 joined = " ".join(theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex"], work, home=home, environ={}))
             self.assertNotIn("auth.json", joined)                      # a link is never bound
 
+    def test_a_codex_inside_its_own_folder_is_bound_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, work = Path(tmp) / "home", Path(tmp) / "work"
+            (home / ".codex/bin").mkdir(parents=True)
+            work.mkdir()
+            for binary in (home / ".codex/codex", home / ".codex/bin/codex"):
+                with patch.object(theme_ai, "real_binary", return_value=str(binary)):
+                    argv = theme_ai.jail_argv(theme_ai.HELPERS["codex"], ["codex", "exec"], work, home=home,
+                                              environ={})
+                binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--ro-bind"]
+                self.assertIn(str(binary), binds)                  # the program file alone
+                self.assertNotIn(str(home / ".codex"), binds)      # never the real folder
+                self.assertNotIn(str(home / ".codex/bin"), binds)
+
     @unittest.skipUnless(shutil.which("bwrap"), "needs bubblewrap")
     def test_in_the_real_jail_codex_sees_only_its_sign_in_and_your_files_stay(self):
         """A fake codex inside the real bubblewrap jail: your config.toml (with an
