@@ -519,24 +519,15 @@ class FlipPicture(FixedPicture):
         return GLib.SOURCE_REMOVE
 
     def start_big_preview(self, preserve_face: str | None = None):
-        """Activate immediately in the big preview overlay: < / > arrows are
-        ready right away, and when delay > 0 it also runs the 3D lift + flip."""
+        """Activate immediately in the big preview overlay without automatic
+        rotation: stays on the original preview with < / > arrows ready."""
         if not self._wallpapers:
             return
         self._selected = True
         self._interactive = True
         self._nav_steady = True
         self._pulse_back = False
-        if preserve_face == "__preview__":
-            self._from_face = -1
-            self._to_face = 0
-            self._progress = 0.0
-            self._target = 0.0
-            self.request_back()
-            self._sync_overlays()
-            self.queue_draw()
-            return
-        if preserve_face:
+        if preserve_face and preserve_face != "__preview__":
             idx = next((i for i, p in enumerate(self._wallpapers)
                         if p == preserve_face or Path(p).name == Path(preserve_face).name), -1)
             if idx >= 0:
@@ -548,12 +539,13 @@ class FlipPicture(FixedPicture):
                 self._sync_overlays()
                 self.queue_draw()
                 return
+        self._from_face = -1
+        self._to_face = 0
+        self._progress = 0.0
+        self._target = 0.0
         self.request_back()
         self._sync_overlays()
         self.queue_draw()
-        if self._delay_ms > 0:
-            peek_ms = min(PEEK_DELAY_MS, self._delay_ms)
-            self._peek_id = GLib.timeout_add(peek_ms, self._on_hover_peek)
 
     def _next_face_in_cycle(self, face: int, delta: int) -> int:
         # Cycle through original preview (-1) and all wallpapers (0 .. n - 1).
@@ -5753,7 +5745,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                                   active_bg=active_bg,
                                   theme_current=theme.current,
                                   pin_apply_theme=self.pin_apply_theme,
-                                  delay_s=self.flip_delay,
+                                  delay_s=0,
                                   decoder=self.decoder,
                                   radius_fn=lambda: self._tile_picture_radius(4))
             if old_front is not None:

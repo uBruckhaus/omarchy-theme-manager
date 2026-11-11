@@ -3254,9 +3254,13 @@ class Flip3DTests(ViewLayerTest):
         self.assertLessEqual(small_h + 48, self.app.list_h)
         self.app.resize_to(1100, 720)
 
-        # Big preview has FlipPicture, < / > arrows immediately visible, pin button, ☰ menu, Wallpapers & Close.
+        # Big preview has FlipPicture with automatic rotation disabled (stays on preview -1 with < / > ready).
         big_pic = self.app.big_preview_picture
         self.assertIsInstance(big_pic, theme_popup.FlipPicture)
+        self.assertEqual(big_pic._delay_ms, 0)
+        self.assertEqual(big_pic._peek_id, 0)
+        self.assertEqual(big_pic._delay_id, 0)
+        self.assertEqual(big_pic.visible_face(), -1)
         self.assertTrue(all(b.get_visible() for b in big_pic._nav_buttons))
         self.assertIsNotNone(self.app.big_preview_actions)
         big_card = self.app.big_preview_slot.get_first_child()
@@ -3268,10 +3272,7 @@ class Flip3DTests(ViewLayerTest):
         for wp in big_pic._wallpapers:
             big_pic._set_wallpaper_paintable(wp, tex)
 
-        # Clicking > even mid-peek (70 ms..1 s) immediately finishes flipping to w2.png!
-        big_pic._on_hover_peek()
-        self.assertGreater(big_pic._target, 0.0)
-        self.assertLess(big_pic._target, 1.0)
+        # Clicking > manually rotates to w2.png (pinned on current theme)!
         big_pic._nav_buttons[1].emit("clicked")
         for _ in range(4):
             big_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
