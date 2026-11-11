@@ -185,12 +185,12 @@ BarWidget {
     var queue = tilingQueue.slice()
     var address = queue.shift()
     tilingQueue = queue
-    markTilingSeen(address)
     tilingBusy = true
     tilingWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--window", address]
     tilingDeadline.restart()
     tilingWorker.running = true
-    if (!tilingWorker.running) Qt.callLater(root.tilingSettled)   // it did not start
+    if (tilingWorker.running) markTilingSeen(address)            // handed over (once; no retries)
+    else Qt.callLater(root.tilingSettled)                        // it did not start: a rescan may pick it up
   }
 
   property bool tilingBusy: false
