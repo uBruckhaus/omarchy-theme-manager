@@ -266,8 +266,12 @@ class FlipPicture(FixedPicture):
     def is_showing_wallpaper(self) -> bool:
         return self.visible_face() >= 0
 
+    def is_settled_on_wallpaper(self) -> bool:
+        return ((self._progress >= 1.0 and self._to_face >= 0)
+                or (self._progress <= 0.0 and self._from_face >= 0))
+
     def can_scrub(self) -> bool:
-        return len(self._wallpapers) > 1 and self._hovered and self.is_showing_wallpaper()
+        return len(self._wallpapers) > 1 and self._hovered and self.is_settled_on_wallpaper()
 
     def current_wallpaper_path(self) -> str | None:
         face = self.visible_face()
@@ -4749,11 +4753,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self._async(apply_with_wallpaper, lambda ok, error: self.after_apply(theme, ok, error))
 
     def _attach_flip_hover(self, target: Gtk.Widget, picture: FlipPicture):
-        state = [None, 0.0]
+        state = [None, 0.0, 0.0, 0.0]   # [last_pos, accum_dx, last_motion_t, cooldown_until]
 
         def on_enter(_ctrl, x, y):
             state[0] = (float(x), float(y))
             state[1] = 0.0
+            state[2] = 0.0
+            state[3] = 0.0
             if self.pointer_moved and not self.actions_menu_open():
                 picture.on_hover_enter()
 
@@ -4767,33 +4773,36 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 self.pointer_moved = True
                 if not self.actions_menu_open():
                     picture.on_hover_enter()
-            if not picture.can_scrub() or self.actions_menu_open():
+            now = time.monotonic()
+            if not picture.can_scrub() or self.actions_menu_open() or now < state[3]:
                 state[1] = 0.0
                 return
+            if now - state[2] > 0.25:
+                state[1] = 0.0   # slow idle drift never adds up to an accidental flip
+            state[2] = now
             dx = fx - prev[0]
             dy = fy - prev[1]
-            # Keep the top control band and upward trajectories toward the top-left
-            # pin button free from scrubbing so clicking the pin never switches away.
-            aiming_pin = dy < -0.5 and -20.0 <= fx + dx * (18.0 - fy) / dy <= 64.0
-            if fy < 36.0 or aiming_pin or (dy < 0.0 and abs(dy) >= abs(dx) * 0.3):
+            # Keep the top control band and upward/diagonal trajectories free from
+            # scrubbing so normal cursor adjustments and clicking the pin never flip.
+            aiming_pin = dy < -0.5 and -20.0 <= fx + dx * (18.0 - fy) / dy <= 68.0
+            if fy < 38.0 or aiming_pin or abs(dx) <= abs(dy) * 1.6:
                 state[1] = 0.0
-                return
-            if abs(dx) <= abs(dy):
                 return
             if state[1] * dx < 0.0:
                 state[1] = 0.0
             state[1] += dx
-            step_px = max(24.0, min(38.0, picture._size[0] / 6.0))
+            step_px = max(72.0, picture._size[0] * 0.42)
             if abs(state[1]) >= step_px:
                 step_dir = 1 if state[1] > 0.0 else -1
-                state[1] -= step_dir * step_px
-                if abs(state[1]) >= step_px:
-                    state[1] = 0.0
+                state[1] = 0.0
+                state[3] = now + FLIP_STEP_DURATION + 0.14
                 picture.rotate_step(step_dir)
 
         def on_leave(_ctrl):
             state[0] = None
             state[1] = 0.0
+            state[2] = 0.0
+            state[3] = 0.0
             picture.on_hover_leave()
 
         hover = Gtk.EventControllerMotion()
