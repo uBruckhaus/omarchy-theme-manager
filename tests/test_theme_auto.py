@@ -522,18 +522,25 @@ class CommandLineTests(AutoTestCase):
     def test_flip_wallpaper_uses_active_background_when_current_else_first_visible(self):
         self.assertTrue(theme_auto.preview_flip_enabled())
         self.assertTrue(theme_auto.preview_pin_apply_theme_enabled())
+        self.assertTrue(theme_auto.preview_big_card_enabled())
+        self.assertFalse(theme_auto.preview_big_auto_rotate_enabled())
         self.assertEqual(theme_auto.preview_flip_delay(), 1)
         theme_auto.store_default_settings()
         self.assertIs(theme_auto.settings().get("preview_flip_3d"), True)
         self.assertIs(theme_auto.settings().get("preview_pin_apply_theme"), True)
+        self.assertIs(theme_auto.settings().get("preview_big_card"), True)
+        self.assertIs(theme_auto.settings().get("preview_big_auto_rotate"), False)
         self.assertEqual(theme_auto.settings().get("preview_flip_delay"), 1)
-        theme_auto.update_settings(preview_flip_3d=False, preview_pin_apply_theme=False, preview_flip_delay=0)
+        theme_auto.update_settings(preview_flip_3d=False, preview_pin_apply_theme=False,
+                                   preview_big_auto_rotate=True, preview_flip_delay=0)
         self.assertFalse(theme_auto.preview_flip_enabled())
         self.assertFalse(theme_auto.preview_pin_apply_theme_enabled())
+        self.assertTrue(theme_auto.preview_big_auto_rotate_enabled())
         self.assertEqual(theme_auto.preview_flip_delay(), 0)
         theme_auto.store_default_settings()
         self.assertIs(theme_auto.settings().get("preview_flip_3d"), False)  # explicit off stays off
         self.assertIs(theme_auto.settings().get("preview_pin_apply_theme"), False)  # explicit off stays off
+        self.assertIs(theme_auto.settings().get("preview_big_auto_rotate"), True)  # explicit on stays on
         self.assertEqual(theme_auto.settings().get("preview_flip_delay"), 0)  # explicit 0 stays 0
 
         bg_nord = self.make_theme("nord", ("a.png", "b.png", "c.png"), current=True)

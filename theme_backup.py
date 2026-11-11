@@ -119,7 +119,7 @@ def _validate_settings(value: dict) -> None:
         value["header_order"] = header_order.normalize(value["header_order"])
     boolean = ("sync_omarchy", "workspace_wallpapers", "workspace_themes", "screenshot_key",
                "ask_ai", "ask_ai_web", "maprisma_hints", "preview_flip_3d", "preview_pin_apply_theme",
-               "preview_big_card")
+               "preview_big_card", "preview_big_auto_rotate")
     if "ask_ai_helper" in value:
         helper = value["ask_ai_helper"]
         local = isinstance(helper, str) and helper.startswith("pi:") and bool(theme_ai.NAME_RE.match(helper[3:]))

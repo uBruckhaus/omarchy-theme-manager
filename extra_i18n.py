@@ -659,3 +659,21 @@ EXTRA['Close preview (Esc)'] = {
     'nl': 'Voorbeeld sluiten (Esc)',
     'pl': 'Zamknij podgląd (Esc)',
 }
+EXTRA['Auto-rotate big preview'] = {
+    'de': 'Große Vorschau automatisch drehen',
+    'fr': 'Rotation automatique du grand aperçu',
+    'es': 'Rotación automática en vista previa grande',
+    'it': 'Rotazione automatica nell’anteprima grande',
+    'pt': 'Rotação automática na pré-visualização grande',
+    'nl': 'Groot voorbeeld automatisch draaien',
+    'pl': 'Automatyczny obrót dużego podglądu',
+}
+EXTRA['Automatically flips the big preview to its first wallpaper after the 3D rotation delay. Off keeps the theme preview until you use the arrows.'] = {
+    'de': 'Dreht die große Vorschau nach der 3D-Drehverzögerung automatisch zum ersten Hintergrund. Aus behält die Theme-Vorschau, bis Sie die Pfeile nutzen.',
+    'fr': 'Retourne automatiquement le grand aperçu vers son premier fond d’écran après le délai de rotation 3D. Désactivé garde l’aperçu du thème jusqu’à l’utilisation des flèches.',
+    'es': 'Gira automáticamente la vista previa grande hacia su primer fondo tras el retardo de rotación 3D. Desactivado mantiene la vista previa del tema hasta usar las flechas.',
+    'it': 'Capovolge automaticamente l’anteprima grande al primo sfondo dopo il ritardo di rotazione 3D. Disattivo mantiene l’anteprima del tema finché non usi le frecce.',
+    'pt': 'Vira automaticamente a pré-visualização grande para o primeiro papel de parede após o atraso de rotação 3D. Desligado mantém a pré-visualização do tema até usar as setas.',
+    'nl': 'Draait het grote voorbeeld na de 3D-draaivertraging automatisch naar de eerste achtergrond. Uit behoudt het themavoorbeeld totdat u de pijlen gebruikt.',
+    'pl': 'Automatycznie obraca duży podgląd do pierwszej tapety po opóźnieniu obrotu 3D. Wyłączone zachowuje podgląd motywu do użycia strzałek.',
+}

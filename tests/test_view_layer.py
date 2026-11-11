@@ -3213,6 +3213,7 @@ class Flip3DTests(ViewLayerTest):
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_big_card"), True)
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_big_auto_rotate"), False)
         self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 1)
 
     def test_big_preview_overlay_all_features_and_setting(self):
@@ -3315,12 +3316,40 @@ class Flip3DTests(ViewLayerTest):
         self.assertFalse(self.app.theme_preview_open())
         self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
 
-        # Turning off "Big preview on click" in Settings restores the previous click/Enter -> Wallpapers behavior.
+        # Turning on "Auto-rotate big preview" in Settings (default Off) enables automatic rotation on big previews;
+        # turning off "Big preview on click" restores the previous click/Enter -> Wallpapers behavior.
+        self.app.open_settings()
+        switches = [w for w in self.descendants(self.app.settings_sections["themes"])
+                    if isinstance(w, Gtk.Switch)]
+        big_switch, big_auto_rotate_switch = switches[2], switches[3]
+        self.assertTrue(big_switch.get_active())
+        self.assertFalse(big_auto_rotate_switch.get_active())
+        big_auto_rotate_switch.set_active(True)
+        self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_big_auto_rotate") is True
+                        and self.app.big_preview_auto_rotate is True)
+        self.app.show_themes()
+        rows_by_slug = {r.tm_theme.slug: r for r in self.rows_list()}
+        self.app.rows.emit("child-activated", rows_by_slug["alpha"])
+        auto_pic = self.app.big_preview_picture
+        self.assertEqual(auto_pic._delay_ms, 1000)
+        self.assertNotEqual(auto_pic._peek_id, 0)
+        auto_pic.set_paintable(tex)
+        for wp in auto_pic._wallpapers:
+            auto_pic._set_wallpaper_paintable(wp, tex)
+        gi.repository.GLib.source_remove(auto_pic._peek_id)
+        auto_pic._on_hover_peek()
+        self.assertNotEqual(auto_pic._delay_id, 0)
+        gi.repository.GLib.source_remove(auto_pic._delay_id)
+        auto_pic._on_delay_done()
+        for _ in range(4):
+            auto_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(auto_pic.current_wallpaper_path().endswith("w2.png"))
+        self.app.hide_theme_preview()
+
         self.app.open_settings()
         switches = [w for w in self.descendants(self.app.settings_sections["themes"])
                     if isinstance(w, Gtk.Switch)]
         big_switch = switches[2]
-        self.assertTrue(big_switch.get_active())
         big_switch.set_active(False)
         self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_big_card") is False
                         and self.app.big_preview_enabled is False)

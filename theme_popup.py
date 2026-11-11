@@ -519,8 +519,8 @@ class FlipPicture(FixedPicture):
         return GLib.SOURCE_REMOVE
 
     def start_big_preview(self, preserve_face: str | None = None):
-        """Activate immediately in the big preview overlay without automatic
-        rotation: stays on the original preview with < / > arrows ready."""
+        """Activate immediately in the big preview overlay with < / > arrows ready;
+        auto-rotates after _delay_ms only when enabled (delay_s > 0)."""
         if not self._wallpapers:
             return
         self._selected = True
@@ -544,6 +544,9 @@ class FlipPicture(FixedPicture):
         self._progress = 0.0
         self._target = 0.0
         self.request_back()
+        if preserve_face is None and self._delay_ms > 0:
+            peek_ms = min(PEEK_DELAY_MS, self._delay_ms)
+            self._peek_id = GLib.timeout_add(peek_ms, self._on_hover_peek)
         self._sync_overlays()
         self.queue_draw()
 
@@ -1365,6 +1368,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.big_preview_actions = None
         self.big_preview_size_px = (0, 0)
         self.big_preview_enabled = True
+        self.big_preview_auto_rotate = False
         self._overlay_press_outside = False
         outside_click = Gtk.GestureClick(button=Gdk.BUTTON_PRIMARY)
         outside_click.connect("pressed", self.on_themes_overlay_pressed)
@@ -2747,6 +2751,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           _("Clicking or pressing Enter on a theme card opens a large interactive preview overlay inside the window. Off opens the theme’s wallpapers page directly."),
                           self.switch(theme_auto.preview_big_card_enabled(),          # on by default
                                       lambda on: self.save_setting(preview_big_card=on)))
+        self.setting_line(box, _("Auto-rotate big preview"),
+                          _("Automatically flips the big preview to its first wallpaper after the 3D rotation delay. Off keeps the theme preview until you use the arrows."),
+                          self.switch(theme_auto.preview_big_auto_rotate_enabled(),   # off by default
+                                      lambda on: self.save_setting(preview_big_auto_rotate=on)))
         self.setting_line(box, _("Also hide in Omarchy's pickers"),
                           _("Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
                           "omarchy-menu.jsonc and a theme-set hook; off removes them again."),
@@ -3641,7 +3649,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         remembered = theme_auto.remembered_omarchy_theme_background(theme.slug)
         return wallpapers[0] if remembered and Path(wallpapers[0]).name == remembered else None
 
-    FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme", "preview_big_card")
+    FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme",
+                     "preview_big_card", "preview_big_auto_rotate")
 
     def save_setting(self, **values):
         if any(key in values for key in self.FLIP_SETTINGS):
@@ -3728,6 +3737,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                                       preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
                                       preview_pin_apply_theme=True,
                                       preview_big_card=True,
+                                      preview_big_auto_rotate=False,
                                       header_order=list(header_order.DEFAULT)),
                                  then=self._reset_after_saved)
 
@@ -4841,6 +4851,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.workspace_theme_map = theme_auto.load_workspace_themes()
         self.flip_3d = theme_auto.preview_flip_enabled()
         self.big_preview_enabled = theme_auto.preview_big_card_enabled()
+        self.big_preview_auto_rotate = theme_auto.preview_big_auto_rotate_enabled()
         self.flip_delay = theme_auto.preview_flip_delay()
         self.pin_apply_theme = theme_auto.preview_pin_apply_theme_enabled()
         need_walls = self.flip_3d or self.big_preview_enabled
@@ -5741,11 +5752,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         frame = Gtk.Overlay()
         if wallpapers:
             active_bg = self.flip_active_bg(theme, wallpapers)
+            big_delay = ((self.flip_delay if self.flip_delay > 0 else theme_auto.DEFAULT_FLIP_DELAY)
+                         if getattr(self, "big_preview_auto_rotate", False) else 0)
             picture = FlipPicture(pic_w, pic_h, wallpapers=wallpapers,
                                   active_bg=active_bg,
                                   theme_current=theme.current,
                                   pin_apply_theme=self.pin_apply_theme,
-                                  delay_s=0,
+                                  delay_s=big_delay,
                                   decoder=self.decoder,
                                   radius_fn=lambda: self._tile_picture_radius(4))
             if old_front is not None:
