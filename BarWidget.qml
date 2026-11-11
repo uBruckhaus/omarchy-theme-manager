@@ -220,7 +220,7 @@ BarWidget {
   // were never handed to the helper are queued (again at most this many; more → once more).
   // Each window is handed over once: one whose helper failed is not retried (no retry loops).
   readonly property int tilingQueueMax: 32
-  readonly property int tilingSeenMax: 512
+  readonly property int tilingSeenMax: 4096
   property bool tilingOverflow: false
   property var tilingSeen: ({})               // windows handed to the helper (or open at start)
   property var tilingSeenOrder: []
@@ -235,13 +235,14 @@ BarWidget {
     if (!key || tilingSeen[key]) return
     tilingSeen[key] = true
     tilingSeenOrder.push(key)
+    // Pruned to the open windows on every rescan; this cap only guards a desktop never rescanned.
     while (tilingSeenOrder.length > tilingSeenMax) delete tilingSeen[tilingSeenOrder.shift()]
   }
 
   function openWindows() {
     var list = Hyprland.toplevels ? Hyprland.toplevels.values : []
     var found = []
-    for (var i = 0; i < list.length && found.length < tilingSeenMax; i++) {
+    for (var i = 0; i < list.length; i++) {
       var key = tilingKey(list[i] ? list[i].address : "")
       if (/^[0-9a-f]{1,30}$/.test(key)) found.push(key)
     }
@@ -252,6 +253,12 @@ BarWidget {
     tilingOverflow = false
     var queue = tilingQueue.slice()
     var windows = openWindows()
+    // The history keeps only windows still open (so it stays as small as the desktop itself).
+    var kept = {}, order = []
+    for (var j = 0; j < windows.length; j++)
+      if (tilingSeen[windows[j]]) { kept[windows[j]] = true; order.push(windows[j]) }
+    tilingSeen = kept
+    tilingSeenOrder = order
     for (var i = 0; i < windows.length; i++) {
       if (tilingSeen[windows[i]] || queue.indexOf(windows[i]) >= 0) continue
       if (queue.length >= tilingQueueMax) { tilingOverflow = true; break }

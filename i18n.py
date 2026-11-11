@@ -55,6 +55,8 @@ def save_language(code):
         elif code in CODES:
             data["language"] = code
         theme_core._atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o600)
+    global _lang
+    _lang = None                          # the next _() reads the new choice
 
 
 def current():
