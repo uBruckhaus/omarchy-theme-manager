@@ -2907,7 +2907,25 @@ class Flip3DTests(ViewLayerTest):
         pic.set_paintable(tex)
         for wp in pic._wallpapers:
             pic._set_wallpaper_paintable(wp, tex)
+        # Non-hover selection peek: gently lifts to PEEK_PROGRESS and settles back to 0.0.
+        pic._on_select_peek()
+        for _step in range(20):
+            pic._step(0.03)
+        self.assertEqual(pic._progress, 0.0)
+        self.assertEqual(pic._badges.get_opacity(), 1.0)
+
+        # Hover peek: lifts to PEEK_PROGRESS while keeping front badges crisp, then waits FLIP_DELAY_MS (>=440 ms).
+        self.assertGreaterEqual(theme_popup.FLIP_DELAY_MS, 440)
         pic._hovered = True
+        pic._on_hover_peek()
+        for _step in range(12):
+            pic._step(0.03)
+        self.assertAlmostEqual(pic._progress, theme_popup.PEEK_PROGRESS, places=3)
+        self.assertEqual(pic._badges.get_opacity(), 1.0)
+        self.assertFalse(pic._pin_button.get_visible())
+        if pic._delay_id:
+            GLib.source_remove(pic._delay_id)
+            pic._delay_id = 0
         pic._on_delay_done()
         for _step in range(4):
             pic._step(theme_popup.FLIP_DURATION / 4.0)

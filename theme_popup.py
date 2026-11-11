@@ -95,7 +95,10 @@ WIDE_EDITOR_FROM = 900 # from this card width the theme editor uses two columns
 SWITCHER_WRAPPER = Path(__file__).resolve().parent / "theme-switcher"
 SYNC_SCRIPT = Path(__file__).resolve().parent / "switcher_sync.py"
 PREVIEW_WORKERS = 4    # parallel preview downloads on the import page
-FLIP_DELAY_MS = 220    # hover pause before a theme card flips in 3D to its wallpaper
+PEEK_DELAY_MS = 70     # brief skim guard so sweeping fast across cards stays still
+SELECT_PEEK_MS = 90    # brief settle guard so holding Arrow keys stays calm
+PEEK_PROGRESS = 0.19   # ~15.6° gentle 3D edge lift hinting that a wallpaper waits behind
+FLIP_DELAY_MS = 480    # pause after the 3D hint (>2x the old 220 ms) before full 180° rotation
 FLIP_DURATION = 0.42   # seconds for a 180° 3D card flip
 FLIP_STEP_DURATION = 0.30  # seconds for rotating between a theme's wallpapers on mouse move
 CURSOR_SLACK = 24  # px the pointer may move after opening before the keyboard is released
@@ -193,6 +196,8 @@ class FlipPicture(FixedPicture):
         self._target = 0.0
         self._progress = 0.0
         self._queued: tuple[int, float] | None = None
+        self._pulse_back = False
+        self._peek_id = 0
         self._delay_id = 0
         self._tick_id = 0
         self._last_frame_us = 0
@@ -290,17 +295,57 @@ class FlipPicture(FixedPicture):
         self._sync_overlays()
         self.queue_draw()
 
+    def schedule_select_peek(self):
+        """A single gentle 3D edge lift & settle when a card is selected without
+        pointer hover, hinting that there is more behind the card."""
+        if not self._wallpapers or self._hovered:
+            return
+        if self._from_face != -1 or self._progress > 0.0:
+            return
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+        self._peek_id = GLib.timeout_add(SELECT_PEEK_MS, self._on_select_peek)
+
+    def _on_select_peek(self):
+        self._peek_id = 0
+        if self._hovered or not self._wallpapers or self._from_face != -1 or self._progress > 0.0:
+            return GLib.SOURCE_REMOVE
+        self._from_face = -1
+        self._to_face = 0
+        self._direction = 1.0
+        self._pulse_back = True
+        self._animate_to(PEEK_PROGRESS)
+        return GLib.SOURCE_REMOVE
+
+    def cancel_peek(self):
+        if self._hovered:
+            return
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+            self._peek_id = 0
+        self._pulse_back = False
+        if self._from_face == -1 and self._progress > 0.0:
+            self._animate_to(0.0)
+
     def on_hover_enter(self):
         if not self._wallpapers or self._hovered:
             return
         self._hovered = True
+        self._pulse_back = False
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+            self._peek_id = 0
         self.request_back()
         if self._from_face == -1 and self._progress <= 0.0:
-            if self._delay_id == 0:
-                self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+            self._peek_id = GLib.timeout_add(PEEK_DELAY_MS, self._on_hover_peek)
         elif self._from_face == -1 and self._to_face >= 0:
             self._queued = None
-            self._animate_to(1.0)
+            if self._progress <= PEEK_PROGRESS + 0.02:
+                self._animate_to(PEEK_PROGRESS)
+                if self._delay_id == 0:
+                    self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+            else:
+                self._animate_to(1.0)
         elif self._to_face == -1:
             if self._progress < 0.5:
                 self._queued = None
@@ -309,9 +354,23 @@ class FlipPicture(FixedPicture):
                 self._queued = (0, 1.0)
                 self._animate_to(1.0)
 
+    def _on_hover_peek(self):
+        self._peek_id = 0
+        if not self._hovered:
+            return GLib.SOURCE_REMOVE
+        self._from_face = -1
+        self._to_face = 0
+        self._direction = 1.0
+        self._pulse_back = False
+        self._animate_to(PEEK_PROGRESS)
+        if self._delay_id == 0:
+            self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+        return GLib.SOURCE_REMOVE
+
     def _on_delay_done(self):
         self._delay_id = 0
         if self._hovered:
+            self._pulse_back = False
             self._from_face = -1
             self._to_face = 0
             self._direction = 1.0
@@ -360,6 +419,10 @@ class FlipPicture(FixedPicture):
 
     def on_hover_leave(self):
         self._hovered = False
+        self._pulse_back = False
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+            self._peek_id = 0
         if self._delay_id:
             GLib.source_remove(self._delay_id)
             self._delay_id = 0
@@ -391,7 +454,11 @@ class FlipPicture(FixedPicture):
 
     def reset_flip(self):
         self._hovered = False
+        self._pulse_back = False
         self._queued = None
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+            self._peek_id = 0
         if self._delay_id:
             GLib.source_remove(self._delay_id)
             self._delay_id = 0
@@ -420,7 +487,9 @@ class FlipPicture(FixedPicture):
         face, local_deg = self._face_and_angle()
         if self._badges is not None:
             if face == -1:
-                self._badges.set_opacity(max(0.0, 1.0 - abs(local_deg) / 41.0))
+                # Stay crisp during the subtle ~16° 3D hint; fade out once full flip passes 20°.
+                fade = max(0.0, (abs(local_deg) - 20.0) / 28.0)
+                self._badges.set_opacity(max(0.0, 1.0 - fade))
             else:
                 self._badges.set_opacity(0.0)
         pin = self._pin_button
@@ -456,19 +525,29 @@ class FlipPicture(FixedPicture):
         dur = FLIP_STEP_DURATION if (self._from_face >= 0 and self._to_face >= 0) else FLIP_DURATION
         if self._queued is not None:
             dur *= 0.6
+        # Cushion into and out of the subtle ~16° 3D hint so it feels soft, never jerky.
+        step_scale = 1.0
+        if self._from_face == -1 and self._target == PEEK_PROGRESS:
+            rem = max(0.0, PEEK_PROGRESS - self._progress)
+            step_scale = max(0.32, min(1.0, rem / 0.09)) * 1.15
+        elif self._from_face == -1 and self._target == 0.0 and self._progress <= PEEK_PROGRESS + 0.01:
+            step_scale = max(0.32, min(1.0, self._progress / 0.09)) * 1.05
         if self._target > self._progress:
-            nxt_p = min(self._target, self._progress + dt / dur)
-            if self._to_face >= 0 and self._face_paintable(self._to_face) is None and nxt_p > 0.48:
+            nxt_p = min(self._target, self._progress + (dt / dur) * step_scale)
+            if self._to_face >= 0 and self._target > PEEK_PROGRESS and self._face_paintable(self._to_face) is None and nxt_p > 0.48:
                 nxt_p = max(self._progress, 0.48)
             self._progress = nxt_p
         elif self._target < self._progress:
-            nxt_p = max(self._target, self._progress - dt / dur)
+            nxt_p = max(self._target, self._progress - (dt / dur) * step_scale)
             if self._from_face >= 0 and self._face_paintable(self._from_face) is None and nxt_p < 0.52:
                 nxt_p = min(self._progress, 0.52)
             self._progress = nxt_p
 
         if self._progress == self._target:
-            if self._target == 1.0 and self._to_face == -1:
+            if self._target == PEEK_PROGRESS and self._pulse_back:
+                self._pulse_back = False
+                self._target = 0.0
+            elif self._target == 1.0 and self._to_face == -1:
                 self._from_face = -1
                 self._to_face = 0
                 self._direction = 1.0
@@ -570,6 +649,12 @@ class FlipPicture(FixedPicture):
             rgba = Gdk.RGBA()
             rgba.red, rgba.green, rgba.blue, rgba.alpha = 0.0, 0.0, 0.0, shade
             snapshot.append_color(rgba, bounds)
+        rim_alpha = 0.42 * math.sin(min(math.pi * 0.5, abs(rad) * 2.4))
+        if rim_alpha > 0.02 and abs(local_deg) < 84.0:
+            rim = Gdk.RGBA()
+            rim.red, rim.green, rim.blue, rim.alpha = 1.0, 1.0, 1.0, rim_alpha
+            edge_x = 0.0 if local_deg > 0.0 else max(0.0, w - 2.0)
+            snapshot.append_color(rim, Graphene.Rect().init(edge_x, 0.0, min(2.0, w), h))
         if radius > 0.0:
             snapshot.pop()
         snapshot.restore()
@@ -4429,6 +4514,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             current = self.rows.get_selected_row()
             keep = current.tm_theme.slug if current is not None else None
         self.theme_list = theme_core.discover_themes()
+        self._peek_row = None
         first = self.rows.get_first_child()
         while first is not None:
             self.rows.remove(first)
@@ -5185,10 +5271,37 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if row is not None and hasattr(row, "tm_theme") and row is not self.rows.get_selected_row():
             self.select_row(row)
 
+    @staticmethod
+    def _row_flip_picture(row) -> FlipPicture | None:
+        if row is None:
+            return None
+        child = row.get_child()
+        first = child.get_first_child() if child is not None else None
+        if first is None:
+            return None
+        inner = first.get_first_child()
+        if isinstance(inner, FlipPicture):
+            return inner
+        if isinstance(first, FlipPicture):
+            return first
+        sub = inner.get_first_child() if inner is not None else None
+        return sub if isinstance(sub, FlipPicture) else None
+
     def select_row(self, row):
+        prev = getattr(self, "_peek_row", None)
+        if prev is not None and prev is not row:
+            prev_pic = self._row_flip_picture(prev)
+            if prev_pic is not None:
+                prev_pic.cancel_peek()
+        self._peek_row = row
         if row is not None:
             self.rows.select_row(row)
             row.grab_focus()
+            if (self.window is not None and self.window.get_visible()
+                    and self.stack.get_visible_child_name() == "themes"):
+                pic = self._row_flip_picture(row)
+                if pic is not None and not pic._hovered:
+                    pic.schedule_select_peek()
 
     # --- list actions ----------------------------------------------------------------
 
