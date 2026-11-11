@@ -3213,7 +3213,7 @@ class Flip3DTests(ViewLayerTest):
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_big_card"), True)
-        self.assertIs(theme_popup.theme_auto.settings().get("preview_big_auto_rotate"), False)
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_big_auto_rotate"), True)
         self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 2)
 
     def test_big_preview_overlay_all_features_and_setting(self):
@@ -3255,12 +3255,11 @@ class Flip3DTests(ViewLayerTest):
         self.assertLessEqual(small_h + 48, self.app.list_h)
         self.app.resize_to(1100, 720)
 
-        # Big preview has FlipPicture with automatic rotation disabled (stays on preview -1 with < / > ready).
+        # Big preview has FlipPicture with automatic rotation enabled by default (2 s) and < / > ready right away.
         big_pic = self.app.big_preview_picture
         self.assertIsInstance(big_pic, theme_popup.FlipPicture)
-        self.assertEqual(big_pic._delay_ms, 0)
-        self.assertEqual(big_pic._peek_id, 0)
-        self.assertEqual(big_pic._delay_id, 0)
+        self.assertEqual(big_pic._delay_ms, 2000)
+        self.assertNotEqual(big_pic._peek_id, 0)
         self.assertEqual(big_pic.visible_face(), -1)
         self.assertTrue(all(b.get_visible() for b in big_pic._nav_buttons))
         self.assertIsNotNone(self.app.big_preview_actions)
@@ -3273,7 +3272,10 @@ class Flip3DTests(ViewLayerTest):
         for wp in big_pic._wallpapers:
             big_pic._set_wallpaper_paintable(wp, tex)
 
-        # Clicking > manually rotates to w2.png (pinned on current theme)!
+        # Clicking > even mid-peek rotates to w2.png (pinned on current theme)!
+        gi.repository.GLib.source_remove(big_pic._peek_id)
+        big_pic._on_hover_peek()
+        self.assertNotEqual(big_pic._delay_id, 0)
         big_pic._nav_buttons[1].emit("clicked")
         for _ in range(4):
             big_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
@@ -3281,19 +3283,30 @@ class Flip3DTests(ViewLayerTest):
         self.assertTrue(big_pic._pin_button.get_visible())
         self.assertTrue(big_pic._pin_button.has_css_class("pinned"))
 
-        # Clicking > again rotates to w1.png (unpinned), and clicking < rotates back to w2.png.
+        # Clicking > again rotates to w1.png (unpinned).
         big_pic._nav_buttons[1].emit("clicked")
         for _ in range(4):
             big_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
         self.assertTrue(big_pic.current_wallpaper_path().endswith("w1.png"))
         self.assertFalse(big_pic._pin_button.has_css_class("pinned"))
 
-        # Clicking the × Close button on the big preview closes it cleanly; re-open and test Wallpapers button.
+        # Clicking the × Close button on the big preview closes it cleanly; re-open and verify full auto-flip.
         footer_btns = [w for w in self.descendants(big_card.get_last_child()) if isinstance(w, Gtk.Button)]
         footer_btns[-1].emit("clicked")   # × Close button
         self.assertFalse(self.app.theme_preview_open())
         self.app.rows.emit("child-activated", {r.tm_theme.slug: r for r in self.rows_list()}["alpha"])
         self.assertTrue(self.app.theme_preview_open())
+        auto_pic = self.app.big_preview_picture
+        auto_pic.set_paintable(tex)
+        for wp in auto_pic._wallpapers:
+            auto_pic._set_wallpaper_paintable(wp, tex)
+        gi.repository.GLib.source_remove(auto_pic._peek_id)
+        auto_pic._on_hover_peek()
+        gi.repository.GLib.source_remove(auto_pic._delay_id)
+        auto_pic._on_delay_done()
+        for _ in range(4):
+            auto_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(auto_pic.current_wallpaper_path().endswith("w2.png"))
 
         # Clicking another theme card around the big preview selects that theme AND hides the big preview.
         rows_by_slug = {r.tm_theme.slug: r for r in self.rows_list()}
@@ -3316,34 +3329,26 @@ class Flip3DTests(ViewLayerTest):
         self.assertFalse(self.app.theme_preview_open())
         self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
 
-        # Turning on "Auto-rotate big preview" in Settings (default Off) enables automatic rotation on big previews;
+        # Turning off "Auto-rotate big preview" in Settings (default On) keeps the big preview on preview -1 without timers;
         # turning off "Big preview on click" restores the previous click/Enter -> Wallpapers behavior.
         self.app.open_settings()
         switches = [w for w in self.descendants(self.app.settings_sections["themes"])
                     if isinstance(w, Gtk.Switch)]
         big_switch, big_auto_rotate_switch = switches[2], switches[3]
         self.assertTrue(big_switch.get_active())
-        self.assertFalse(big_auto_rotate_switch.get_active())
-        big_auto_rotate_switch.set_active(True)
-        self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_big_auto_rotate") is True
-                        and self.app.big_preview_auto_rotate is True)
+        self.assertTrue(big_auto_rotate_switch.get_active())
+        big_auto_rotate_switch.set_active(False)
+        self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_big_auto_rotate") is False
+                        and self.app.big_preview_auto_rotate is False)
         self.app.show_themes()
         rows_by_slug = {r.tm_theme.slug: r for r in self.rows_list()}
         self.app.rows.emit("child-activated", rows_by_slug["alpha"])
-        auto_pic = self.app.big_preview_picture
-        self.assertEqual(auto_pic._delay_ms, 2000)
-        self.assertNotEqual(auto_pic._peek_id, 0)
-        auto_pic.set_paintable(tex)
-        for wp in auto_pic._wallpapers:
-            auto_pic._set_wallpaper_paintable(wp, tex)
-        gi.repository.GLib.source_remove(auto_pic._peek_id)
-        auto_pic._on_hover_peek()
-        self.assertNotEqual(auto_pic._delay_id, 0)
-        gi.repository.GLib.source_remove(auto_pic._delay_id)
-        auto_pic._on_delay_done()
-        for _ in range(4):
-            auto_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
-        self.assertTrue(auto_pic.current_wallpaper_path().endswith("w2.png"))
+        no_auto_pic = self.app.big_preview_picture
+        self.assertEqual(no_auto_pic._delay_ms, 0)
+        self.assertEqual(no_auto_pic._peek_id, 0)
+        self.assertEqual(no_auto_pic._delay_id, 0)
+        self.assertEqual(no_auto_pic.visible_face(), -1)
+        self.assertTrue(all(b.get_visible() for b in no_auto_pic._nav_buttons))
         self.app.hide_theme_preview()
 
         self.app.open_settings()
