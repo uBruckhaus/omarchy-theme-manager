@@ -9,6 +9,7 @@ All file work goes through theme_core, which enforces the trust rules.
 """
 
 import colorsys
+import math
 import os
 import queue
 import signal
@@ -31,9 +32,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
+gi.require_version("Gsk", "4.0")
+gi.require_version("Graphene", "1.0")
 gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Gtk4LayerShell, Pango
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango
 
 # Once Gtk4LayerShell is loaded into this process by ld.so, remove it from
 # LD_PRELOAD so child processes do not inherit it.
@@ -92,6 +95,8 @@ WIDE_EDITOR_FROM = 900 # from this card width the theme editor uses two columns
 SWITCHER_WRAPPER = Path(__file__).resolve().parent / "theme-switcher"
 SYNC_SCRIPT = Path(__file__).resolve().parent / "switcher_sync.py"
 PREVIEW_WORKERS = 4    # parallel preview downloads on the import page
+FLIP_DELAY_MS = 220    # hover pause before a theme card flips in 3D to its wallpaper
+FLIP_DURATION = 0.42   # seconds for a 180° 3D card flip
 CURSOR_SLACK = 24  # px the pointer may move after opening before the keyboard is released
 MAX_DROPS = 10  # one drop gesture adds at most this many wallpapers
 MAX_DROP_LIST_BYTES = 1024 * 1024  # a dropped uri-list or text, as for the clipboard
@@ -158,6 +163,177 @@ class FixedPicture(Gtk.Picture):
         return size, size, -1, -1
 
 
+class FlipPicture(FixedPicture):
+    """A theme preview that rotates 180° in 3D on hover to reveal the theme's
+    wallpaper on its back face (for themes whose preview is covered by windows)."""
+
+    def __init__(self, width: int, height: int, back_path: str | Path | None = None,
+                 decoder=None, radius_fn=None):
+        super().__init__(width, height)
+        self._back_path = str(back_path) if back_path else None
+        self._decoder = decoder
+        self._radius_fn = radius_fn
+        self._badges = None
+        self._back_paintable = None
+        self._back_requested = False
+        self._hovered = False
+        self._target = 0.0
+        self._progress = 0.0
+        self._delay_id = 0
+        self._tick_id = 0
+        self._last_frame_us = 0
+        self.connect("unmap", lambda *_args: self.reset_flip())
+
+    def set_badges(self, badges: Gtk.Widget | None):
+        self._badges = badges
+
+    def set_back_paintable(self, paintable):
+        self._back_paintable = paintable
+        if self._hovered and self._delay_id == 0 and self._target == 1.0:
+            self._animate_to(1.0)
+        self.queue_draw()
+
+    def request_back(self):
+        if self._back_path and not self._back_requested and self._decoder is not None:
+            self._back_requested = True
+            self._decoder.request(self, self._back_path, self._size[0], self._size[1],
+                                  setter=self.set_back_paintable)
+
+    def on_hover_enter(self):
+        if not self._back_path or self._hovered:
+            return
+        self._hovered = True
+        self.request_back()
+        if self._progress > 0.0:
+            self._animate_to(1.0)
+        elif self._delay_id == 0:
+            self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+
+    def _on_delay_done(self):
+        self._delay_id = 0
+        if self._hovered:
+            self._target = 1.0
+            if self._back_paintable is not None:
+                self._animate_to(1.0)
+        return GLib.SOURCE_REMOVE
+
+    def on_hover_leave(self):
+        self._hovered = False
+        if self._delay_id:
+            GLib.source_remove(self._delay_id)
+            self._delay_id = 0
+        self._target = 0.0
+        if self._progress > 0.0:
+            self._animate_to(0.0)
+
+    def reset_flip(self):
+        self._hovered = False
+        if self._delay_id:
+            GLib.source_remove(self._delay_id)
+            self._delay_id = 0
+        if self._tick_id:
+            self.remove_tick_callback(self._tick_id)
+            self._tick_id = 0
+        self._target = 0.0
+        self._progress = 0.0
+        self._last_frame_us = 0
+        if self._badges is not None:
+            self._badges.set_opacity(1.0)
+        self.queue_draw()
+
+    def _animate_to(self, target: float):
+        self._target = target
+        if self._tick_id == 0:
+            self._last_frame_us = 0
+            self._tick_id = self.add_tick_callback(self._on_tick)
+
+    def _step(self, dt: float) -> bool:
+        if self._target > self._progress:
+            self._progress = min(self._target, self._progress + dt / FLIP_DURATION)
+        elif self._target < self._progress:
+            self._progress = max(self._target, self._progress - dt / FLIP_DURATION)
+        eased = 0.5 - 0.5 * math.cos(math.pi * self._progress)
+        if self._badges is not None:
+            self._badges.set_opacity(max(0.0, 1.0 - 2.2 * eased))
+        self.queue_draw()
+        return self._progress != self._target
+
+    def _on_tick(self, _widget, clock):
+        now_us = clock.get_frame_time() if clock is not None else 0
+        if self._last_frame_us == 0 or now_us <= self._last_frame_us:
+            dt = 1.0 / 60.0
+        else:
+            dt = min(0.1, (now_us - self._last_frame_us) / 1_000_000.0)
+        self._last_frame_us = now_us
+        if not self._step(dt):
+            self._tick_id = 0
+            self._last_frame_us = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def do_snapshot(self, snapshot):
+        if self._progress <= 0.0 or self._back_paintable is None:
+            FixedPicture.do_snapshot(self, snapshot)
+            return
+        w = float(self.get_width() or self._size[0])
+        h = float(self.get_height() or self._size[1])
+        if w <= 0.0 or h <= 0.0:
+            return
+        eased = 0.5 - 0.5 * math.cos(math.pi * self._progress)
+        deg = 180.0 * eased
+        if deg <= 90.0:
+            paintable = self.get_paintable()
+            local_deg = deg
+        else:
+            paintable = self._back_paintable
+            local_deg = deg - 180.0
+        if paintable is None:
+            return
+        d = max(w * 1.8, 260.0)
+        rad = math.radians(local_deg)
+        scale = (d - (w / 2.0) * abs(math.sin(rad))) / d
+        transform = Gsk.Transform.new()
+        transform = transform.translate(Graphene.Point().init(w / 2.0, h / 2.0))
+        transform = transform.perspective(d)
+        transform = transform.rotate_3d(local_deg, Graphene.Vec3().init(0.0, 1.0, 0.0))
+        transform = transform.scale(scale, scale)
+        transform = transform.translate(Graphene.Point().init(-w / 2.0, -h / 2.0))
+
+        snapshot.save()
+        snapshot.transform(transform)
+        bounds = Graphene.Rect().init(0.0, 0.0, w, h)
+        radius = float(self._radius_fn()) if self._radius_fn else 0.0
+        if radius > 0.0:
+            rrect = Gsk.RoundedRect()
+            rrect.init_from_rect(bounds, radius)
+            snapshot.push_rounded_clip(rrect)
+
+        pw = paintable.get_intrinsic_width()
+        ph = paintable.get_intrinsic_height()
+        if pw > 0 and ph > 0:
+            cover = max(w / pw, h / ph)
+            dw, dh = pw * cover, ph * cover
+            dx, dy = (w - dw) / 2.0, (h - dh) / 2.0
+        else:
+            dx, dy, dw, dh = 0.0, 0.0, w, h
+        if isinstance(paintable, Gdk.Texture):
+            snapshot.append_texture(paintable, Graphene.Rect().init(dx, dy, dw, dh))
+        else:
+            snapshot.save()
+            snapshot.translate(Graphene.Point().init(dx, dy))
+            paintable.snapshot(snapshot, dw, dh)
+            snapshot.restore()
+
+        shade = 0.38 * abs(math.sin(rad))
+        if shade > 0.005:
+            rgba = Gdk.RGBA()
+            rgba.red, rgba.green, rgba.blue, rgba.alpha = 0.0, 0.0, 0.0, shade
+            snapshot.append_color(rgba, bounds)
+        if radius > 0.0:
+            snapshot.pop()
+        snapshot.restore()
+
+
 def scaled_pixbuf(path: str, width: int, height: int):
     """A pixbuf decoded at (twice) the display size, not the full 1800px
     preview, so a long list stays light on memory. None on failure.
@@ -180,22 +356,22 @@ class ImageDecoder:
 
     def __init__(self, workers: int):
         self.jobs = queue.SimpleQueue()
-        for _ in range(workers):
+        for _worker in range(workers):
             threading.Thread(target=self.work, daemon=True).start()
 
-    def request(self, picture, path: str, width: int, height: int):
-        self.jobs.put((picture, str(path), width, height))
+    def request(self, picture, path: str, width: int, height: int, setter=None):
+        self.jobs.put((setter or picture.set_paintable, str(path), width, height))
 
     def work(self):
         while True:
-            picture, path, width, height = self.jobs.get()
+            setter, path, width, height = self.jobs.get()
             pixbuf = scaled_pixbuf(path, width, height)
             if pixbuf is not None:
-                GLib.idle_add(self.show, picture, pixbuf)
+                GLib.idle_add(self.show, setter, pixbuf)
 
     @staticmethod
-    def show(picture, pixbuf):
-        picture.set_paintable(Gdk.Texture.new_for_pixbuf(pixbuf))
+    def show(setter, pixbuf):
+        setter(Gdk.Texture.new_for_pixbuf(pixbuf))
         return GLib.SOURCE_REMOVE
 
 
@@ -318,6 +494,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.tile_w = TILE
         self.theme_tile_w = TILE
         self.theme_keys = {}
+        self.flip_3d = True
+        self.hidden_wallpapers = {}
+        self.current_bg = None
+        self.pointer_moved = False
         self.sized = []            # widgets whose width follows the card
         self.resize_start = None
         self.preview = None        # what is previewed on the desktop right now
@@ -1990,6 +2170,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           self.dropdown([_("By name"), _("Recently used first")],
                                         theme_auto.SORT_CHOICES.index(theme_auto.sort_order()),
                                         lambda i: self.save_setting(sort=theme_auto.SORT_CHOICES[i])))
+        self.setting_line(box, _("3D flip to wallpaper on hover"),
+                          _("Hovering a theme card flips its preview in 3D to show the theme's wallpaper."),
+                          self.switch(theme_auto.preview_flip_enabled(),   # on by default
+                                      lambda on: self.save_setting(preview_flip_3d=on)))
         self.setting_line(box, _("Also hide in Omarchy's pickers"),
                           _("Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
                           "omarchy-menu.jsonc and a theme-set hook; off removes them again."),
@@ -2878,7 +3062,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             theme_auto.update_settings(**values)
         except OSError as error:
             theme_core.notify(_("Could not save the setting"), str(error))
-        if "sort" in values:
+        if "sort" in values or "preview_flip_3d" in values:
             self.refresh_themes()
 
     def corner_labels(self) -> list[str]:
@@ -2907,7 +3091,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def redraw_pictures(self, widget):
         if widget is None:
             return
-        if isinstance(widget, Gtk.DrawingArea):
+        if isinstance(widget, (Gtk.DrawingArea, FlipPicture)):
             widget.queue_draw()
         child = widget.get_first_child()
         while child is not None:
@@ -2919,7 +3103,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         restarts the popup (on this page), so it comes last."""
         self.save_setting(sort="name", workspace_wallpapers=True, workspace_themes=False,
                           slideshow_minutes=0, corners="windows",
-                          screenshot_key=True, screenshot_folder=None, ask_ai_web=True,
+                          screenshot_key=True, screenshot_folder=None,
+                          ask_ai_web=True, preview_flip_3d=True,
                           header_order=list(header_order.DEFAULT))
         self.header_order = list(header_order.DEFAULT)
         self.rebuild_header_group()
@@ -4016,6 +4201,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.theme_keys = {shortcuts.theme_of(a): c for a, c in shortcuts.load_state().items()
                            if shortcuts.theme_of(a)}
         self.workspace_theme_map = theme_auto.load_workspace_themes()
+        self.flip_3d = theme_auto.preview_flip_enabled()
+        self.hidden_wallpapers = theme_core.load_hidden_wallpapers() if self.flip_3d else {}
+        self.current_bg = theme_auto.current_background() if self.flip_3d else None
         ordered = theme_auto.order_themes(self.theme_list, self.favorites, theme_auto.load_recent(),
                                           theme_auto.sort_order())
         # The theme in use first; the rest keep their order.
@@ -4185,6 +4373,36 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         row.set_child(line)
         return row
 
+    def _tile_picture_radius(self, inset: int = 4) -> int:
+        radius = getattr(self, "ui_radius", 0)
+        return max(2, radius - inset) if radius else 0
+
+    def _attach_flip_hover(self, target: Gtk.Widget, picture: FlipPicture):
+        state = [None]
+
+        def on_enter(_ctrl, x, y):
+            state[0] = (round(x), round(y))
+            if self.pointer_moved and not self.actions_menu_open():
+                picture.on_hover_enter()
+
+        def on_motion(_ctrl, x, y):
+            pos = (round(x), round(y))
+            if state[0] is not None and state[0] != pos:
+                self.pointer_moved = True
+                if not self.actions_menu_open():
+                    picture.on_hover_enter()
+            state[0] = pos
+
+        def on_leave(_ctrl):
+            state[0] = None
+            picture.on_hover_leave()
+
+        hover = Gtk.EventControllerMotion()
+        hover.connect("enter", on_enter)
+        hover.connect("motion", on_motion)
+        hover.connect("leave", on_leave)
+        target.add_controller(hover)
+
     def build_theme_tile(self, theme: theme_core.ThemeInfo, is_hidden: bool) -> Gtk.FlowBoxChild:
         """A theme as a tile, like a wallpaper: used when the popup is wider
         than the default and the themes are shown in columns."""
@@ -4194,9 +4412,18 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             tile.add_css_class("tm-row-hidden")
         # One size whatever the badges and the name (a plain picture would
         # grow with its image and widen the card).
-        picture = FixedPicture(self.theme_tile_w, self.theme_tile_w * 9 // 16)
+        tile_h = self.theme_tile_w * 9 // 16
+        back = (theme_auto.flip_wallpaper(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+                if self.flip_3d and theme.preview else None)
+        if back is not None:
+            picture = FlipPicture(self.theme_tile_w, tile_h, back_path=back,
+                                  decoder=self.decoder,
+                                  radius_fn=lambda: self._tile_picture_radius(4))
+            self._attach_flip_hover(tile, picture)
+        else:
+            picture = FixedPicture(self.theme_tile_w, tile_h)
         if theme.preview:
-            self.decoder.request(picture, theme.preview, self.theme_tile_w, self.theme_tile_w * 9 // 16)
+            self.decoder.request(picture, theme.preview, self.theme_tile_w, tile_h)
         frame = Gtk.Overlay()
         frame.set_child(picture)
         actions = Gtk.Button(icon_name="open-menu-symbolic")
@@ -4211,6 +4438,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         badges = Gtk.Box(spacing=4)
         badges.set_halign(Gtk.Align.START)
         badges.set_valign(Gtk.Align.END)
+        badges.set_can_target(False)
+        if isinstance(picture, FlipPicture):
+            picture.set_badges(badges)
         for text, kind in (("current", "current") if theme.current else (None, None),
                            ("system", "") if theme.scope == "system" else (None, None),
                            ("hidden", "hidden-badge") if is_hidden else (None, None)):
@@ -4271,7 +4501,14 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         frame.set_valign(Gtk.Align.CENTER)
         width, height = self.preview_size()
         if theme.preview:
-            picture = FixedPicture(width, height)
+            back = (theme_auto.flip_wallpaper(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+                    if self.flip_3d else None)
+            if back is not None:
+                picture = FlipPicture(width, height, back_path=back, decoder=self.decoder,
+                                      radius_fn=lambda: self._tile_picture_radius(6))
+                self._attach_flip_hover(frame, picture)
+            else:
+                picture = FixedPicture(width, height)
             self.decoder.request(picture, theme.preview, width, height)
             frame.append(picture)
         else:
@@ -4611,6 +4848,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         last, self.pointer_at = self.pointer_at, (round(x), round(y))
         if not moved or last is None or last == self.pointer_at or self.actions_menu_open():
             return
+        self.pointer_moved = True
         if self.stack.get_visible_child_name() != "themes":
             return
         inside = self.card.translate_coordinates(self.rows, x, y)
@@ -6593,6 +6831,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def open(self):
         # Fresh data on every open: themes, hidden set and current theme may
         # have changed while the singleton slept.
+        self.pointer_moved = False
         self.hidden = self.load_hidden_list()
         self.filter_query = ""
         # A header drag that never reported its end must not block drops.

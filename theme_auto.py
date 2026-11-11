@@ -160,12 +160,20 @@ def update_settings(**values) -> None:
 
 def store_default_settings() -> None:
     """Defaults that are on stored as on, so settings.json and a backup show
-    them: Search the web for wallpapers (only a missing value; yours stays)."""
-    if not isinstance(settings().get("ask_ai_web"), bool):
+    them: Search the web for wallpapers and 3D wallpaper flip (only missing
+    values; yours stay)."""
+    current = settings()
+    missing = {key: True for key in ("ask_ai_web", "preview_flip_3d")
+               if not isinstance(current.get(key), bool)}
+    if missing:
         try:
-            update_settings(ask_ai_web=True)
+            update_settings(**missing)
         except OSError:
             pass
+
+
+def preview_flip_enabled() -> bool:
+    return settings().get("preview_flip_3d") is not False
 
 
 def workspace_wallpapers_enabled() -> bool:
@@ -465,6 +473,29 @@ def current_background() -> Path | None:
 
 def visible_wallpapers(theme) -> list[Path]:
     return [w.path for w in theme_core.list_backgrounds(None, theme) if not w.hidden]
+
+
+def flip_wallpaper(theme, hidden: dict[str, set[str]] | None = None,
+                   current_bg: Path | None = None) -> Path | None:
+    """The wallpaper shown on the back of a theme card's 3D flip: the active
+    desktop wallpaper when `theme` is current (if it belongs to its visible
+    wallpapers), else its first visible wallpaper, or None when it has none."""
+    visible = [w.path for w in theme_core.list_backgrounds(None, theme, hidden=hidden) if not w.hidden]
+    if not visible:
+        return None
+    chosen = None
+    if getattr(theme, "current", False):
+        bg = current_background() if current_bg is None else current_bg
+        if bg is not None:
+            chosen = next((p for p in visible if p == bg or _same_wallpaper(p, bg)), None)
+    chosen = chosen or visible[0]
+    if getattr(theme, "preview", None):
+        try:
+            if os.path.samefile(theme.preview, chosen):
+                return None
+        except OSError:
+            pass
+    return chosen
 
 
 def wallpaper_named(theme, name: str) -> Path | None:

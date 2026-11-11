@@ -2878,6 +2878,55 @@ class StaleWebAskTests(unittest.TestCase):
                                                token=3, slug="a")
         self.assertEqual(app.web_pics, [])
 
+class Flip3DTests(ViewLayerTest):
+    def test_theme_tile_flips_in_3d_on_hover_and_respects_setting(self):
+        t_with = self.make_theme("user", "alpha", wallpapers=("w1.png", "w2.png")).path
+        (t_with / "preview.png").write_bytes(PNG)
+        t_without = self.make_theme("user", "bare", wallpapers=()).path
+        (t_without / "preview.png").write_bytes(PNG)
+        link = self.roots.state_current / "background"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.unlink(missing_ok=True)
+        link.symlink_to(t_with / "backgrounds" / "w2.png")
+
+        self.app.refresh_themes()
+        rows = {r.tm_theme.slug: r for r in self.rows_list()}
+        pic = rows["alpha"].get_child().get_first_child().get_first_child()
+        bare_pic = rows["bare"].get_child().get_first_child().get_first_child()
+        self.assertIsInstance(pic, theme_popup.FlipPicture)
+        self.assertIsInstance(pic, theme_popup.FixedPicture)
+        self.assertTrue(pic._back_path.endswith("w2.png"))  # current theme uses active background
+        self.assertNotIsInstance(bare_pic, theme_popup.FlipPicture)
+
+        pix = theme_popup.GdkPixbuf.Pixbuf.new(theme_popup.GdkPixbuf.Colorspace.RGB, False, 8, 16, 9)
+        tex = Gdk.Texture.new_for_pixbuf(pix)
+        pic.set_paintable(tex)
+        pic.set_back_paintable(tex)
+        pic._target = 1.0
+        for step in range(4):
+            pic._step(theme_popup.FLIP_DURATION / 4.0)
+            snap = Gtk.Snapshot.new()
+            pic.do_snapshot(snap)
+            self.assertIsNotNone(snap.to_node())
+        self.assertAlmostEqual(pic._progress, 1.0)
+        self.assertEqual(pic._badges.get_opacity(), 0.0)
+        pic.reset_flip()
+        self.assertEqual(pic._progress, 0.0)
+        self.assertEqual(pic._badges.get_opacity(), 1.0)
+
+        # Turning off the setting disables 3D flip; Reset to defaults turns it back on.
+        self.app.open_settings()
+        switches = [w for w in self.descendants(self.app.settings_sections["themes"])
+                    if isinstance(w, Gtk.Switch)]
+        flip_switch = switches[0]  # first switch in Themes section
+        self.assertTrue(flip_switch.get_active())
+        flip_switch.set_active(False)
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), False)
+        pic_off = {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
+        self.assertNotIsInstance(pic_off, theme_popup.FlipPicture)
+        self.app.reset_settings()
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

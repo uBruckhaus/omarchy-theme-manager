@@ -257,5 +257,13 @@ class BackupHelperChoiceTests(unittest.TestCase):
             theme_backup._validate_settings(value)
             self.assertEqual("ask_ai_helper" in value, kept, helper)
 
+    def test_preview_flip_3d_setting_is_validated_as_boolean(self):
+        import theme_backup
+        for valid in ({"preview_flip_3d": True}, {"preview_flip_3d": False}):
+            theme_backup._validate_settings(valid)
+        for bad in ({"preview_flip_3d": "yes"}, {"preview_flip_3d": 1}):
+            with self.assertRaises(ValueError):
+                theme_backup._validate_settings(bad)
+
 if __name__ == "__main__":
     unittest.main()

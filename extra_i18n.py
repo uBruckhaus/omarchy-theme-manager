@@ -524,3 +524,21 @@ EXTRA['Use as text colour'] = {'de': 'Als Textfarbe verwenden', 'fr': 'Utiliser 
 EXTRA["Hard to read on this theme's background: contrast {0}:1, at least 3:1 is better."] = {'de': 'Schwer lesbar auf dem Hintergrund dieses Themes: Kontrast {0}:1, mindestens 3:1 ist besser.', 'fr': 'Difficile à lire sur le fond de ce thème : contraste {0}:1, au moins 3:1 est préférable.', 'es': 'Difícil de leer sobre el fondo de este tema: contraste {0}:1, al menos 3:1 es mejor.', 'it': 'Difficile da leggere sullo sfondo di questo tema: contrasto {0}:1, almeno 3:1 è meglio.', 'pt': 'Difícil de ler sobre o fundo deste tema: contraste {0}:1, pelo menos 3:1 é melhor.', 'nl': 'Moeilijk leesbaar op de achtergrond van dit thema: contrast {0}:1, minstens 3:1 is beter.', 'pl': 'Trudny do odczytania na tle tego motywu: kontrast {0}:1, lepiej co najmniej 3:1.'}
 EXTRA['The quick brown fox jumps over the lazy dog'] = {'de': 'Zwölf Boxkämpfer jagen Viktor quer über den großen Sylter Deich', 'fr': 'Portez ce vieux whisky au juge blond qui fume', 'es': 'El veloz murciélago hindú comía feliz cardillo y kiwi', 'it': 'Quel vituperabile xenofobo zelante assaggia il whisky ed esclama alleluja', 'pt': 'À noite, vovô Kowalsky vê o ímã cair no pé do pinguim', 'nl': "Pa's wijze lynx bezag vroom het fikse aquaduct", 'pl': 'Pchnąć w tę łódź jeża lub ośm skrzyń fig'}
 EXTRA['a comment, dimmer'] = {'de': 'ein Kommentar, gedämpfter', 'fr': 'un commentaire, plus discret', 'es': 'un comentario, más tenue', 'it': 'un commento, più tenue', 'pt': 'um comentário, mais esbatido', 'nl': 'een opmerking, gedempter', 'pl': 'komentarz, przygaszony'}
+EXTRA['3D flip to wallpaper on hover'] = {
+    'de': '3D-Drehung zum Hintergrund beim Überfahren',
+    'fr': "Rotation 3D vers le fond d'écran au survol",
+    'es': 'Giro 3D al fondo al pasar el ratón',
+    'it': 'Rotazione 3D verso lo sfondo al passaggio',
+    'pt': 'Rotação 3D para o papel de parede ao passar o rato',
+    'nl': '3D-draai naar achtergrond bij aanwijzen',
+    'pl': 'Obrót 3D do tapety po najechaniu',
+}
+EXTRA["Hovering a theme card flips its preview in 3D to show the theme's wallpaper."] = {
+    'de': 'Beim Überfahren einer Theme-Karte dreht sich ihre Vorschau in 3D und zeigt den Hintergrund des Themes.',
+    'fr': "Au survol d'une carte de thème, son aperçu pivote en 3D pour montrer le fond d'écran du thème.",
+    'es': 'Al pasar el ratón sobre la tarjeta de un tema, su vista previa gira en 3D para mostrar el fondo del tema.',
+    'it': 'Passando il puntatore sulla scheda di un tema, la sua anteprima ruota in 3D per mostrare lo sfondo del tema.',
+    'pt': 'Ao passar o rato sobre o cartão de um tema, a pré-visualização roda em 3D para mostrar o papel de parede do tema.',
+    'nl': 'Wanneer je een themakaart aanwijst, draait het voorbeeld in 3D om de achtergrond van het thema te tonen.',
+    'pl': 'Po najechaniu na kartę motywu jej podgląd obraca się w 3D, pokazując tapetę motywu.',
+}

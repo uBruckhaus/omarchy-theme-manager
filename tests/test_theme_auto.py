@@ -519,6 +519,34 @@ class CommandLineTests(AutoTestCase):
         theme_auto.apply_workspace(1)
         self.assertEqual(self.applied, ["assigned", "night"])
 
+    def test_flip_wallpaper_uses_active_background_when_current_else_first_visible(self):
+        self.assertTrue(theme_auto.preview_flip_enabled())
+        theme_auto.store_default_settings()
+        self.assertIs(theme_auto.settings().get("preview_flip_3d"), True)
+        theme_auto.update_settings(preview_flip_3d=False)
+        self.assertFalse(theme_auto.preview_flip_enabled())
+        theme_auto.store_default_settings()
+        self.assertIs(theme_auto.settings().get("preview_flip_3d"), False)  # explicit off stays off
+
+        bg_nord = self.make_theme("nord", ("a.png", "b.png", "c.png"), current=True)
+        self.make_theme("alpha", ("first.png", "second.png"))
+        empty_dir = self.roots.user_themes / "bare"
+        empty_dir.mkdir(parents=True)
+        (empty_dir / "colors.toml").write_text("")
+
+        staged = self.roots.state_current / "theme" / "backgrounds"
+        staged.mkdir(parents=True)
+        staged_c = staged / "c.png"
+        staged_c.write_bytes(png())
+        self.set_link(staged_c)  # staged copy of c.png is active on desktop
+
+        themes = {t.slug: t for t in theme_core.discover_themes()}
+        self.assertEqual(theme_auto.flip_wallpaper(themes["nord"]), bg_nord / "c.png")
+        self.assertEqual(theme_auto.flip_wallpaper(themes["alpha"]).name, "first.png")
+        theme_core.save_hidden_wallpapers({"alpha": {"first.png"}})
+        self.assertEqual(theme_auto.flip_wallpaper(themes["alpha"]).name, "second.png")
+        self.assertIsNone(theme_auto.flip_wallpaper(themes["bare"]))
+
 
 class LockDeadlineTests(AutoTestCase):
     def test_a_step_waiting_too_long_for_the_lock_gives_up(self):
