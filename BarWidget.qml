@@ -68,7 +68,7 @@ BarWidget {
     interval: 2000
     running: root.primary
     repeat: false
-    onTriggered: Quickshell.execDetached(["/usr/bin/python3", "-I", root.syncPath, "startup"])
+    onTriggered: Quickshell.execDetached(root.bounded(120, ["/usr/bin/python3", "-I", root.syncPath, "startup"]))
   }
 
   function close() {
@@ -100,11 +100,12 @@ BarWidget {
     }
   }
 
-  // Applying a theme takes seconds; the helper itself gives up a lock wait
-  // after 60 s. A run still going after this is stopped.
+  // Applying a theme takes seconds; the helper itself gives up a lock wait after 60 s and stops
+  // a theme switch (with all it started) after 120 s, so it always ends on its own before this:
+  // the lock is never released under a switch still going. A run still going after this is stopped.
   Timer {
     id: helperDeadline
-    interval: 90000
+    interval: 200000
     repeat: false
     onTriggered: {
       if (helper.running) helper.running = false   // its exit settles it
@@ -185,19 +186,34 @@ BarWidget {
     var address = queue.shift()
     tilingQueue = queue
     markTilingSeen(address)
+    tilingCurrent = address
+    tilingTimedOut = false
     tilingBusy = true
     tilingWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--window", address]
     tilingDeadline.restart()
     tilingWorker.running = true
-    if (!tilingWorker.running) Qt.callLater(root.tilingSettled)   // it did not start
+    tilingStarted = tilingWorker.running
+    if (!tilingStarted) Qt.callLater(root.tilingSettled)   // it did not start
   }
 
   property bool tilingBusy: false
+  property string tilingCurrent: ""
+  property bool tilingStarted: false
+  property bool tilingTimedOut: false
 
   function tilingSettled() {
     if (!tilingBusy || tilingWorker.running) return   // settled already, or still going
     tilingBusy = false
     tilingDeadline.stop()
+    // A window whose helper never started or was stopped at the deadline was not handled: a
+    // later rescan may hand it over again.
+    if (!tilingStarted || tilingTimedOut) {
+      var key = tilingKey(tilingCurrent)
+      delete tilingSeen[key]
+      var at = tilingSeenOrder.indexOf(key)
+      if (at >= 0) tilingSeenOrder.splice(at, 1)
+    }
+    tilingCurrent = ""
     if (tilingQueue.length === 0 && tilingOverflow) rescanMissedWindows()
     tilingSettle.restart()                   // the next window, if any
   }
@@ -209,6 +225,7 @@ BarWidget {
     interval: 75000
     repeat: false
     onTriggered: {
+      root.tilingTimedOut = true
       if (tilingWorker.running) tilingWorker.running = false   // its exit settles it
       else root.tilingSettled()
     }

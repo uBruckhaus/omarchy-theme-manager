@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import os
+import signal
 import stat
 import re
 import shutil
@@ -1254,17 +1255,21 @@ def remove_theme(roots: Roots | None, slug: str, receipt: list | None = None) ->
 
 
 def apply_theme(slug: str, binary: str = "omarchy", timeout: float = 120.0) -> bool:
-    """Apply a theme through Omarchy's own CLI (argv vector, no shell)."""
+    """Apply a theme through Omarchy's own CLI (argv vector, no shell). It runs as a process
+    group of its own: one still going at the deadline is stopped with everything it started, so
+    no half-done theme switch goes on after the automation lock is released. (A switch that
+    finishes keeps what it started, such as the new background.)"""
     slug = _validate_slug(slug)
     _, ok = read_bounded_output([binary, "theme", "set", slug],
-                                max_bytes=MAX_COMMAND_OUTPUT_BYTES, timeout=timeout)
+                                max_bytes=MAX_COMMAND_OUTPUT_BYTES, timeout=timeout, own_group=True)
     return ok
 
 
 # --- bounded subprocess ----------------------------------------------------------
 
 def read_bounded_output(argv: list[str], max_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-                        timeout: float = 10.0, env: dict | None = None) -> tuple[bytes, bool]:
+                        timeout: float = 10.0, env: dict | None = None,
+                        own_group: bool = False) -> tuple[bytes, bool]:
     """Run argv (no shell) and read stdout with a hard byte cap and deadline.
 
     Returns ``(output, ok)``; ``ok`` is True only when the command exited 0
@@ -1273,9 +1278,20 @@ def read_bounded_output(argv: list[str], max_bytes: int = MAX_COMMAND_OUTPUT_BYT
     """
     try:
         proc = subprocess.Popen(list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, env=env)
+                                stderr=subprocess.DEVNULL, env=env, start_new_session=own_group)
     except (OSError, ValueError):
         return b"", False
+
+    def stop():
+        # own_group: the whole group while the leader is not reaped yet (its pid, the group id,
+        # cannot belong to anyone else then); else the program alone.
+        if own_group:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+                return
+            except OSError:
+                pass
+        proc.kill()
 
     chunks: list[bytes] = []
     total = 0
@@ -1301,15 +1317,15 @@ def read_bounded_output(argv: list[str], max_bytes: int = MAX_COMMAND_OUTPUT_BYT
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        proc.kill()
+        stop()
         thread.join(2.0)
         truncated = True
     elif truncated:
-        proc.kill()   # over the cap: don't wait for a writer blocked on a full pipe
+        stop()        # over the cap: don't wait for a writer blocked on a full pipe
     try:
         returncode = proc.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        stop()
         returncode = proc.wait()
     ok = returncode == 0 and not truncated and not read_error
     return b"".join(chunks)[:max_bytes], ok

@@ -1012,3 +1012,29 @@ class AtomicWriteModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApplyThemeGroupTest(unittest.TestCase):
+    def test_a_stalled_theme_switch_is_stopped_with_what_it_started(self):
+        import subprocess as sp
+        import time as clock
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "child.pid"
+            fake = Path(tmp) / "omarchy"
+            fake.write_text("#!/bin/sh\nsleep 60 &\necho $! > %s\nwait\n" % pidfile)
+            fake.chmod(0o755)
+            started = clock.monotonic()
+            self.assertFalse(theme_core.apply_theme("tokyo-night", binary=str(fake), timeout=1))
+            self.assertLess(clock.monotonic() - started, 10)
+            child = int(pidfile.read_text())
+            for _ in range(50):
+                try:
+                    with open(f"/proc/{child}/stat") as handle:
+                        if handle.read().rsplit(")", 1)[1].split()[0] == "Z":
+                            break
+                except OSError:
+                    break
+                clock.sleep(0.05)
+            else:
+                os.kill(child, 9)
+                self.fail("the switch's child is still running")
