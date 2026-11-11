@@ -186,34 +186,19 @@ BarWidget {
     var address = queue.shift()
     tilingQueue = queue
     markTilingSeen(address)
-    tilingCurrent = address
-    tilingTimedOut = false
     tilingBusy = true
     tilingWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--window", address]
     tilingDeadline.restart()
     tilingWorker.running = true
-    tilingStarted = tilingWorker.running
-    if (!tilingStarted) Qt.callLater(root.tilingSettled)   // it did not start
+    if (!tilingWorker.running) Qt.callLater(root.tilingSettled)   // it did not start
   }
 
   property bool tilingBusy: false
-  property string tilingCurrent: ""
-  property bool tilingStarted: false
-  property bool tilingTimedOut: false
 
   function tilingSettled() {
     if (!tilingBusy || tilingWorker.running) return   // settled already, or still going
     tilingBusy = false
     tilingDeadline.stop()
-    // A window whose helper never started or was stopped at the deadline was not handled: a
-    // later rescan may hand it over again.
-    if (!tilingStarted || tilingTimedOut) {
-      var key = tilingKey(tilingCurrent)
-      delete tilingSeen[key]
-      var at = tilingSeenOrder.indexOf(key)
-      if (at >= 0) tilingSeenOrder.splice(at, 1)
-    }
-    tilingCurrent = ""
     if (tilingQueue.length === 0 && tilingOverflow) rescanMissedWindows()
     tilingSettle.restart()                   // the next window, if any
   }
@@ -225,7 +210,6 @@ BarWidget {
     interval: 75000
     repeat: false
     onTriggered: {
-      root.tilingTimedOut = true
       if (tilingWorker.running) tilingWorker.running = false   // its exit settles it
       else root.tilingSettled()
     }
@@ -234,6 +218,7 @@ BarWidget {
   // At most this many windows wait; a window already waiting is not added again. Windows that
   // opened while the queue was full are not lost: once it has drained, the windows open now that
   // were never handed to the helper are queued (again at most this many; more → once more).
+  // Each window is handed over once: one whose helper failed is not retried (no retry loops).
   readonly property int tilingQueueMax: 32
   readonly property int tilingSeenMax: 512
   property bool tilingOverflow: false
