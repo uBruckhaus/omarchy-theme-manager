@@ -632,3 +632,30 @@ EXTRA['Set as wallpaper for this theme'] = {
     'nl': 'Instellen als achtergrond van dit thema',
     'pl': 'Ustaw jako tapetę tego motywu',
 }
+EXTRA['Big preview on click'] = {
+    'de': 'Große Vorschau beim Klicken',
+    'fr': 'Grand aperçu au clic',
+    'es': 'Vista previa grande al hacer clic',
+    'it': 'Anteprima grande al clic',
+    'pt': 'Pré-visualização grande ao clicar',
+    'nl': 'Groot voorbeeld bij klikken',
+    'pl': 'Duży podgląd po kliknięciu',
+}
+EXTRA['Clicking or pressing Enter on a theme card opens a large interactive preview overlay inside the window. Off opens the theme’s wallpapers page directly.'] = {
+    'de': 'Klicken oder Eingabetaste auf einer Theme-Karte öffnet eine große interaktive Vorschau im Fenster. Aus öffnet direkt die Hintergrundseite des Themes.',
+    'fr': 'Cliquer ou appuyer sur Entrée sur une carte de thème ouvre un grand aperçu interactif dans la fenêtre. Désactivé ouvre directement la page des fonds d’écran du thème.',
+    'es': 'Hacer clic o pulsar Intro en una tarjeta de tema abre una vista previa grande e interactiva dentro de la ventana. Desactivado abre directamente la página de fondos del tema.',
+    'it': 'Fare clic o premere Invio su una scheda del tema apre un’anteprima grande e interattiva nella finestra. Disattivo apre direttamente la pagina degli sfondi del tema.',
+    'pt': 'Clicar ou premir Enter num cartão de tema abre uma pré-visualização grande e interativa dentro da janela. Desligado abre diretamente a página de papéis de parede do tema.',
+    'nl': 'Klikken of op Enter drukken op een themakaart opent een groot interactief voorbeeld in het venster. Uit opent direct de achtergrondpagina van het thema.',
+    'pl': 'Kliknięcie lub naciśnięcie Enter na karcie motywu otwiera duży interaktywny podgląd w oknie. Wyłączone otwiera bezpośrednio stronę tapet motywu.',
+}
+EXTRA['Close preview (Esc)'] = {
+    'de': 'Vorschau schließen (Esc)',
+    'fr': 'Fermer l’aperçu (Échap)',
+    'es': 'Cerrar vista previa (Esc)',
+    'it': 'Chiudi anteprima (Esc)',
+    'pt': 'Fechar pré-visualização (Esc)',
+    'nl': 'Voorbeeld sluiten (Esc)',
+    'pl': 'Zamknij podgląd (Esc)',
+}

@@ -518,6 +518,43 @@ class FlipPicture(FixedPicture):
                 self._animate_to(1.0)
         return GLib.SOURCE_REMOVE
 
+    def start_big_preview(self, preserve_face: str | None = None):
+        """Activate immediately in the big preview overlay: < / > arrows are
+        ready right away, and when delay > 0 it also runs the 3D lift + flip."""
+        if not self._wallpapers:
+            return
+        self._selected = True
+        self._interactive = True
+        self._nav_steady = True
+        self._pulse_back = False
+        if preserve_face == "__preview__":
+            self._from_face = -1
+            self._to_face = 0
+            self._progress = 0.0
+            self._target = 0.0
+            self.request_back()
+            self._sync_overlays()
+            self.queue_draw()
+            return
+        if preserve_face:
+            idx = next((i for i, p in enumerate(self._wallpapers)
+                        if p == preserve_face or Path(p).name == Path(preserve_face).name), -1)
+            if idx >= 0:
+                self._from_face = idx
+                self._to_face = idx
+                self._progress = 1.0
+                self._target = 1.0
+                self._prefetch_around(idx)
+                self._sync_overlays()
+                self.queue_draw()
+                return
+        self.request_back()
+        self._sync_overlays()
+        self.queue_draw()
+        if self._delay_ms > 0:
+            peek_ms = min(PEEK_DELAY_MS, self._delay_ms)
+            self._peek_id = GLib.timeout_add(peek_ms, self._on_hover_peek)
+
     def _next_face_in_cycle(self, face: int, delta: int) -> int:
         # Cycle through original preview (-1) and all wallpapers (0 .. n - 1).
         n = len(self._wallpapers)
@@ -528,9 +565,28 @@ class FlipPicture(FixedPicture):
             return
         if not self._nav_steady and not self.is_showing_wallpaper():
             return
+        self._pulse_back = False
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+            self._peek_id = 0
+        if self._delay_id:
+            GLib.source_remove(self._delay_id)
+            self._delay_id = 0
         self._nav_steady = True
         sign = 1.0 if step_dir >= 0 else -1.0
         delta = 1 if step_dir >= 0 else -1
+        if 0.0 < self._target < 1.0:
+            # Mid-peek (~16° toward wallpaper 0): > finishes flipping to 0; < settles and flips to last.
+            if sign > 0:
+                self._prefetch_around(self._to_face)
+                self._queued = None
+                self._animate_to(1.0)
+            else:
+                nxt = self._next_face_in_cycle(self._from_face, -1)
+                self._prefetch_around(nxt)
+                self._queued = (nxt, -1.0)
+                self._animate_to(0.0)
+            return
         if self._progress >= 1.0:
             cur = self._to_face
             nxt = self._next_face_in_cycle(cur, delta)
@@ -1289,7 +1345,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.list_scroller = scroller
         self.rows = ThemeGrid()
         self.rows.add_css_class("tm-list")
-        self.rows.connect("child-activated", lambda _rows, row: self.open_wallpapers_for(row.tm_theme))
+        self.rows.connect("child-activated", lambda _rows, row: self.on_theme_row_activated(row))
         self.no_match = Gtk.Label(wrap=True, max_width_chars=1)
         self.no_match.add_css_class("tm-hint")
         self.no_match.set_margin_top(24)
@@ -1303,6 +1359,25 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         list_box.append(self.no_match)
         list_box.append(self.hidden_hint)
         scroller.set_child(list_box)
+        self.themes_overlay = Gtk.Overlay()
+        self.themes_overlay.set_child(scroller)
+        self.big_preview_slot = Gtk.Box(accessible_role=Gtk.AccessibleRole.DIALOG)
+        self.big_preview_slot.set_halign(Gtk.Align.CENTER)
+        self.big_preview_slot.set_valign(Gtk.Align.CENTER)
+        self.big_preview_slot.set_visible(False)
+        self.themes_overlay.add_overlay(self.big_preview_slot)
+        self.themes_overlay.set_measure_overlay(self.big_preview_slot, False)
+        self.themes_overlay.set_clip_overlay(self.big_preview_slot, True)
+        self.big_preview_theme = None
+        self.big_preview_picture = None
+        self.big_preview_actions = None
+        self.big_preview_size_px = (0, 0)
+        self.big_preview_enabled = True
+        self._overlay_press_outside = False
+        outside_click = Gtk.GestureClick(button=Gdk.BUTTON_PRIMARY)
+        outside_click.connect("pressed", self.on_themes_overlay_pressed)
+        outside_click.connect("released", self.on_themes_overlay_released)
+        self.themes_overlay.add_controller(outside_click)
         # Hover selects like in Simple Launcher, but only when the pointer
         # really moves: a pointer resting on the list must not steal the
         # keyboard selection when a menu closes or the list is rebuilt.
@@ -1322,7 +1397,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         focus.connect("enter", lambda *_: self.release_keyboard())
         focus.connect("leave", lambda *_: self.release_keyboard())
         card.add_controller(focus)
-        stack.add_named(scroller, "themes")
+        stack.add_named(self.themes_overlay, "themes")
 
         # --- wallpapers page
         wallpaper_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1760,6 +1835,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         for grid in (self.wp_grid, self.web_grid, self.import_grid):
             grid.set_min_children_per_line(self.columns)
             grid.set_max_children_per_line(self.columns)
+        if self.theme_preview_open() and getattr(self, "resize_start", None) is None:
+            self.refresh_theme_preview()
         if self.window is not None:
             # A layer surface does not shrink by itself once content gets smaller.
             self.window.set_default_size(1, 1)
@@ -2025,6 +2102,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def update_page_buttons(self, stack):
         if stack.get_visible_child_name() != "presets":
             self.ws_hover_hide()
+        if stack.get_visible_child_name() != "themes":
+            self.hide_theme_preview()
         on_page = stack.get_visible_child_name() in ("settings", "info", "presets", "ask")
         self.settings_button.set_visible(not on_page)
         self.info_button.set_visible(not on_page)
@@ -2672,6 +2751,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           _("On: pinning a wallpaper on another theme switches to that theme immediately. Off: only saves it as that theme’s current wallpaper."),
                           self.switch(theme_auto.preview_pin_apply_theme_enabled(),   # on by default
                                       lambda on: self.save_setting(preview_pin_apply_theme=on)))
+        self.setting_line(box, _("Big preview on click"),
+                          _("Clicking or pressing Enter on a theme card opens a large interactive preview overlay inside the window. Off opens the theme’s wallpapers page directly."),
+                          self.switch(theme_auto.preview_big_card_enabled(),          # on by default
+                                      lambda on: self.save_setting(preview_big_card=on)))
         self.setting_line(box, _("Also hide in Omarchy's pickers"),
                           _("Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
                           "omarchy-menu.jsonc and a theme-set hook; off removes them again."),
@@ -3566,7 +3649,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         remembered = theme_auto.remembered_omarchy_theme_background(theme.slug)
         return wallpapers[0] if remembered and Path(wallpapers[0]).name == remembered else None
 
-    FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme")
+    FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme", "preview_big_card")
 
     def save_setting(self, **values):
         if any(key in values for key in self.FLIP_SETTINGS):
@@ -3652,6 +3735,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                                       ask_ai_web=True, preview_flip_3d=True,
                                       preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
                                       preview_pin_apply_theme=True,
+                                      preview_big_card=True,
                                       header_order=list(header_order.DEFAULT)),
                                  then=self._reset_after_saved)
 
@@ -4612,6 +4696,15 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-list flowboxchild.tm-current-row .tm-tile,
         .tm-list flowboxchild.tm-current-row:hover .tm-tile,
         .tm-list flowboxchild.tm-current-row:focus .tm-tile {{ border: 2px solid {current_hex}; padding: 2px; }}
+        .tm-big-preview {{ background: {bg_hex}; border: 1px solid {accent_hex}; border-radius: {radius}px;
+            padding: 8px; box-shadow: 0 12px 36px rgba(0, 0, 0, 0.72); }}
+        .tm-big-preview.tm-current-row {{ border: 2px solid {current_hex}; padding: 7px; }}
+        .tm-big-preview .tm-tile-name {{ font-size: 15px; font-weight: 700; }}
+        .tm-big-preview button.tm-tile-menu, .tm-big-preview button.tm-tile-pin,
+        .tm-big-preview button.tm-tile-nav {{ padding: 5px; margin: 7px; background: rgba(0, 0, 0, 0.68); }}
+        button.tm-big-btn {{ font-size: 12px; font-weight: 600; min-height: 0; padding: 3px 9px; }}
+        button.tm-big-close {{ min-height: 0; min-width: 0; padding: 3px 5px; opacity: 0.8; }}
+        button.tm-big-close:hover {{ opacity: 1.0; color: {accent_hex}; }}
         .tm-paste {{ font-weight: 500; font-size: 14px; }}
         button.tm-paste.danger {{ background: {red_hex}; color: #ffffff; }}
         button.tm-paste.danger:hover {{ background: shade({red_hex}, 1.1); }}
@@ -4755,10 +4848,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                            if shortcuts.theme_of(a)}
         self.workspace_theme_map = theme_auto.load_workspace_themes()
         self.flip_3d = theme_auto.preview_flip_enabled()
-        self.flip_delay = theme_auto.preview_flip_delay() if self.flip_3d else theme_auto.DEFAULT_FLIP_DELAY
+        self.big_preview_enabled = theme_auto.preview_big_card_enabled()
+        self.flip_delay = theme_auto.preview_flip_delay()
         self.pin_apply_theme = theme_auto.preview_pin_apply_theme_enabled()
-        self.hidden_wallpapers = theme_core.load_hidden_wallpapers() if self.flip_3d else {}
-        self.current_bg = theme_auto.current_background() if self.flip_3d else None
+        need_walls = self.flip_3d or self.big_preview_enabled
+        self.hidden_wallpapers = theme_core.load_hidden_wallpapers() if need_walls else {}
+        self.current_bg = theme_auto.current_background() if need_walls else None
+        open_slug = self.big_preview_theme.slug if self.theme_preview_open() else None
         ordered = theme_auto.order_themes(self.theme_list, self.favorites, theme_auto.load_recent(),
                                           theme_auto.sort_order())
         # The theme in use first; the rest keep their order.
@@ -4790,9 +4886,15 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if (self.window is not None and self.window.get_visible()
                     and self.stack.get_visible_child_name() == "themes"):
                 self._peek_row = selected
-                pic = self._row_flip_picture(selected)
-                if pic is not None:
-                    pic.set_selected(True)
+                if not open_slug or selected.tm_theme.slug != open_slug or not self.big_preview_enabled:
+                    pic = self._row_flip_picture(selected)
+                    if pic is not None:
+                        pic.set_selected(True)
+        if open_slug:
+            if self.big_preview_enabled and selected is not None and selected.tm_theme.slug == open_slug:
+                self.refresh_theme_preview(selected.tm_theme)
+            else:
+                self.hide_theme_preview()
 
     @staticmethod
     def load_hidden_list() -> set[str]:
@@ -4851,6 +4953,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         return char if char.isprintable() and keyval not in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) else ""
 
     def set_filter(self, query: str):
+        self.hide_theme_preview()
         self.filter_query = query
         self.refresh_themes(keep=None)
         self.select_row(self.rows.get_selected_row())
@@ -4993,6 +5096,20 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if picture.current_wallpaper_path() == wp_path:
                 self.pin_theme_wallpaper(theme, picture)
 
+    def _sync_theme_flip_wallpaper(self, slug: str, bg: Path, *, theme_current: bool, pin_apply_theme: bool | None = None):
+        row = self.rows.get_first_child()
+        while row is not None:
+            t = getattr(row, "tm_theme", None)
+            if t is not None and t.slug == slug:
+                row_pic = self._flip_picture_in(row)
+                if row_pic is not None:
+                    row_pic.set_active_wallpaper(bg, theme_current=theme_current,
+                                                 pin_apply_theme=pin_apply_theme, promote_on_reset=True)
+            row = row.get_next_sibling()
+        if self.theme_preview_open() and self.big_preview_theme.slug == slug and self.big_preview_picture is not None:
+            self.big_preview_picture.set_active_wallpaper(bg, theme_current=theme_current,
+                                                          pin_apply_theme=pin_apply_theme, promote_on_reset=True)
+
     def _pin_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture, path: Path):
         if theme.current:
             def done(ok, error):
@@ -5002,6 +5119,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                         return
                     self.current_bg = theme_auto.current_background() or path
                     picture.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
+                    self._sync_theme_flip_wallpaper(theme.slug, Path(self.current_bg), theme_current=True)
                 finally:
                     self._pin_finished()
             self._async(lambda: theme_auto.pin_current_wallpaper(theme.slug, path), done)
@@ -5015,6 +5133,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                         return
                     picture.set_active_wallpaper(path, theme_current=False, pin_apply_theme=False,
                                                  promote_on_reset=True)
+                    self._sync_theme_flip_wallpaper(theme.slug, path, theme_current=False, pin_apply_theme=False)
                 finally:
                     self._pin_finished()
             self._async(lambda: theme_auto.remember_omarchy_theme_background(theme.slug, path), remembered)
@@ -5533,9 +5652,289 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         focus()
         GLib.idle_add(focus)  # Again after popup(): a new popover moves the focus itself.
 
+    def theme_preview_open(self) -> bool:
+        slot = getattr(self, "big_preview_slot", None)
+        return slot is not None and slot.get_visible() and getattr(self, "big_preview_theme", None) is not None
+
+    def big_preview_size(self) -> tuple[int, int]:
+        """16:9 picture size for the big theme preview overlay: ~half of the window
+        (and noticeably larger than a grid tile when narrow), always inside the window
+        with room around it so surrounding themes stay visible and selectable."""
+        pad_w, pad_h = 20, 56
+        max_pic_w = max(200, self.card_w - 48 - pad_w)
+        max_card_h = min(self.list_h - 48, round(self.list_h * 0.68))
+        max_pic_h = max(112, max_card_h - pad_h)
+        tile_w = getattr(self, "theme_tile_w", TILE)
+        want_w = max(round(self.card_w * 0.54), round(tile_w * 1.65))
+        pic_w = min(want_w, max_pic_w)
+        pic_h = round(pic_w * 9 / 16)
+        if pic_h > max_pic_h:
+            pic_h = max_pic_h
+            pic_w = round(pic_h * 16 / 9)
+        return pic_w, pic_h
+
+    def hide_theme_preview(self):
+        slot = getattr(self, "big_preview_slot", None)
+        if slot is None or not slot.get_visible():
+            self.big_preview_theme = None
+            self.big_preview_picture = None
+            self.big_preview_actions = None
+            return
+        if self.actions_menu_open() and self.menu_anchor is self.big_preview_actions:
+            self.actions_popover.popdown()
+        if self.big_preview_picture is not None:
+            self.big_preview_picture.reset_flip()
+        slot.set_visible(False)
+        child = slot.get_first_child()
+        while child is not None:
+            slot.remove(child)
+            child = slot.get_first_child()
+        self.big_preview_theme = None
+        self.big_preview_picture = None
+        self.big_preview_actions = None
+        self.big_preview_size_px = (0, 0)
+        row = self.rows.get_selected_row()
+        if (row is not None and self.window is not None and self.window.get_visible()
+                and self.stack.get_visible_child_name() == "themes"):
+            row.grab_focus()
+            pic = self._row_flip_picture(row)
+            if pic is not None:
+                pic.set_selected(True)
+
+    def refresh_theme_preview(self, theme: theme_core.ThemeInfo | None = None):
+        if not self.theme_preview_open():
+            return
+        target = theme or self.big_preview_theme
+        if target is None:
+            self.hide_theme_preview()
+            return
+        preserve = None
+        old_pic = self.big_preview_picture
+        if old_pic is not None:
+            preserve = "__preview__" if old_pic.visible_face() < 0 else old_pic.current_wallpaper_path()
+        self.show_theme_preview(target, preserve_face=preserve)
+
+    def show_theme_preview(self, theme: theme_core.ThemeInfo, preserve_face: str | None = None):
+        """Show the large interactive theme card overlay with all features enabled:
+        3D flip, < / > preview + wallpaper cycle, pin button, badges, ☰ menu,
+        Apply/Reapply and Wallpapers."""
+        if theme is None:
+            return
+        row = self.rows.get_selected_row()
+        if row is not None:
+            row_pic = self._row_flip_picture(row)
+            if row_pic is not None:
+                row_pic.reset_flip()
+        pic_w, pic_h = self.big_preview_size()
+        old_pic = self.big_preview_picture
+        same_size = (self.big_preview_theme is not None
+                     and self.big_preview_theme.slug == theme.slug
+                     and self.big_preview_size_px == (pic_w, pic_h))
+        old_front = old_pic.get_paintable() if (old_pic is not None and same_size) else None
+        old_textures = dict(old_pic._textures) if (old_pic is not None and same_size) else {}
+        if old_pic is not None:
+            old_pic.reset_flip()
+
+        is_hidden = theme.slug in self.hidden
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.add_css_class("tm-tile")
+        card.add_css_class("tm-big-preview")
+        if theme.current:
+            card.add_css_class("tm-current-row")
+        if is_hidden:
+            card.add_css_class("tm-row-hidden")
+
+        wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+                      if theme.preview else [])
+        frame = Gtk.Overlay()
+        if wallpapers:
+            active_bg = self.flip_active_bg(theme, wallpapers)
+            picture = FlipPicture(pic_w, pic_h, wallpapers=wallpapers,
+                                  active_bg=active_bg,
+                                  theme_current=theme.current,
+                                  pin_apply_theme=self.pin_apply_theme,
+                                  delay_s=self.flip_delay,
+                                  decoder=self.decoder,
+                                  radius_fn=lambda: self._tile_picture_radius(4))
+            if old_front is not None:
+                picture.set_paintable(old_front)
+            for wp_path, tex in old_textures.items():
+                if wp_path in picture._wallpapers:
+                    picture._textures[wp_path] = tex
+            frame.set_child(picture)
+            self._add_flip_overlays(frame, theme, picture)
+            if theme.preview and old_front is None:
+                self.decoder.request(picture, theme.preview, pic_w, pic_h)
+        elif theme.preview:
+            picture = FixedPicture(pic_w, pic_h)
+            frame.set_child(picture)
+            self.decoder.request(picture, theme.preview, pic_w, pic_h)
+        else:
+            picture = None
+            icon = Gtk.Image.new_from_icon_name("applications-graphics")
+            icon.set_pixel_size(64)
+            icon.set_size_request(pic_w, pic_h)
+            frame.set_child(icon)
+
+        actions = Gtk.Button(icon_name="open-menu-symbolic")
+        actions.add_css_class("flat")
+        actions.add_css_class("tm-tile-menu")
+        actions.set_halign(Gtk.Align.END)
+        actions.set_valign(Gtk.Align.START)
+        actions.set_focusable(False)
+        actions.set_tooltip_text(_("Theme actions (Menu key)"))
+        actions.connect("clicked", lambda button, target=theme: self.show_actions(button, target))
+        frame.add_overlay(actions)
+
+        badges = Gtk.Box(spacing=4)
+        badges.set_halign(Gtk.Align.START)
+        badges.set_valign(Gtk.Align.END)
+        badges.set_can_target(False)
+        if isinstance(picture, FlipPicture):
+            picture.set_badges(badges)
+        for text, kind in (("current", "current") if theme.current else (None, None),
+                           ("system", "") if theme.scope == "system" else (None, None),
+                           ("hidden", "hidden-badge") if is_hidden else (None, None)):
+            if text:
+                badge = Gtk.Box()
+                badge.add_css_class("tm-badge")
+                badge.add_css_class("tm-tile-badge")
+                if kind:
+                    badge.add_css_class(kind)
+                badge.append(Gtk.Label(label=_(text)))
+                badges.append(badge)
+        assigned_workspaces = [ws for ws, slug in self.workspace_theme_map.items() if slug == theme.slug]
+        if assigned_workspaces:
+            badge = Gtk.Box()
+            badge.add_css_class("tm-badge")
+            badge.add_css_class("tm-tile-badge")
+            badge.append(Gtk.Label(label=_("ws {0}").format(" · ".join(map(str, assigned_workspaces)))))
+            badges.append(badge)
+        frame.add_overlay(badges)
+        card.append(frame)
+
+        footer = Gtk.Box(spacing=6)
+        footer.set_size_request(pic_w, -1)
+        footer.set_margin_start(4)
+        footer.set_margin_end(2)
+        if theme.slug in self.favorites:
+            star = Gtk.Label(label="★")
+            star.add_css_class("tm-star")
+            footer.append(star)
+        name = Gtk.Label(label=theme_core.plain_text(theme.name), xalign=0)
+        name.add_css_class("tm-tile-name")
+        name.set_ellipsize(Pango.EllipsizeMode.END)
+        name.set_max_width_chars(1)
+        name.set_hexpand(True)
+        key = self.theme_keys.get(theme.slug)
+        if key:
+            name.set_tooltip_text(_("{0} applies this theme").format(shortcuts.combo_label(key)))
+        footer.append(name)
+        if key:
+            keyhint = Gtk.Label(label=shortcuts.combo_label(key).replace(" + ", "+"))
+            keyhint.add_css_class("tm-keyhint")
+            keyhint.set_ellipsize(Pango.EllipsizeMode.END)
+            keyhint.set_max_width_chars(14)
+            footer.append(keyhint)
+
+        if not theme.current:
+            apply_btn = Gtk.Button()
+            apply_btn.add_css_class("tm-paste")
+            apply_btn.add_css_class("suggested")
+            apply_btn.add_css_class("tm-big-btn")
+            apply_row = Gtk.Box(spacing=4)
+            apply_row.append(Gtk.Image.new_from_icon_name("media-playback-start-symbolic"))
+            apply_row.append(Gtk.Label(label=_("Apply theme")))
+            apply_btn.set_child(apply_row)
+            apply_btn.connect("clicked", lambda *_, target=theme: self.apply_theme_action(target))
+            footer.append(apply_btn)
+        elif self.look_pending.get(theme.slug):
+            reapply_btn = Gtk.Button()
+            reapply_btn.add_css_class("tm-paste")
+            reapply_btn.add_css_class("tm-big-btn")
+            reapply_row = Gtk.Box(spacing=4)
+            reapply_row.append(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
+            reapply_row.append(Gtk.Label(label=_("Reapply")))
+            reapply_btn.set_child(reapply_row)
+            reapply_btn.set_tooltip_text(
+                _("Not on the desktop yet: {0}").format(self.look_field_names(self.look_pending[theme.slug])))
+            reapply_btn.connect("clicked", lambda *_, target=theme: self.reapply_look(target))
+            footer.append(reapply_btn)
+
+        wp_btn = Gtk.Button(icon_name="image-x-generic-symbolic")
+        wp_btn.add_css_class("tm-paste")
+        wp_btn.add_css_class("tm-big-btn")
+        wp_btn.set_tooltip_text(_("Wallpapers"))
+        wp_btn.update_property([Gtk.AccessibleProperty.LABEL], [_("Wallpapers")])
+        wp_btn.connect("clicked", lambda *_, target=theme: self.open_wallpapers_for(target))
+        footer.append(wp_btn)
+
+        close_btn = Gtk.Button(icon_name="window-close-symbolic")
+        close_btn.add_css_class("flat")
+        close_btn.add_css_class("tm-big-close")
+        close_btn.set_tooltip_text(_("Close preview (Esc)"))
+        close_btn.update_property([Gtk.AccessibleProperty.LABEL], [_("Close preview (Esc)")])
+        close_btn.connect("clicked", lambda *_: self.hide_theme_preview())
+        footer.append(close_btn)
+        card.append(footer)
+
+        # Right-click anywhere on the big preview card opens ☰; left-clicks are left
+        # unclaimed so every Gtk.Button inside the card (<, >, pin, ☰, Apply, Wallpapers, ×) works.
+        right_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        def on_card_right_click(gesture, _n, _x, _y):
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            self.show_actions(actions, theme)
+        right_click.connect("released", on_card_right_click)
+        card.add_controller(right_click)
+
+        slot = self.big_preview_slot
+        prev_child = slot.get_first_child()
+        while prev_child is not None:
+            slot.remove(prev_child)
+            prev_child = slot.get_first_child()
+        slot.append(card)
+        slot.update_property([Gtk.AccessibleProperty.LABEL], [theme_core.plain_text(theme.name)])
+        self.big_preview_theme = theme
+        self.big_preview_picture = picture if isinstance(picture, FlipPicture) else None
+        self.big_preview_actions = actions
+        self.big_preview_size_px = (pic_w, pic_h)
+        slot.set_visible(True)
+        if isinstance(picture, FlipPicture):
+            picture.start_big_preview(preserve_face=preserve_face)
+
+    def on_theme_row_activated(self, row):
+        if row is None or not hasattr(row, "tm_theme"):
+            return
+        if not getattr(self, "big_preview_enabled", True):
+            self.open_wallpapers_for(row.tm_theme)
+            return
+        if self.theme_preview_open():
+            self.hide_theme_preview()
+            self.select_row(row)
+            return
+        self.select_row(row)
+        self.show_theme_preview(row.tm_theme)
+
+    def _point_in_big_preview(self, x: float, y: float) -> bool:
+        if not self.theme_preview_open():
+            return False
+        found, bounds = self.big_preview_slot.compute_bounds(self.themes_overlay)
+        return bool(found and bounds.contains_point(Graphene.Point().init(x, y)))
+
+    def on_themes_overlay_pressed(self, _gesture, _n, x, y):
+        self._overlay_press_outside = self.theme_preview_open() and not self._point_in_big_preview(x, y)
+
+    def on_themes_overlay_released(self, _gesture, _n, x, y):
+        if not self.theme_preview_open() or not self._overlay_press_outside:
+            return
+        self._overlay_press_outside = False
+        if self._point_in_big_preview(x, y):
+            return
+        self.hide_theme_preview()
+
     def on_list_pointer(self, x: float, y: float, moved: bool):
         last, self.pointer_at = self.pointer_at, (round(x), round(y))
-        if not moved or last is None or last == self.pointer_at or self.actions_menu_open():
+        if not moved or last is None or last == self.pointer_at or self.actions_menu_open() or self.theme_preview_open():
             return
         self.pointer_moved = True
         if self.stack.get_visible_child_name() != "themes":
@@ -5566,6 +5965,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         return sub if isinstance(sub, FlipPicture) else None
 
     def select_row(self, row):
+        if self.theme_preview_open():
+            slug = row.tm_theme.slug if (row is not None and hasattr(row, "tm_theme")) else None
+            if slug != self.big_preview_theme.slug:
+                self.hide_theme_preview()
         prev = getattr(self, "_peek_row", None)
         if prev is not None and prev is not row:
             prev_pic = self._row_flip_picture(prev)
@@ -5576,7 +5979,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.rows.select_row(row)
             row.grab_focus()
             if (self.window is not None and self.window.get_visible()
-                    and self.stack.get_visible_child_name() == "themes"):
+                    and self.stack.get_visible_child_name() == "themes"
+                    and not self.theme_preview_open()):
                 pic = self._row_flip_picture(row)
                 if pic is not None:
                     pic.set_selected(True)
@@ -6584,7 +6988,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if self.theme_sync:
                 GLib.source_remove(self.theme_sync)
             self.theme_sync = GLib.timeout_add(300, self.follow_theme_change)
-        elif "background" in names and getattr(self, "flip_3d", False):
+        elif "background" in names and (getattr(self, "flip_3d", False) or self.theme_preview_open()):
             GLib.idle_add(self.follow_background_change)
 
     def follow_background_change(self):
@@ -6597,6 +7001,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 if pic is not None:
                     pic.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
             row = row.get_next_sibling()
+        if self.theme_preview_open() and self.big_preview_theme.current and self.big_preview_picture is not None:
+            self.big_preview_picture.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
         return GLib.SOURCE_REMOVE
 
     @staticmethod
@@ -7301,6 +7707,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 self.stop_preview()
             elif self.actions_menu_open():
                 self.actions_popover.popdown()
+            elif self.theme_preview_open():
+                self.hide_theme_preview()
             elif page == "confirm":
                 self.cancel_confirm()
             elif page == "websearch":
@@ -7522,6 +7930,27 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         return widget if widget is not None and hasattr(widget, "tm_wallpaper") else None
 
     def on_list_key(self, keyval) -> bool:
+        if self.theme_preview_open():
+            if keyval == Gdk.KEY_BackSpace:
+                self.hide_theme_preview()
+                return True
+            if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left) and self.big_preview_picture is not None \
+                    and self.big_preview_picture._wallpapers:
+                self.big_preview_picture.rotate_step(-1)
+                return True
+            if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right) and self.big_preview_picture is not None \
+                    and self.big_preview_picture._wallpapers:
+                self.big_preview_picture.rotate_step(1)
+                return True
+            if keyval == Gdk.KEY_Menu and self.big_preview_actions is not None:
+                self.show_actions(self.big_preview_actions, self.big_preview_theme)
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter, Gdk.KEY_space):
+                focus = self.window.get_focus() if self.window is not None else None
+                if isinstance(focus, Gtk.Button) and focus.is_ancestor(self.big_preview_slot):
+                    return False
+                self.hide_theme_preview()
+                return True
         row = self.rows.get_selected_row()
         columns = self.theme_columns
         column = row.get_index() % columns if row is not None else 0
@@ -7541,7 +7970,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
             if row is not None:
-                self.open_wallpapers_for(row.tm_theme)
+                if getattr(self, "big_preview_enabled", True):
+                    self.show_theme_preview(row.tm_theme)
+                else:
+                    self.open_wallpapers_for(row.tm_theme)
             return True
         moves = {Gdk.KEY_Down: 1, Gdk.KEY_KP_Down: 1, Gdk.KEY_Up: -1, Gdk.KEY_KP_Up: -1,
                  Gdk.KEY_Page_Down: 4, Gdk.KEY_KP_Page_Down: 4,
@@ -7770,6 +8202,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if self.shot_dialog_open():
             self.finish_screenshot_note(True)      # a note already typed is kept (none typed, no file)
         self.ws_hover_hide()
+        self.hide_theme_preview()
         if self.settings_previous_size is not None:
             self.stack.set_visible_child_name("themes")
         self.restore_settings_size()

@@ -169,7 +169,8 @@ def store_default_settings() -> None:
     try:
         with theme_core.settings_lock(path):
             data = theme_core._load_settings(path)
-            missing: dict = {key: True for key in ("ask_ai_web", "preview_flip_3d", "preview_pin_apply_theme")
+            missing: dict = {key: True for key in ("ask_ai_web", "preview_flip_3d", "preview_pin_apply_theme",
+                                                   "preview_big_card")
                              if not isinstance(data.get(key), bool)}
             delay = data.get("preview_flip_delay")
             if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay not in FLIP_DELAY_CHOICES:
@@ -187,6 +188,10 @@ def preview_flip_enabled() -> bool:
 
 def preview_pin_apply_theme_enabled() -> bool:
     return settings().get("preview_pin_apply_theme") is not False
+
+
+def preview_big_card_enabled() -> bool:
+    return settings().get("preview_big_card") is not False
 
 
 def preview_flip_delay() -> int | float:

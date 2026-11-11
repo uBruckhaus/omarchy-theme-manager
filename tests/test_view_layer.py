@@ -891,6 +891,16 @@ class ViewLayerTest(unittest.TestCase):
         self.make_theme("user", "alpha")
         self.app.refresh_themes()
         row = self.rows_list()[0]
+        # Default (preview_big_card=True): clicking a card opens the big preview overlay on "themes".
+        self.app.rows.emit("child-activated", row)
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+        self.assertTrue(self.app.theme_preview_open())
+        self.assertEqual(self.app.big_preview_theme.slug, "alpha")
+        # When disabled in Settings: clicking opens the wallpapers page directly, same as before.
+        self.app.hide_theme_preview()
+        theme_popup.theme_auto.update_settings(preview_big_card=False)
+        self.app.refresh_themes()
+        row = self.rows_list()[0]
         self.app.rows.emit("child-activated", row)
         self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
         self.assertEqual(self.app.active_theme.slug, "alpha")
@@ -1352,6 +1362,13 @@ class ViewLayerTest(unittest.TestCase):
             self.make_theme("user", slug)
         self.app.refresh_themes()
         self.type_keys("bet")
+        self.app.on_key(None, Gdk.KEY_Return, 0, 0)
+        self.assertTrue(self.app.theme_preview_open())
+        self.assertEqual(self.app.big_preview_theme.slug, "beta")
+        # With big preview disabled, Enter opens wallpapers directly as before.
+        self.app.hide_theme_preview()
+        theme_popup.theme_auto.update_settings(preview_big_card=False)
+        self.app.refresh_themes()
         self.app.on_key(None, Gdk.KEY_Return, 0, 0)
         self.assertEqual(self.app.active_theme.slug, "beta")
 
@@ -3195,7 +3212,123 @@ class Flip3DTests(ViewLayerTest):
         self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_flip_3d") is True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), True)
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_big_card"), True)
         self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 1)
+
+    def test_big_preview_overlay_all_features_and_setting(self):
+        """Clicking or pressing Enter opens the centered big preview overlay inside the window with
+        all card features enabled (even if small-card hover flip is off); selecting another theme
+        closes the big preview; disabling the setting restores direct Wallpapers opening."""
+        Gtk, Gdk = gi.repository.Gtk, gi.repository.Gdk
+        PNG = png()
+        alpha = self.make_theme("system", "alpha", ("w1.png", "w2.png"))
+        beta = self.make_theme("user", "beta", ("b1.png", "b2.png"))
+        for slug in ("alpha", "beta"):
+            folder = (self.roots.system_themes if slug == "alpha" else self.roots.user_themes) / slug
+            (folder / "preview.png").write_bytes(PNG)
+        (self.roots.state_current / "background").unlink(missing_ok=True)
+        (self.roots.state_current / "background").symlink_to(
+            self.roots.system_themes / "alpha" / "backgrounds" / "w2.png")
+
+        # Turn off hover 3D flip on small cards: the big preview STILL has all features enabled!
+        theme_popup.theme_auto.update_settings(preview_flip_3d=False, preview_big_card=True)
+        self.app.resize_to(1100, 720)
+        self.app.refresh_themes()
+        rows_by_slug = {r.tm_theme.slug: r for r in self.rows_list()}
+        self.assertIsNone(self.app._row_flip_picture(rows_by_slug["alpha"]))
+
+        # Click alpha card -> opens big preview overlay sized ~half of window and strictly inside it.
+        self.app.rows.emit("child-activated", rows_by_slug["alpha"])
+        self.assertTrue(self.app.theme_preview_open())
+        self.assertEqual(self.app.big_preview_theme.slug, "alpha")
+        pic_w, pic_h = self.app.big_preview_size_px
+        self.assertGreater(pic_w, self.app.theme_tile_w)
+        self.assertLessEqual(pic_w + 48, self.app.card_w)
+        self.assertLessEqual(pic_h + 48, self.app.list_h)
+
+        # Resizing the window shrinks/grows the big preview so it always stays inside the window.
+        self.app.resize_to(theme_popup.CARD_WIDTH, theme_popup.LIST_HEIGHT)
+        small_w, small_h = self.app.big_preview_size_px
+        self.assertLess(small_w, pic_w)
+        self.assertLessEqual(small_w + 48, self.app.card_w)
+        self.assertLessEqual(small_h + 48, self.app.list_h)
+        self.app.resize_to(1100, 720)
+
+        # Big preview has FlipPicture, < / > arrows immediately visible, pin button, ☰ menu, Wallpapers & Close.
+        big_pic = self.app.big_preview_picture
+        self.assertIsInstance(big_pic, theme_popup.FlipPicture)
+        self.assertTrue(all(b.get_visible() for b in big_pic._nav_buttons))
+        self.assertIsNotNone(self.app.big_preview_actions)
+        big_card = self.app.big_preview_slot.get_first_child()
+        for ctrl in big_card.observe_controllers():
+            if isinstance(ctrl, Gtk.GestureClick):
+                self.assertEqual(ctrl.get_button(), Gdk.BUTTON_SECONDARY)
+        tex = Gdk.Paintable.new_empty(32, 18)
+        big_pic.set_paintable(tex)
+        for wp in big_pic._wallpapers:
+            big_pic._set_wallpaper_paintable(wp, tex)
+
+        # Clicking > even mid-peek (70 ms..1 s) immediately finishes flipping to w2.png!
+        big_pic._on_hover_peek()
+        self.assertGreater(big_pic._target, 0.0)
+        self.assertLess(big_pic._target, 1.0)
+        big_pic._nav_buttons[1].emit("clicked")
+        for _ in range(4):
+            big_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(big_pic.current_wallpaper_path().endswith("w2.png"))
+        self.assertTrue(big_pic._pin_button.get_visible())
+        self.assertTrue(big_pic._pin_button.has_css_class("pinned"))
+
+        # Clicking > again rotates to w1.png (unpinned), and clicking < rotates back to w2.png.
+        big_pic._nav_buttons[1].emit("clicked")
+        for _ in range(4):
+            big_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(big_pic.current_wallpaper_path().endswith("w1.png"))
+        self.assertFalse(big_pic._pin_button.has_css_class("pinned"))
+
+        # Clicking the × Close button on the big preview closes it cleanly; re-open and test Wallpapers button.
+        footer_btns = [w for w in self.descendants(big_card.get_last_child()) if isinstance(w, Gtk.Button)]
+        footer_btns[-1].emit("clicked")   # × Close button
+        self.assertFalse(self.app.theme_preview_open())
+        self.app.rows.emit("child-activated", {r.tm_theme.slug: r for r in self.rows_list()}["alpha"])
+        self.assertTrue(self.app.theme_preview_open())
+
+        # Clicking another theme card around the big preview selects that theme AND hides the big preview.
+        rows_by_slug = {r.tm_theme.slug: r for r in self.rows_list()}
+        self.app.rows.emit("child-activated", rows_by_slug["beta"])
+        self.assertFalse(self.app.theme_preview_open())
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "beta")
+
+        # Pressing Enter on beta opens beta's big preview; pressing Up/Home selects alpha and hides it.
+        self.app.on_key(None, Gdk.KEY_Return, 0, 0)
+        self.assertTrue(self.app.theme_preview_open())
+        self.assertEqual(self.app.big_preview_theme.slug, "beta")
+        self.app.on_key(None, Gdk.KEY_Home, 0, 0)
+        self.assertFalse(self.app.theme_preview_open())
+        self.assertEqual(self.app.rows.get_selected_row().tm_theme.slug, "alpha")
+
+        # Pressing Enter opens it again; Escape closes the big preview (leaving the popup on "themes").
+        self.app.on_key(None, Gdk.KEY_Return, 0, 0)
+        self.assertTrue(self.app.theme_preview_open())
+        self.app.on_key(None, Gdk.KEY_Escape, 0, 0)
+        self.assertFalse(self.app.theme_preview_open())
+        self.assertEqual(self.app.stack.get_visible_child_name(), "themes")
+
+        # Turning off "Big preview on click" in Settings restores the previous click/Enter -> Wallpapers behavior.
+        self.app.open_settings()
+        switches = [w for w in self.descendants(self.app.settings_sections["themes"])
+                    if isinstance(w, Gtk.Switch)]
+        big_switch = switches[2]
+        self.assertTrue(big_switch.get_active())
+        big_switch.set_active(False)
+        self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_big_card") is False
+                        and self.app.big_preview_enabled is False)
+        self.app.show_themes()
+        rows_by_slug = {r.tm_theme.slug: r for r in self.rows_list()}
+        self.app.rows.emit("child-activated", rows_by_slug["beta"])
+        self.assertFalse(self.app.theme_preview_open())
+        self.assertEqual(self.app.stack.get_visible_child_name(), "wallpapers")
+        self.assertEqual(self.app.active_theme.slug, "beta")
 
 
 if __name__ == "__main__":
