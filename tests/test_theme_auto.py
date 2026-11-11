@@ -560,6 +560,18 @@ class CommandLineTests(AutoTestCase):
         self.assertEqual(theme_auto.remembered_omarchy_theme_background("alpha"), "second.png")
         self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["alpha"])],
                          ["second.png", "first.png"])
+        # The state file is read bounded, never through a link or a FIFO (it runs while a card is built).
+        state = self.roots.state_current.parent / "theme-backgrounds" / "alpha"
+        state.unlink()
+        os.mkfifo(state)
+        self.assertIsNone(theme_auto.remembered_omarchy_theme_background("alpha"))
+        state.unlink()
+        state.write_text("x" * 5000)
+        self.assertIsNone(theme_auto.remembered_omarchy_theme_background("alpha"))
+        state.unlink()
+        (state.parent / "elsewhere").write_text("second.png\n")
+        state.symlink_to(state.parent / "elsewhere")
+        self.assertIsNone(theme_auto.remembered_omarchy_theme_background("alpha"))
         theme_core.save_hidden_wallpapers({"alpha": {"first.png"}})
         self.assertEqual(theme_auto.flip_wallpaper(themes["alpha"]).name, "second.png")
         self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["alpha"])],

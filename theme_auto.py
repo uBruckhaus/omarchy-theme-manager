@@ -534,12 +534,23 @@ def remembered_omarchy_theme_background(slug: str) -> str | None:
     except ValueError:
         return None
     state_file_path = theme_core.default_roots().state_current.parent / "theme-backgrounds" / slug
+    # Read on GTK's main loop while a card is built: bounded, never through a link, never waiting on
+    # a FIFO, and checked on the opened file itself.
     try:
-        if state_file_path.is_symlink() or not state_file_path.is_file():
-            return None
-        raw = state_file_path.read_text(encoding="utf-8", errors="replace").strip()
+        fd = os.open(state_file_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
         return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, 4097)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > 4096:
+        return None
+    raw = raw.decode("utf-8", "replace").strip()
     if not raw:
         return None
     name = Path(raw.splitlines()[0]).name

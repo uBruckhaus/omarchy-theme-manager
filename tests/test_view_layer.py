@@ -2878,6 +2878,41 @@ class StaleWebAskTests(unittest.TestCase):
                                                token=3, slug="a")
         self.assertEqual(app.web_pics, [])
 
+class FlipTextureTests(unittest.TestCase):
+    """Codex review of agy's 3D flip: textures kept only around the shown face; a wallpaper that
+    cannot be decoded never leaves the flip waiting."""
+
+    def test_textures_kept_only_around_the_shown_face(self):
+        paths = [f"/w{i}.png" for i in range(10)]
+        pic = theme_popup.FlipPicture(16, 9, wallpapers=paths)
+        tex = theme_popup.Gdk.Paintable.new_empty(16, 9)
+        pic._from_face, pic._to_face = 4, 5
+        for path in paths:
+            pic._set_wallpaper_paintable(path, tex)
+        self.assertEqual(set(pic._textures), {paths[i] for i in (3, 4, 5, 6)})
+        self.assertNotIn(paths[0], pic._requested)
+
+    def test_a_failed_decode_fills_the_face(self):
+        paths = ["/missing.png"]
+        pic = theme_popup.FlipPicture(16, 9, wallpapers=paths)
+        pic._from_face, pic._to_face = -1, 0
+        pic._wallpaper_failed(paths[0])
+        self.assertIsNotNone(pic._face_paintable(0))
+
+    def test_the_decoder_reports_a_failure(self):
+        called = []
+        decoder = theme_popup.ImageDecoder(1)
+        decoder.request(None, "/nonexistent/picture.png", 16, 9, setter=lambda tex: called.append("ok"),
+                        failed=lambda: called.append("failed"))
+        context = theme_popup.GLib.MainContext.default()
+        import time
+        deadline = time.monotonic() + 5
+        while not called and time.monotonic() < deadline:
+            context.iteration(False)
+            time.sleep(0.01)
+        self.assertEqual(called, ["failed"])
+
+
 class Flip3DTests(ViewLayerTest):
     def test_theme_tile_flips_in_3d_on_hover_and_respects_setting(self):
         t_with = self.make_theme("user", "alpha", wallpapers=("w1.png", "w2.png", "w3.png")).path
