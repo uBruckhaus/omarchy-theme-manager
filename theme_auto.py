@@ -165,7 +165,7 @@ def store_default_settings() -> None:
     them: Search the web for wallpapers and 3D wallpaper flip (only missing
     values; yours stay)."""
     current = settings()
-    missing: dict = {key: True for key in ("ask_ai_web", "preview_flip_3d")
+    missing: dict = {key: True for key in ("ask_ai_web", "preview_flip_3d", "preview_pin_apply_theme")
                      if not isinstance(current.get(key), bool)}
     delay = current.get("preview_flip_delay")
     if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay not in FLIP_DELAY_CHOICES:
@@ -179,6 +179,10 @@ def store_default_settings() -> None:
 
 def preview_flip_enabled() -> bool:
     return settings().get("preview_flip_3d") is not False
+
+
+def preview_pin_apply_theme_enabled() -> bool:
+    return settings().get("preview_pin_apply_theme") is not False
 
 
 def preview_flip_delay() -> int | float:
@@ -490,7 +494,8 @@ def visible_wallpapers(theme) -> list[Path]:
 def flip_wallpapers(theme, hidden: dict[str, set[str]] | None = None,
                     current_bg: Path | None = None) -> list[Path]:
     """The visible wallpapers cycled on a theme card's 3D flip: rotated so the
-    active desktop wallpaper comes first when `theme` is current."""
+    active desktop wallpaper comes first when `theme` is current, or the
+    theme's remembered wallpaper comes first otherwise."""
     visible = [w.path for w in theme_core.list_backgrounds(None, theme, hidden=hidden) if not w.hidden]
     if not visible:
         return []
@@ -498,6 +503,12 @@ def flip_wallpapers(theme, hidden: dict[str, set[str]] | None = None,
         bg = current_background() if current_bg is None else current_bg
         if bg is not None:
             index = next((i for i, p in enumerate(visible) if p == bg or _same_wallpaper(p, bg)), -1)
+            if index > 0:
+                visible = visible[index:] + visible[:index]
+    else:
+        remembered = remembered_omarchy_theme_background(theme.slug)
+        if remembered:
+            index = next((i for i, p in enumerate(visible) if p.name == remembered), -1)
             if index > 0:
                 visible = visible[index:] + visible[:index]
     if len(visible) == 1 and getattr(theme, "preview", None):
@@ -516,14 +527,33 @@ def flip_wallpaper(theme, hidden: dict[str, set[str]] | None = None,
     return paths[0] if paths else None
 
 
-def remember_omarchy_theme_background(slug: str, path: Path) -> None:
+def remembered_omarchy_theme_background(slug: str) -> str | None:
+    """File name stored in Omarchy's per-theme background state for `slug`, if any."""
+    try:
+        slug = theme_core._validate_slug(slug)
+    except ValueError:
+        return None
+    state_file_path = theme_core.default_roots().state_current.parent / "theme-backgrounds" / slug
+    try:
+        if state_file_path.is_symlink() or not state_file_path.is_file():
+            return None
+        raw = state_file_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    name = Path(raw.splitlines()[0]).name
+    return name if theme_core._sanitize_name(name) == name else None
+
+
+def remember_omarchy_theme_background(slug: str, path: Path) -> bool:
     """Record `path` in Omarchy's per-theme background state so `omarchy theme set`
     switches straight to the pinned wallpaper without flashing another first."""
     slug = theme_core._validate_slug(slug)
     roots = theme_core.default_roots()
     state_dir = roots.state_current.parent / "theme-backgrounds"
     if state_dir.is_symlink():
-        return
+        return False
     try:
         user_bg = (roots.user_backgrounds / slug).resolve()
         is_user_bg = path.resolve().is_relative_to(user_bg)
@@ -533,8 +563,9 @@ def remember_omarchy_theme_background(slug: str, path: Path) -> None:
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
         theme_core._atomic_write(state_dir / slug, f"{recorded}\n", mode=0o600)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def pin_current_wallpaper(slug: str, path: Path) -> bool:

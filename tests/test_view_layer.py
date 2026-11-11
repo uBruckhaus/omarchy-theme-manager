@@ -3049,17 +3049,44 @@ class Flip3DTests(ViewLayerTest):
         pic_zero.set_selected(False)
         self.assertTrue(all(not b.get_visible() for b in pic_zero._nav_buttons))
 
-        # Turning off the setting disables 3D flip; Reset to defaults restores On and 1 s.
+        # Turning off "Apply theme when pinning wallpaper" only saves wallpaper for that theme without applying theme:
+        (self.roots.user_themes / "beta" / "backgrounds" / "b2.png").write_bytes(PNG)
         switches = [w for w in self.descendants(self.app.settings_sections["themes"])
                     if isinstance(w, Gtk.Switch)]
-        flip_switch = switches[0]  # first switch in Themes section
+        flip_switch, pin_apply_switch = switches[0], switches[1]
         self.assertTrue(flip_switch.get_active())
+        self.assertTrue(pin_apply_switch.get_active())
+        pin_apply_switch.set_active(False)
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), False)
+        beta_no_apply = {r.tm_theme.slug: r for r in self.rows_list()}["beta"].get_child().get_first_child().get_first_child()
+        beta_no_apply.set_paintable(tex)
+        for wp in beta_no_apply._wallpapers:
+            beta_no_apply._set_wallpaper_paintable(wp, tex)
+        beta_no_apply.set_selected(True)  # delay is still 0 s from above
+        beta_no_apply.rotate_step(1)      # -> b1.png (already current for beta -> pinned)
+        for _step in range(4):
+            beta_no_apply._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(beta_no_apply._pin_button.has_css_class("pinned"))
+        beta_no_apply.rotate_step(1)      # -> b2.png (unpinned)
+        for _step in range(4):
+            beta_no_apply._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertFalse(beta_no_apply._pin_button.has_css_class("pinned"))
+        applied_no_switch = []
+        with patch.object(theme_popup.theme_auto, "apply_theme",
+                          side_effect=lambda slug: (applied_no_switch.append(slug), True)[-1]):
+            beta_no_apply._pin_button.emit("clicked")
+        self.assertEqual(applied_no_switch, [])
+        self.assertEqual(theme_popup.theme_auto.remembered_omarchy_theme_background("beta"), "b2.png")
+        self.assertTrue(beta_no_apply._pin_button.has_css_class("pinned"))
+
+        # Turning off 3D flip disables it; Reset to defaults restores On, 1 s, and pin-apply On.
         flip_switch.set_active(False)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), False)
         pic_off = {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
         self.assertNotIsInstance(pic_off, theme_popup.FlipPicture)
         self.app.reset_settings()
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), True)
         self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 1)
 
 

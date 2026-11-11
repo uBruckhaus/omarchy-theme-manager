@@ -175,13 +175,16 @@ class FlipPicture(FixedPicture):
                  back_path: str | Path | None = None,
                  active_bg: str | Path | None = None,
                  theme_current: bool = False,
+                 pin_apply_theme: bool = True,
                  delay_s: float = theme_auto.DEFAULT_FLIP_DELAY,
                  decoder=None, radius_fn=None):
         super().__init__(width, height)
         paths = [str(p) for p in wallpapers] if wallpapers else ([str(back_path)] if back_path else [])
         self._wallpapers = paths
         self._theme_current = bool(theme_current)
-        self._active_name = Path(active_bg).name if (active_bg and theme_current) else None
+        self._pin_apply_theme = bool(pin_apply_theme)
+        track_pinned = self._theme_current or not self._pin_apply_theme
+        self._active_name = Path(active_bg).name if (active_bg and track_pinned) else None
         self._delay_ms = max(0, round(float(delay_s) * 1000))
         self._promote_name: str | None = None
         self._decoder = decoder
@@ -295,9 +298,13 @@ class FlipPicture(FixedPicture):
             self._wallpapers = self._wallpapers[idx:] + self._wallpapers[:idx]
 
     def set_active_wallpaper(self, bg: str | Path | None, theme_current: bool = True,
+                             pin_apply_theme: bool | None = None,
                              promote_on_reset: bool = False):
         self._theme_current = bool(theme_current)
-        self._active_name = Path(bg).name if (bg and theme_current) else None
+        if pin_apply_theme is not None:
+            self._pin_apply_theme = bool(pin_apply_theme)
+        track_pinned = self._theme_current or not self._pin_apply_theme
+        self._active_name = Path(bg).name if (bg and track_pinned) else None
         if promote_on_reset and self._active_name:
             if self._from_face == -1 and self._progress <= 0.0:
                 self._promote(self._active_name)
@@ -588,15 +595,18 @@ class FlipPicture(FixedPicture):
         pin.set_opacity(face_opacity)
         wp_name = Path(self._wallpapers[face]).name
         pinned = bool(self._active_name and wp_name == self._active_name)
-        key = (face, pinned, self._theme_current, len(self._wallpapers))
+        key = (face, pinned, self._theme_current, self._pin_apply_theme, len(self._wallpapers))
         if key != self._shown_pin_state:
             self._shown_pin_state = key
             (pin.add_css_class if pinned else pin.remove_css_class)("pinned")
             total = len(self._wallpapers)
             suffix = f" ({face + 1}/{total})" if total > 1 else ""
-            base = (_("Current background") if pinned else
-                    _("Set as background") if self._theme_current else
-                    _("Apply theme with this wallpaper"))
+            if self._theme_current:
+                base = _("Current background") if pinned else _("Set as background")
+            elif self._pin_apply_theme:
+                base = _("Apply theme with this wallpaper")
+            else:
+                base = _("Current wallpaper for this theme") if pinned else _("Set as wallpaper for this theme")
             pin.set_tooltip_text(base + suffix)
 
     def _animate_to(self, target: float):
@@ -910,6 +920,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.theme_keys = {}
         self.flip_3d = True
         self.flip_delay = theme_auto.DEFAULT_FLIP_DELAY
+        self.pin_apply_theme = True
         self.hidden_wallpapers = {}
         self.current_bg = None
         self.pointer_moved = False
@@ -2595,6 +2606,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           _("Seconds before a selected theme card starts rotating. 0 keeps the preview and shows left/right arrows immediately."),
                           self.dropdown(delay_labels, delay_choices.index(theme_auto.preview_flip_delay()),
                                         lambda i: self.save_setting(preview_flip_delay=delay_choices[i])))
+        self.setting_line(box, _("Apply theme when pinning wallpaper"),
+                          _("On: pinning a wallpaper on another theme switches to that theme immediately. Off: only saves it as that theme’s current wallpaper."),
+                          self.switch(theme_auto.preview_pin_apply_theme_enabled(),   # on by default
+                                      lambda on: self.save_setting(preview_pin_apply_theme=on)))
         self.setting_line(box, _("Also hide in Omarchy's pickers"),
                           _("Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
                           "omarchy-menu.jsonc and a theme-set hook; off removes them again."),
@@ -3483,7 +3498,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             theme_auto.update_settings(**values)
         except OSError as error:
             theme_core.notify(_("Could not save the setting"), str(error))
-        if "sort" in values or "preview_flip_3d" in values or "preview_flip_delay" in values:
+        if ("sort" in values or "preview_flip_3d" in values
+                or "preview_flip_delay" in values or "preview_pin_apply_theme" in values):
             self.refresh_themes()
 
     def corner_labels(self) -> list[str]:
@@ -3527,6 +3543,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           screenshot_key=True, screenshot_folder=None,
                           ask_ai_web=True, preview_flip_3d=True,
                           preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
+                          preview_pin_apply_theme=True,
                           header_order=list(header_order.DEFAULT))
         self.header_order = list(header_order.DEFAULT)
         self.rebuild_header_group()
@@ -4627,6 +4644,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.workspace_theme_map = theme_auto.load_workspace_themes()
         self.flip_3d = theme_auto.preview_flip_enabled()
         self.flip_delay = theme_auto.preview_flip_delay() if self.flip_3d else theme_auto.DEFAULT_FLIP_DELAY
+        self.pin_apply_theme = theme_auto.preview_pin_apply_theme_enabled()
         self.hidden_wallpapers = theme_core.load_hidden_wallpapers() if self.flip_3d else {}
         self.current_bg = theme_auto.current_background() if self.flip_3d else None
         ordered = theme_auto.order_themes(self.theme_list, self.favorites, theme_auto.load_recent(),
@@ -4856,6 +4874,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 picture.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
             self._async(lambda: theme_auto.pin_current_wallpaper(theme.slug, path), done)
             return
+        if not self.pin_apply_theme:
+            if not theme_auto.remember_omarchy_theme_background(theme.slug, path):
+                theme_core.notify(_("Could not set background"), path.name)
+                return
+            picture.set_active_wallpaper(path, theme_current=False, pin_apply_theme=False, promote_on_reset=True)
+            return
         if theme.slug in self.hidden:
             self.hidden.discard(theme.slug)
             try:
@@ -4912,9 +4936,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
                       if self.flip_3d and theme.preview else [])
         if wallpapers:
+            active_bg = self.current_bg if theme.current else (wallpapers[0] if not self.pin_apply_theme else None)
             picture = FlipPicture(self.theme_tile_w, tile_h, wallpapers=wallpapers,
-                                  active_bg=self.current_bg if theme.current else None,
+                                  active_bg=active_bg,
                                   theme_current=theme.current,
+                                  pin_apply_theme=self.pin_apply_theme,
                                   delay_s=self.flip_delay,
                                   decoder=self.decoder,
                                   radius_fn=lambda: self._tile_picture_radius(4))
@@ -5005,9 +5031,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
                           if self.flip_3d else [])
             if wallpapers:
+                active_bg = self.current_bg if theme.current else (wallpapers[0] if not self.pin_apply_theme else None)
                 picture = FlipPicture(width, height, wallpapers=wallpapers,
-                                      active_bg=self.current_bg if theme.current else None,
+                                      active_bg=active_bg,
                                       theme_current=theme.current,
+                                      pin_apply_theme=self.pin_apply_theme,
                                       delay_s=self.flip_delay,
                                       decoder=self.decoder,
                                       radius_fn=lambda: self._tile_picture_radius(6))

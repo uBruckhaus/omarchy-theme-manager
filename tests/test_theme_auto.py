@@ -521,15 +521,19 @@ class CommandLineTests(AutoTestCase):
 
     def test_flip_wallpaper_uses_active_background_when_current_else_first_visible(self):
         self.assertTrue(theme_auto.preview_flip_enabled())
+        self.assertTrue(theme_auto.preview_pin_apply_theme_enabled())
         self.assertEqual(theme_auto.preview_flip_delay(), 1)
         theme_auto.store_default_settings()
         self.assertIs(theme_auto.settings().get("preview_flip_3d"), True)
+        self.assertIs(theme_auto.settings().get("preview_pin_apply_theme"), True)
         self.assertEqual(theme_auto.settings().get("preview_flip_delay"), 1)
-        theme_auto.update_settings(preview_flip_3d=False, preview_flip_delay=0)
+        theme_auto.update_settings(preview_flip_3d=False, preview_pin_apply_theme=False, preview_flip_delay=0)
         self.assertFalse(theme_auto.preview_flip_enabled())
+        self.assertFalse(theme_auto.preview_pin_apply_theme_enabled())
         self.assertEqual(theme_auto.preview_flip_delay(), 0)
         theme_auto.store_default_settings()
         self.assertIs(theme_auto.settings().get("preview_flip_3d"), False)  # explicit off stays off
+        self.assertIs(theme_auto.settings().get("preview_pin_apply_theme"), False)  # explicit off stays off
         self.assertEqual(theme_auto.settings().get("preview_flip_delay"), 0)  # explicit 0 stays 0
 
         bg_nord = self.make_theme("nord", ("a.png", "b.png", "c.png"), current=True)
@@ -551,6 +555,11 @@ class CommandLineTests(AutoTestCase):
         self.assertEqual(theme_auto.flip_wallpaper(themes["alpha"]).name, "first.png")
         self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["alpha"])],
                          ["first.png", "second.png"])
+        self.assertTrue(theme_auto.remember_omarchy_theme_background(
+            "alpha", self.roots.user_themes / "alpha" / "backgrounds" / "second.png"))
+        self.assertEqual(theme_auto.remembered_omarchy_theme_background("alpha"), "second.png")
+        self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["alpha"])],
+                         ["second.png", "first.png"])
         theme_core.save_hidden_wallpapers({"alpha": {"first.png"}})
         self.assertEqual(theme_auto.flip_wallpaper(themes["alpha"]).name, "second.png")
         self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["alpha"])],

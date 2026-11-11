@@ -596,3 +596,39 @@ EXTRA['{0} s'] = {
     'nl': '{0} s',
     'pl': '{0} s',
 }
+EXTRA['Apply theme when pinning wallpaper'] = {
+    'de': 'Theme beim Anpinnen eines Hintergrunds anwenden',
+    'fr': 'Appliquer le thème lors de l’épinglage d’un fond d’écran',
+    'es': 'Aplicar el tema al fijar un fondo',
+    'it': 'Applica il tema fissando uno sfondo',
+    'pt': 'Aplicar o tema ao fixar um papel de parede',
+    'nl': 'Thema toepassen bij vastzetten van achtergrond',
+    'pl': 'Zastosuj motyw przy przypinaniu tapety',
+}
+EXTRA['On: pinning a wallpaper on another theme switches to that theme immediately. Off: only saves it as that theme’s current wallpaper.'] = {
+    'de': 'Ein: Das Anpinnen eines Hintergrunds bei einem anderen Theme wechselt sofort zu diesem Theme. Aus: Speichert ihn nur als aktuellen Hintergrund dieses Themes.',
+    'fr': 'Activé : épingler un fond d’écran sur un autre thème bascule aussitôt vers ce thème. Désactivé : l’enregistre seulement comme fond actuel de ce thème.',
+    'es': 'Activado: fijar un fondo en otro tema cambia enseguida a ese tema. Desactivado: solo lo guarda como fondo actual de ese tema.',
+    'it': 'Attivo: fissare uno sfondo su un altro tema passa subito a quel tema. Disattivo: lo salva solo come sfondo attuale di quel tema.',
+    'pt': 'Ligado: fixar um papel de parede noutro tema muda logo para esse tema. Desligado: guarda-o apenas como papel de parede atual desse tema.',
+    'nl': 'Aan: een achtergrond vastzetten op een ander thema schakelt direct naar dat thema. Uit: slaat die alleen op als huidige achtergrond van dat thema.',
+    'pl': 'Włączone: przypięcie tapety w innym motywie od razu przełącza na ten motyw. Wyłączone: zapisuje ją tylko jako bieżącą tapetę tego motywu.',
+}
+EXTRA['Current wallpaper for this theme'] = {
+    'de': 'Aktueller Hintergrund dieses Themes',
+    'fr': 'Fond d’écran actuel de ce thème',
+    'es': 'Fondo actual de este tema',
+    'it': 'Sfondo attuale di questo tema',
+    'pt': 'Papel de parede atual deste tema',
+    'nl': 'Huidige achtergrond van dit thema',
+    'pl': 'Bieżąca tapeta tego motywu',
+}
+EXTRA['Set as wallpaper for this theme'] = {
+    'de': 'Als Hintergrund dieses Themes festlegen',
+    'fr': 'Définir comme fond d’écran de ce thème',
+    'es': 'Establecer como fondo de este tema',
+    'it': 'Imposta come sfondo di questo tema',
+    'pt': 'Definir como papel de parede deste tema',
+    'nl': 'Instellen als achtergrond van dit thema',
+    'pl': 'Ustaw jako tapetę tego motywu',
+}
