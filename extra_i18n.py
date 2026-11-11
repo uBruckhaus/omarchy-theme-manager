@@ -542,3 +542,21 @@ EXTRA["Hovering a theme card flips its preview in 3D to show the theme's wallpap
     'nl': 'Wanneer je een themakaart aanwijst, draait het voorbeeld in 3D om de achtergrond van het thema te tonen.',
     'pl': 'Po najechaniu na kartę motywu jej podgląd obraca się w 3D, pokazując tapetę motywu.',
 }
+EXTRA['Current background'] = {
+    'de': 'Aktueller Hintergrund',
+    'fr': "Fond d'écran actuel",
+    'es': 'Fondo actual',
+    'it': 'Sfondo attuale',
+    'pt': 'Papel de parede atual',
+    'nl': 'Huidige achtergrond',
+    'pl': 'Bieżące tło',
+}
+EXTRA['Apply theme with this wallpaper'] = {
+    'de': 'Theme mit diesem Hintergrund anwenden',
+    'fr': "Appliquer le thème avec ce fond d'écran",
+    'es': 'Aplicar tema con este fondo',
+    'it': 'Applica tema con questo sfondo',
+    'pt': 'Aplicar tema com este papel de parede',
+    'nl': 'Thema met deze achtergrond toepassen',
+    'pl': 'Zastosuj motyw z tą tapetą',
+}

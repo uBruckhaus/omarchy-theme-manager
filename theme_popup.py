@@ -97,6 +97,7 @@ SYNC_SCRIPT = Path(__file__).resolve().parent / "switcher_sync.py"
 PREVIEW_WORKERS = 4    # parallel preview downloads on the import page
 FLIP_DELAY_MS = 220    # hover pause before a theme card flips in 3D to its wallpaper
 FLIP_DURATION = 0.42   # seconds for a 180° 3D card flip
+FLIP_STEP_DURATION = 0.30  # seconds for rotating between a theme's wallpapers on mouse move
 CURSOR_SLACK = 24  # px the pointer may move after opening before the keyboard is released
 MAX_DROPS = 10  # one drop gesture adds at most this many wallpapers
 MAX_DROP_LIST_BYTES = 1024 * 1024  # a dropped uri-list or text, as for the clipboard
@@ -165,81 +166,285 @@ class FixedPicture(Gtk.Picture):
 
 class FlipPicture(FixedPicture):
     """A theme preview that rotates 180° in 3D on hover to reveal the theme's
-    wallpaper on its back face (for themes whose preview is covered by windows)."""
+    wallpapers, rotating forward and backward through them on mouse moves."""
 
-    def __init__(self, width: int, height: int, back_path: str | Path | None = None,
+    def __init__(self, width: int, height: int, wallpapers=(),
+                 back_path: str | Path | None = None,
+                 active_bg: str | Path | None = None,
+                 theme_current: bool = False,
                  decoder=None, radius_fn=None):
         super().__init__(width, height)
-        self._back_path = str(back_path) if back_path else None
+        paths = [str(p) for p in wallpapers] if wallpapers else ([str(back_path)] if back_path else [])
+        self._wallpapers = paths
+        self._theme_current = bool(theme_current)
+        self._active_name = Path(active_bg).name if (active_bg and theme_current) else None
+        self._promote_name: str | None = None
         self._decoder = decoder
         self._radius_fn = radius_fn
-        self._badges = None
-        self._back_paintable = None
-        self._back_requested = False
+        self._badges: Gtk.Widget | None = None
+        self._pin_button: Gtk.Button | None = None
+        self._shown_pin_state = None
+        self._textures: dict[str, Gdk.Paintable] = {}
+        self._requested: set[str] = set()
         self._hovered = False
+        self._from_face = -1   # -1 = front preview, 0..N-1 = wallpaper index
+        self._to_face = 0
+        self._direction = 1.0
         self._target = 0.0
         self._progress = 0.0
+        self._queued: tuple[int, float] | None = None
         self._delay_id = 0
         self._tick_id = 0
         self._last_frame_us = 0
         self.connect("unmap", lambda *_args: self.reset_flip())
 
+    @property
+    def _back_path(self) -> str | None:
+        if not self._wallpapers:
+            return None
+        face = self.visible_face()
+        return self._wallpapers[face if 0 <= face < len(self._wallpapers) else 0]
+
     def set_badges(self, badges: Gtk.Widget | None):
         self._badges = badges
 
+    def set_pin_button(self, button: Gtk.Button | None):
+        self._pin_button = button
+        self._shown_pin_state = None
+        self._sync_overlays()
+
     def set_back_paintable(self, paintable):
-        self._back_paintable = paintable
-        if self._hovered and self._delay_id == 0 and self._target == 1.0:
+        if self._wallpapers:
+            self._set_wallpaper_paintable(self._wallpapers[0], paintable)
+
+    def _set_wallpaper_paintable(self, path: str, paintable):
+        self._textures[path] = paintable
+        if (self._hovered and self._delay_id == 0 and self._target == 1.0
+                and 0 <= self._to_face < len(self._wallpapers)
+                and self._wallpapers[self._to_face] == path):
             self._animate_to(1.0)
         self.queue_draw()
 
+    def _face_paintable(self, face: int):
+        if face == -1:
+            return self.get_paintable()
+        if 0 <= face < len(self._wallpapers):
+            return self._textures.get(self._wallpapers[face])
+        return None
+
+    def _request_index(self, index: int):
+        if self._decoder is None or not (0 <= index < len(self._wallpapers)):
+            return
+        path = self._wallpapers[index]
+        if path in self._requested:
+            return
+        self._requested.add(path)
+        self._decoder.request(self, path, self._size[0], self._size[1],
+                              setter=lambda tex, p=path: self._set_wallpaper_paintable(p, tex))
+
+    def _prefetch_around(self, index: int):
+        n = len(self._wallpapers)
+        if n == 0:
+            return
+        self._request_index(index % n)
+        if n > 1:
+            self._request_index((index + 1) % n)
+            self._request_index((index - 1) % n)
+
     def request_back(self):
-        if self._back_path and not self._back_requested and self._decoder is not None:
-            self._back_requested = True
-            self._decoder.request(self, self._back_path, self._size[0], self._size[1],
-                                  setter=self.set_back_paintable)
+        self._prefetch_around(0)
+
+    def visible_face(self) -> int:
+        eased = 0.5 - 0.5 * math.cos(math.pi * self._progress)
+        return self._from_face if eased <= 0.5 else self._to_face
+
+    def is_showing_wallpaper(self) -> bool:
+        return self.visible_face() >= 0
+
+    def can_scrub(self) -> bool:
+        return len(self._wallpapers) > 1 and self._hovered and self.is_showing_wallpaper()
+
+    def current_wallpaper_path(self) -> str | None:
+        face = self.visible_face()
+        return self._wallpapers[face] if 0 <= face < len(self._wallpapers) else None
+
+    def is_current_wallpaper_pinned(self) -> bool:
+        path = self.current_wallpaper_path()
+        return bool(path and self._active_name and Path(path).name == self._active_name)
+
+    def _promote(self, name: str):
+        idx = next((i for i, p in enumerate(self._wallpapers) if Path(p).name == name), -1)
+        if idx > 0:
+            self._wallpapers = self._wallpapers[idx:] + self._wallpapers[:idx]
+
+    def set_active_wallpaper(self, bg: str | Path | None, theme_current: bool = True,
+                             promote_on_reset: bool = False):
+        self._theme_current = bool(theme_current)
+        self._active_name = Path(bg).name if (bg and theme_current) else None
+        if promote_on_reset and self._active_name:
+            if self._from_face == -1 and self._progress <= 0.0:
+                self._promote(self._active_name)
+            else:
+                self._promote_name = self._active_name
+        self._shown_pin_state = None
+        self._sync_overlays()
+        self.queue_draw()
 
     def on_hover_enter(self):
-        if not self._back_path or self._hovered:
+        if not self._wallpapers or self._hovered:
             return
         self._hovered = True
         self.request_back()
-        if self._progress > 0.0:
+        if self._from_face == -1 and self._progress <= 0.0:
+            if self._delay_id == 0:
+                self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+        elif self._from_face == -1 and self._to_face >= 0:
+            self._queued = None
             self._animate_to(1.0)
-        elif self._delay_id == 0:
-            self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+        elif self._to_face == -1:
+            if self._progress < 0.5:
+                self._queued = None
+                self._animate_to(0.0)
+            else:
+                self._queued = (0, 1.0)
+                self._animate_to(1.0)
 
     def _on_delay_done(self):
         self._delay_id = 0
         if self._hovered:
+            self._from_face = -1
+            self._to_face = 0
+            self._direction = 1.0
             self._target = 1.0
-            if self._back_paintable is not None:
+            if self._face_paintable(0) is not None:
                 self._animate_to(1.0)
         return GLib.SOURCE_REMOVE
+
+    def rotate_step(self, step_dir: int):
+        n = len(self._wallpapers)
+        if n <= 1 or not self._hovered or not self.is_showing_wallpaper():
+            return
+        sign = 1.0 if step_dir >= 0 else -1.0
+        delta = 1 if step_dir >= 0 else -1
+        if self._progress >= 1.0 and self._to_face >= 0:
+            cur = self._to_face
+            nxt = (cur + delta) % n
+            self._prefetch_around(nxt)
+            self._from_face = cur
+            self._to_face = nxt
+            self._direction = sign
+            self._progress = 0.0
+            self._animate_to(1.0)
+            return
+        if self._progress <= 0.0 and self._from_face >= 0:
+            cur = self._from_face
+            nxt = (cur + delta) % n
+            self._prefetch_around(nxt)
+            self._from_face = cur
+            self._to_face = nxt
+            self._direction = sign
+            self._progress = 0.0
+            self._animate_to(1.0)
+            return
+        if (self._from_face >= 0 and self._to_face >= 0 and self._progress < 0.5
+                and (sign > 0) != (self._direction > 0)):
+            self._queued = None
+            self._animate_to(0.0 if self._target == 1.0 else 1.0)
+            return
+        end_face = self._to_face if self._target == 1.0 else self._from_face
+        if end_face >= 0:
+            nxt = (end_face + delta) % n
+            self._prefetch_around(nxt)
+            self._queued = (nxt, sign)
+            self._animate_to(self._target)
 
     def on_hover_leave(self):
         self._hovered = False
         if self._delay_id:
             GLib.source_remove(self._delay_id)
             self._delay_id = 0
-        self._target = 0.0
-        if self._progress > 0.0:
+        self._queued = None
+        if self._from_face == -1 and self._progress <= 0.0:
+            self._target = 0.0
+            return
+        if self._from_face == -1:
             self._animate_to(0.0)
+        elif self._to_face == -1:
+            self._animate_to(1.0)
+        elif self._progress >= 1.0:
+            self._from_face = self._to_face
+            self._to_face = -1
+            self._direction = -1.0
+            self._progress = 0.0
+            self._animate_to(1.0)
+        elif self._progress <= 0.0:
+            self._to_face = -1
+            self._direction = -1.0
+            self._progress = 0.0
+            self._animate_to(1.0)
+        elif self._progress < 0.5 and self._target == 1.0:
+            self._queued = (-1, -1.0)
+            self._animate_to(0.0)
+        else:
+            self._queued = (-1, -1.0)
+            self._animate_to(self._target)
 
     def reset_flip(self):
         self._hovered = False
+        self._queued = None
         if self._delay_id:
             GLib.source_remove(self._delay_id)
             self._delay_id = 0
         if self._tick_id:
             self.remove_tick_callback(self._tick_id)
             self._tick_id = 0
+        self._from_face = -1
+        self._to_face = 0
+        self._direction = 1.0
         self._target = 0.0
         self._progress = 0.0
         self._last_frame_us = 0
-        if self._badges is not None:
-            self._badges.set_opacity(1.0)
+        if self._promote_name:
+            self._promote(self._promote_name)
+            self._promote_name = None
+        self._sync_overlays()
         self.queue_draw()
+
+    def _face_and_angle(self) -> tuple[int, float]:
+        eased = 0.5 - 0.5 * math.cos(math.pi * self._progress)
+        if eased <= 0.5:
+            return self._from_face, self._direction * (180.0 * eased)
+        return self._to_face, self._direction * (180.0 * (eased - 1.0))
+
+    def _sync_overlays(self):
+        face, local_deg = self._face_and_angle()
+        if self._badges is not None:
+            if face == -1:
+                self._badges.set_opacity(max(0.0, 1.0 - abs(local_deg) / 41.0))
+            else:
+                self._badges.set_opacity(0.0)
+        pin = self._pin_button
+        if pin is None:
+            return
+        if face < 0 or face >= len(self._wallpapers):
+            pin.set_visible(False)
+            pin.set_opacity(0.0)
+            return
+        pin_opacity = max(0.0, 1.0 - abs(local_deg) / 55.0)
+        pin.set_visible(True)
+        pin.set_opacity(pin_opacity)
+        wp_name = Path(self._wallpapers[face]).name
+        pinned = bool(self._active_name and wp_name == self._active_name)
+        key = (face, pinned, self._theme_current, len(self._wallpapers))
+        if key != self._shown_pin_state:
+            self._shown_pin_state = key
+            (pin.add_css_class if pinned else pin.remove_css_class)("pinned")
+            total = len(self._wallpapers)
+            suffix = f" ({face + 1}/{total})" if total > 1 else ""
+            base = (_("Current background") if pinned else
+                    _("Set as background") if self._theme_current else
+                    _("Apply theme with this wallpaper"))
+            pin.set_tooltip_text(base + suffix)
 
     def _animate_to(self, target: float):
         self._target = target
@@ -248,15 +453,56 @@ class FlipPicture(FixedPicture):
             self._tick_id = self.add_tick_callback(self._on_tick)
 
     def _step(self, dt: float) -> bool:
+        dur = FLIP_STEP_DURATION if (self._from_face >= 0 and self._to_face >= 0) else FLIP_DURATION
+        if self._queued is not None:
+            dur *= 0.6
         if self._target > self._progress:
-            self._progress = min(self._target, self._progress + dt / FLIP_DURATION)
+            nxt_p = min(self._target, self._progress + dt / dur)
+            if self._to_face >= 0 and self._face_paintable(self._to_face) is None and nxt_p > 0.48:
+                nxt_p = max(self._progress, 0.48)
+            self._progress = nxt_p
         elif self._target < self._progress:
-            self._progress = max(self._target, self._progress - dt / FLIP_DURATION)
-        eased = 0.5 - 0.5 * math.cos(math.pi * self._progress)
-        if self._badges is not None:
-            self._badges.set_opacity(max(0.0, 1.0 - 2.2 * eased))
+            nxt_p = max(self._target, self._progress - dt / dur)
+            if self._from_face >= 0 and self._face_paintable(self._from_face) is None and nxt_p < 0.52:
+                nxt_p = min(self._progress, 0.52)
+            self._progress = nxt_p
+
+        if self._progress == self._target:
+            if self._target == 1.0 and self._to_face == -1:
+                self._from_face = -1
+                self._to_face = 0
+                self._direction = 1.0
+                self._progress = 0.0
+                self._target = 0.0
+                if self._promote_name:
+                    self._promote(self._promote_name)
+                    self._promote_name = None
+            elif self._target == 0.0 and self._from_face == -1:
+                if self._promote_name:
+                    self._promote(self._promote_name)
+                    self._promote_name = None
+            elif self._queued is not None:
+                nxt_face, nxt_dir = self._queued
+                self._queued = None
+                cur_face = self._to_face if self._target == 1.0 else self._from_face
+                if nxt_face != cur_face:
+                    if nxt_face >= 0:
+                        self._prefetch_around(nxt_face)
+                    self._from_face = cur_face
+                    self._to_face = nxt_face
+                    self._direction = nxt_dir
+                    self._progress = 0.0
+                    self._target = 1.0
+                    self._sync_overlays()
+                    self.queue_draw()
+                    return True
+
+        self._sync_overlays()
         self.queue_draw()
-        return self._progress != self._target
+        if (self._target == 1.0 and self._to_face >= 0
+                and self._face_paintable(self._to_face) is None and self._progress >= 0.48):
+            return False  # pause edge-on without spinning CPU until decoder delivers texture
+        return self._progress != self._target or self._queued is not None
 
     def _on_tick(self, _widget, clock):
         now_us = clock.get_frame_time() if clock is not None else 0
@@ -272,22 +518,17 @@ class FlipPicture(FixedPicture):
         return GLib.SOURCE_CONTINUE
 
     def do_snapshot(self, snapshot):
-        if self._progress <= 0.0 or self._back_paintable is None:
+        if self._from_face == -1 and self._progress <= 0.0:
             FixedPicture.do_snapshot(self, snapshot)
             return
         w = float(self.get_width() or self._size[0])
         h = float(self.get_height() or self._size[1])
         if w <= 0.0 or h <= 0.0:
             return
-        eased = 0.5 - 0.5 * math.cos(math.pi * self._progress)
-        deg = 180.0 * eased
-        if deg <= 90.0:
-            paintable = self.get_paintable()
-            local_deg = deg
-        else:
-            paintable = self._back_paintable
-            local_deg = deg - 180.0
+        face, local_deg = self._face_and_angle()
+        paintable = self._face_paintable(face)
         if paintable is None:
+            FixedPicture.do_snapshot(self, snapshot)
             return
         d = max(w * 1.8, 260.0)
         rad = math.radians(local_deg)
@@ -4050,9 +4291,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-tile-label {{ font-size: 13px; color: {muted_hex}; }}
         .tm-tile-name {{ font-size: 14px; font-weight: 600; }}
         .tm-list flowboxchild .tm-tile {{ margin: 0; }}
-        button.tm-tile-menu {{ padding: 3px; min-width: 0; min-height: 0; margin: 5px;
+        button.tm-tile-menu, button.tm-tile-pin {{ padding: 3px; min-width: 0; min-height: 0; margin: 5px;
             background: rgba(0, 0, 0, 0.6); color: #ffffff; border-radius: {control}px; }}
-        button.tm-tile-menu:hover {{ background: {accent_hex}; color: {bg_hex}; }}
+        button.tm-tile-menu:hover, button.tm-tile-pin:hover {{ background: {accent_hex}; color: {bg_hex}; }}
+        button.tm-tile-pin.pinned, button.tm-tile-pin.pinned:hover {{ background: {current_hex}; color: {bg_hex}; }}
         .tm-tile-badge {{ margin: 6px; background: rgba(0, 0, 0, 0.6); }}
         .tm-tile-badge:not(.current):not(.workspace) label {{ color: #ffffff; }}
         .tm-grid flowboxchild {{ border-radius: {radius}px; padding: 0; outline: none; }}
@@ -4377,24 +4619,95 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         radius = getattr(self, "ui_radius", 0)
         return max(2, radius - inset) if radius else 0
 
+    def _build_pin_button(self, theme: theme_core.ThemeInfo, picture: FlipPicture) -> Gtk.Button:
+        pin = Gtk.Button(icon_name="view-pin-symbolic")
+        pin.add_css_class("flat")
+        pin.add_css_class("tm-tile-pin")
+        pin.set_halign(Gtk.Align.START)
+        pin.set_valign(Gtk.Align.START)
+        pin.set_focusable(False)
+        pin.set_visible(False)
+        pin.connect("clicked", lambda _btn, target=theme, pic=picture: self.pin_theme_wallpaper(target, pic))
+        picture.set_pin_button(pin)
+        return pin
+
+    def pin_theme_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture):
+        wp_path = picture.current_wallpaper_path()
+        if not wp_path or picture.is_current_wallpaper_pinned():
+            return
+        path = Path(wp_path)
+        if theme.current:
+            def done(ok, error):
+                if not ok or error is not None:
+                    theme_core.notify(_("Could not set background"), path.name)
+                    return
+                self.current_bg = theme_auto.current_background() or path
+                picture.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
+            self._async(lambda: theme_auto.pin_current_wallpaper(theme.slug, path), done)
+            return
+        if theme.slug in self.hidden:
+            self.hidden.discard(theme.slug)
+            try:
+                theme_core.unhide_theme(theme.slug)
+            except OSError:
+                pass
+
+        def apply_with_wallpaper():
+            theme_auto.remember_omarchy_theme_background(theme.slug, path)
+            ok = theme_auto.apply_theme(theme.slug)
+            if ok:
+                if not theme_auto._same_wallpaper(theme_auto.current_background(), path):
+                    theme_core.set_desktop_background(path)
+                theme_auto.remember_base_wallpaper(theme.slug, path)
+            return ok
+        self._async(apply_with_wallpaper, lambda ok, error: self.after_apply(theme, ok, error))
+
     def _attach_flip_hover(self, target: Gtk.Widget, picture: FlipPicture):
-        state = [None]
+        state = [None, 0.0]
 
         def on_enter(_ctrl, x, y):
-            state[0] = (round(x), round(y))
+            state[0] = (float(x), float(y))
+            state[1] = 0.0
             if self.pointer_moved and not self.actions_menu_open():
                 picture.on_hover_enter()
 
         def on_motion(_ctrl, x, y):
-            pos = (round(x), round(y))
-            if state[0] is not None and state[0] != pos:
+            fx, fy = float(x), float(y)
+            prev = state[0]
+            state[0] = (fx, fy)
+            if prev is None:
+                return
+            if (round(fx), round(fy)) != (round(prev[0]), round(prev[1])):
                 self.pointer_moved = True
                 if not self.actions_menu_open():
                     picture.on_hover_enter()
-            state[0] = pos
+            if not picture.can_scrub() or self.actions_menu_open():
+                state[1] = 0.0
+                return
+            dx = fx - prev[0]
+            dy = fy - prev[1]
+            # Keep the top control band and upward trajectories toward the top-left
+            # pin button free from scrubbing so clicking the pin never switches away.
+            aiming_pin = dy < -0.5 and -20.0 <= fx + dx * (18.0 - fy) / dy <= 64.0
+            if fy < 36.0 or aiming_pin or (dy < 0.0 and abs(dy) >= abs(dx) * 0.3):
+                state[1] = 0.0
+                return
+            if abs(dx) <= abs(dy):
+                return
+            if state[1] * dx < 0.0:
+                state[1] = 0.0
+            state[1] += dx
+            step_px = max(24.0, min(38.0, picture._size[0] / 6.0))
+            if abs(state[1]) >= step_px:
+                step_dir = 1 if state[1] > 0.0 else -1
+                state[1] -= step_dir * step_px
+                if abs(state[1]) >= step_px:
+                    state[1] = 0.0
+                picture.rotate_step(step_dir)
 
         def on_leave(_ctrl):
             state[0] = None
+            state[1] = 0.0
             picture.on_hover_leave()
 
         hover = Gtk.EventControllerMotion()
@@ -4413,10 +4726,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         # One size whatever the badges and the name (a plain picture would
         # grow with its image and widen the card).
         tile_h = self.theme_tile_w * 9 // 16
-        back = (theme_auto.flip_wallpaper(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
-                if self.flip_3d and theme.preview else None)
-        if back is not None:
-            picture = FlipPicture(self.theme_tile_w, tile_h, back_path=back,
+        wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+                      if self.flip_3d and theme.preview else [])
+        if wallpapers:
+            picture = FlipPicture(self.theme_tile_w, tile_h, wallpapers=wallpapers,
+                                  active_bg=self.current_bg if theme.current else None,
+                                  theme_current=theme.current,
                                   decoder=self.decoder,
                                   radius_fn=lambda: self._tile_picture_radius(4))
             self._attach_flip_hover(tile, picture)
@@ -4426,6 +4741,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             self.decoder.request(picture, theme.preview, self.theme_tile_w, tile_h)
         frame = Gtk.Overlay()
         frame.set_child(picture)
+        if isinstance(picture, FlipPicture):
+            frame.add_overlay(self._build_pin_button(theme, picture))
         actions = Gtk.Button(icon_name="open-menu-symbolic")
         actions.add_css_class("flat")
         actions.add_css_class("tm-tile-menu")
@@ -4501,16 +4818,24 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         frame.set_valign(Gtk.Align.CENTER)
         width, height = self.preview_size()
         if theme.preview:
-            back = (theme_auto.flip_wallpaper(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
-                    if self.flip_3d else None)
-            if back is not None:
-                picture = FlipPicture(width, height, back_path=back, decoder=self.decoder,
+            wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+                          if self.flip_3d else [])
+            if wallpapers:
+                picture = FlipPicture(width, height, wallpapers=wallpapers,
+                                      active_bg=self.current_bg if theme.current else None,
+                                      theme_current=theme.current,
+                                      decoder=self.decoder,
                                       radius_fn=lambda: self._tile_picture_radius(6))
                 self._attach_flip_hover(frame, picture)
+                overlay = Gtk.Overlay()
+                overlay.set_child(picture)
+                overlay.add_overlay(self._build_pin_button(theme, picture))
+                self.decoder.request(picture, theme.preview, width, height)
+                frame.append(overlay)
             else:
                 picture = FixedPicture(width, height)
-            self.decoder.request(picture, theme.preview, width, height)
-            frame.append(picture)
+                self.decoder.request(picture, theme.preview, width, height)
+                frame.append(picture)
         else:
             icon = Gtk.Image.new_from_icon_name("applications-graphics")
             icon.set_pixel_size(48)
@@ -5864,11 +6189,26 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
     def on_state_changed(self, _monitor, file, other, _event):
         names = {f.get_basename() for f in (file, other) if f is not None}
-        if "theme.name" not in names:
-            return
-        if self.theme_sync:
-            GLib.source_remove(self.theme_sync)
-        self.theme_sync = GLib.timeout_add(300, self.follow_theme_change)
+        if "theme.name" in names:
+            if self.theme_sync:
+                GLib.source_remove(self.theme_sync)
+            self.theme_sync = GLib.timeout_add(300, self.follow_theme_change)
+        elif "background" in names and getattr(self, "flip_3d", False):
+            GLib.idle_add(self.follow_background_change)
+
+    def follow_background_change(self):
+        self.current_bg = theme_auto.current_background()
+        row = self.rows.get_first_child()
+        while row is not None:
+            theme = getattr(row, "tm_theme", None)
+            if theme is not None and theme.current:
+                child = row.get_child()
+                frame = child.get_first_child() if child is not None else None
+                pic = frame.get_first_child() if frame is not None else None
+                if isinstance(pic, FlipPicture):
+                    pic.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
+            row = row.get_next_sibling()
+        return GLib.SOURCE_REMOVE
 
     def follow_theme_change(self):
         self.theme_sync = 0

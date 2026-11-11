@@ -2880,8 +2880,10 @@ class StaleWebAskTests(unittest.TestCase):
 
 class Flip3DTests(ViewLayerTest):
     def test_theme_tile_flips_in_3d_on_hover_and_respects_setting(self):
-        t_with = self.make_theme("user", "alpha", wallpapers=("w1.png", "w2.png")).path
+        t_with = self.make_theme("user", "alpha", wallpapers=("w1.png", "w2.png", "w3.png")).path
         (t_with / "preview.png").write_bytes(PNG)
+        t_other = self.make_theme("user", "beta", wallpapers=("b1.png",)).path
+        (t_other / "preview.png").write_bytes(PNG)
         t_without = self.make_theme("user", "bare", wallpapers=()).path
         (t_without / "preview.png").write_bytes(PNG)
         link = self.roots.state_current / "background"
@@ -2892,27 +2894,81 @@ class Flip3DTests(ViewLayerTest):
         self.app.refresh_themes()
         rows = {r.tm_theme.slug: r for r in self.rows_list()}
         pic = rows["alpha"].get_child().get_first_child().get_first_child()
+        beta_pic = rows["beta"].get_child().get_first_child().get_first_child()
         bare_pic = rows["bare"].get_child().get_first_child().get_first_child()
         self.assertIsInstance(pic, theme_popup.FlipPicture)
         self.assertIsInstance(pic, theme_popup.FixedPicture)
-        self.assertTrue(pic._back_path.endswith("w2.png"))  # current theme uses active background
+        self.assertEqual([Path(p).name for p in pic._wallpapers], ["w2.png", "w3.png", "w1.png"])
+        self.assertTrue(pic._back_path.endswith("w2.png"))  # current theme uses active background first
         self.assertNotIsInstance(bare_pic, theme_popup.FlipPicture)
 
         pix = theme_popup.GdkPixbuf.Pixbuf.new(theme_popup.GdkPixbuf.Colorspace.RGB, False, 8, 16, 9)
         tex = Gdk.Texture.new_for_pixbuf(pix)
         pic.set_paintable(tex)
-        pic.set_back_paintable(tex)
-        pic._target = 1.0
-        for step in range(4):
+        for wp in pic._wallpapers:
+            pic._set_wallpaper_paintable(wp, tex)
+        pic._hovered = True
+        pic._on_delay_done()
+        for _step in range(4):
             pic._step(theme_popup.FLIP_DURATION / 4.0)
             snap = Gtk.Snapshot.new()
             pic.do_snapshot(snap)
             self.assertIsNotNone(snap.to_node())
         self.assertAlmostEqual(pic._progress, 1.0)
         self.assertEqual(pic._badges.get_opacity(), 0.0)
+        # First in cycle on current theme is already applied -> pin enabled!
+        self.assertTrue(pic._pin_button.get_visible())
+        self.assertTrue(pic._pin_button.has_css_class("pinned"))
+
+        # Rotate forward (+1 -> w3.png): pin unpinned; rotate backward (-1 -> w2.png): pin enabled again!
+        pic.rotate_step(1)
+        for _step in range(4):
+            pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(pic.current_wallpaper_path().endswith("w3.png"))
+        self.assertFalse(pic._pin_button.has_css_class("pinned"))
+
+        pic.rotate_step(-1)
+        for _step in range(4):
+            pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(pic.current_wallpaper_path().endswith("w2.png"))
+        self.assertTrue(pic._pin_button.has_css_class("pinned"))
+
+        # Rotate forward to w3.png and click pin to apply it on current theme:
+        pic.rotate_step(1)
+        for _step in range(4):
+            pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        with patch.object(theme_popup.ThemeManager, "_async",
+                          side_effect=lambda work, done: done(work(), None)), \
+             patch.object(theme_core, "set_desktop_background",
+                          side_effect=lambda p: (link.unlink(missing_ok=True), link.symlink_to(p), True)[-1]):
+            pic._pin_button.emit("clicked")
+        self.assertTrue(pic._pin_button.has_css_class("pinned"))
         pic.reset_flip()
         self.assertEqual(pic._progress, 0.0)
         self.assertEqual(pic._badges.get_opacity(), 1.0)
+        self.assertFalse(pic._pin_button.get_visible())
+        self.assertEqual(Path(pic._wallpapers[0]).name, "w3.png")  # promoted to first for next hover
+
+        # Non-current theme with 1 wallpaper: starts unpinned, ignores rotate_step, and pin applies theme + wallpaper.
+        beta_pic.set_paintable(tex)
+        beta_pic.set_back_paintable(tex)
+        beta_pic._hovered = True
+        beta_pic._on_delay_done()
+        for _step in range(4):
+            beta_pic._step(theme_popup.FLIP_DURATION / 4.0)
+        self.assertFalse(beta_pic._pin_button.has_css_class("pinned"))
+        beta_pic.rotate_step(1)
+        self.assertTrue(beta_pic.current_wallpaper_path().endswith("b1.png"))
+        applied = []
+        with patch.object(theme_popup.ThemeManager, "_async",
+                          side_effect=lambda work, done: done(work(), None)), \
+             patch.object(theme_popup.theme_auto, "apply_theme",
+                          side_effect=lambda slug: (applied.append(("theme", slug)), True)[-1]), \
+             patch.object(theme_core, "set_desktop_background",
+                          side_effect=lambda p: (applied.append(("bg", Path(p).name)), True)[-1]), \
+             patch.object(theme_core, "notify"):
+            beta_pic._pin_button.emit("clicked")
+        self.assertEqual(applied, [("theme", "beta"), ("bg", "b1.png")])
 
         # Turning off the setting disables 3D flip; Reset to defaults turns it back on.
         self.app.open_settings()

@@ -475,27 +475,79 @@ def visible_wallpapers(theme) -> list[Path]:
     return [w.path for w in theme_core.list_backgrounds(None, theme) if not w.hidden]
 
 
-def flip_wallpaper(theme, hidden: dict[str, set[str]] | None = None,
-                   current_bg: Path | None = None) -> Path | None:
-    """The wallpaper shown on the back of a theme card's 3D flip: the active
-    desktop wallpaper when `theme` is current (if it belongs to its visible
-    wallpapers), else its first visible wallpaper, or None when it has none."""
+def flip_wallpapers(theme, hidden: dict[str, set[str]] | None = None,
+                    current_bg: Path | None = None) -> list[Path]:
+    """The visible wallpapers cycled on a theme card's 3D flip: rotated so the
+    active desktop wallpaper comes first when `theme` is current."""
     visible = [w.path for w in theme_core.list_backgrounds(None, theme, hidden=hidden) if not w.hidden]
     if not visible:
-        return None
-    chosen = None
+        return []
     if getattr(theme, "current", False):
         bg = current_background() if current_bg is None else current_bg
         if bg is not None:
-            chosen = next((p for p in visible if p == bg or _same_wallpaper(p, bg)), None)
-    chosen = chosen or visible[0]
-    if getattr(theme, "preview", None):
+            index = next((i for i, p in enumerate(visible) if p == bg or _same_wallpaper(p, bg)), -1)
+            if index > 0:
+                visible = visible[index:] + visible[:index]
+    if len(visible) == 1 and getattr(theme, "preview", None):
         try:
-            if os.path.samefile(theme.preview, chosen):
-                return None
+            if os.path.samefile(theme.preview, visible[0]):
+                return []
         except OSError:
             pass
-    return chosen
+    return visible
+
+
+def flip_wallpaper(theme, hidden: dict[str, set[str]] | None = None,
+                   current_bg: Path | None = None) -> Path | None:
+    """The first wallpaper shown on the back of a theme card's 3D flip."""
+    paths = flip_wallpapers(theme, hidden=hidden, current_bg=current_bg)
+    return paths[0] if paths else None
+
+
+def remember_omarchy_theme_background(slug: str, path: Path) -> None:
+    """Record `path` in Omarchy's per-theme background state so `omarchy theme set`
+    switches straight to the pinned wallpaper without flashing another first."""
+    slug = theme_core._validate_slug(slug)
+    roots = theme_core.default_roots()
+    state_dir = roots.state_current.parent / "theme-backgrounds"
+    if state_dir.is_symlink():
+        return
+    try:
+        user_bg = (roots.user_backgrounds / slug).resolve()
+        is_user_bg = path.resolve().is_relative_to(user_bg)
+    except OSError:
+        is_user_bg = False
+    recorded = path if is_user_bg else (roots.state_current / "theme" / "backgrounds" / path.name)
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        theme_core._atomic_write(state_dir / slug, f"{recorded}\n", mode=0o600)
+    except OSError:
+        pass
+
+
+def pin_current_wallpaper(slug: str, path: Path) -> bool:
+    """Apply `path` on the already-active theme `slug`, updating workspace or
+    base wallpaper state just like stepping backgrounds does."""
+    slug = theme_core._validate_slug(slug)
+    roots = theme_core.default_roots()
+    staged = roots.state_current / "theme" / "backgrounds" / path.name
+    try:
+        is_user_bg = path.resolve().is_relative_to((roots.user_backgrounds / slug).resolve())
+    except OSError:
+        is_user_bg = False
+    target = staged if (not is_user_bg and staged.is_file()) else path
+    with locked():
+        remember_omarchy_theme_background(slug, path)
+        if workspace_wallpapers_enabled():
+            workspace = active_workspace()
+            assignments = load_workspace_map().get(slug, {})
+            if workspace is not None and workspace in assignments:
+                set_workspace_wallpaper(slug, workspace, path.name)
+                return theme_core.set_desktop_background(target)
+        ok = theme_core.set_desktop_background(target)
+        if ok:
+            remember_base_wallpaper(slug, target)
+        return ok
 
 
 def wallpaper_named(theme, name: str) -> Path | None:

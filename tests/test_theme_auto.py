@@ -542,10 +542,23 @@ class CommandLineTests(AutoTestCase):
 
         themes = {t.slug: t for t in theme_core.discover_themes()}
         self.assertEqual(theme_auto.flip_wallpaper(themes["nord"]), bg_nord / "c.png")
+        self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["nord"])],
+                         ["c.png", "a.png", "b.png"])
         self.assertEqual(theme_auto.flip_wallpaper(themes["alpha"]).name, "first.png")
+        self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["alpha"])],
+                         ["first.png", "second.png"])
         theme_core.save_hidden_wallpapers({"alpha": {"first.png"}})
         self.assertEqual(theme_auto.flip_wallpaper(themes["alpha"]).name, "second.png")
+        self.assertEqual([p.name for p in theme_auto.flip_wallpapers(themes["alpha"])],
+                         ["second.png"])
         self.assertIsNone(theme_auto.flip_wallpaper(themes["bare"]))
+        self.assertEqual(theme_auto.flip_wallpapers(themes["bare"]), [])
+
+        with unittest.mock.patch.object(theme_core, "set_desktop_background", return_value=True) as mock_bg:
+            self.assertTrue(theme_auto.pin_current_wallpaper("nord", bg_nord / "b.png"))
+            mock_bg.assert_called_once_with(bg_nord / "b.png")
+        remembered = (self.roots.state_current.parent / "theme-backgrounds" / "nord").read_text().strip()
+        self.assertTrue(remembered.endswith("/b.png"))
 
 
 class LockDeadlineTests(AutoTestCase):
