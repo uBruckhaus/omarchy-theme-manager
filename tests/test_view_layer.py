@@ -2931,6 +2931,16 @@ class FlipTextureTests(unittest.TestCase):
 
 
 class Flip3DTests(ViewLayerTest):
+    def test_reset_right_after_a_flip_change_wins(self):
+        self.app.save_setting(preview_flip_3d=False)      # queued on the settings worker
+        self.app.reset_settings()                          # queued after it: FIFO
+        self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_flip_3d") is True
+                        and theme_popup.theme_auto.settings().get("sort") == "name")
+        import time
+        time.sleep(0.2)
+        theme_popup.GLib.MainContext.default().iteration(False)
+        self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
+
     def test_a_pin_while_one_runs_waits_and_the_latest_wins(self):
         from types import SimpleNamespace
         theme = SimpleNamespace(current=False, slug="gamma")
@@ -3182,6 +3192,7 @@ class Flip3DTests(ViewLayerTest):
         pic_off = {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
         self.assertNotIsInstance(pic_off, theme_popup.FlipPicture)
         self.app.reset_settings()
+        self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_flip_3d") is True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), True)
         self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 1)

@@ -3568,9 +3568,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
     FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme")
 
-    def save_setting(self, _now: bool = False, **values):
-        """`_now`: written at once (Reset to defaults: one write before a possible restart)."""
-        if not _now and any(key in values for key in self.FLIP_SETTINGS):
+    def save_setting(self, **values):
+        if any(key in values for key in self.FLIP_SETTINGS):
             # The 3D flip's settings: written by one settings worker in order (the shared lock may
             # wait), the cards rebuilt once it is stored, never a wait on GTK's loop.
             self._save_in_background(values)
@@ -3582,27 +3581,31 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if "sort" in values or any(key in values for key in self.FLIP_SETTINGS):
             self.refresh_themes()
 
-    def _save_in_background(self, values: dict):
+    def _save_in_background(self, values: dict, then=None):
+        """One worker writes these in order; `then` runs on GTK's loop once this write is stored."""
         jobs = self.__dict__.get("_settings_jobs")
         if jobs is None:
             jobs = self._settings_jobs = queue.SimpleQueue()
 
             def worker():
                 while True:
-                    job = jobs.get()
+                    job, after = jobs.get()
                     try:
                         theme_auto.update_settings(**job)
                         error = None
                     except OSError as failure:
                         error = failure
-                    GLib.idle_add(lambda e=error: self._background_saved(e) and False)
+                    GLib.idle_add(lambda e=error, a=after: self._background_saved(e, a) and False)
             threading.Thread(target=worker, daemon=True).start()
-        jobs.put(dict(values))
+        jobs.put((dict(values), then))
 
-    def _background_saved(self, error):
+    def _background_saved(self, error, then=None):
         if error is not None:
             theme_core.notify(_("Could not save the setting"), str(error))
-        self.refresh_themes()
+        if then is not None:
+            then()
+        else:
+            self.refresh_themes()
         return False
 
     def corner_labels(self) -> list[str]:
@@ -3641,13 +3644,19 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def reset_settings(self):
         """Back to the defaults (see the button's tooltip). A new language
         restarts the popup (on this page), so it comes last."""
-        self.save_setting(_now=True, sort="name", workspace_wallpapers=True, workspace_themes=False,
-                          slideshow_minutes=0, corners="windows",
-                          screenshot_key=True, screenshot_folder=None,
-                          ask_ai_web=True, preview_flip_3d=True,
-                          preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
-                          preview_pin_apply_theme=True,
-                          header_order=list(header_order.DEFAULT))
+        # Through the same ordered worker as the flip settings: a flip change just before stays before
+        # it, and the rest of the reset (a language restart last) runs once this write is stored.
+        self._save_in_background(dict(sort="name", workspace_wallpapers=True, workspace_themes=False,
+                                      slideshow_minutes=0, corners="windows",
+                                      screenshot_key=True, screenshot_folder=None,
+                                      ask_ai_web=True, preview_flip_3d=True,
+                                      preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
+                                      preview_pin_apply_theme=True,
+                                      header_order=list(header_order.DEFAULT)),
+                                 then=self._reset_after_saved)
+
+    def _reset_after_saved(self):
+        self.refresh_themes()
         self.header_order = list(header_order.DEFAULT)
         self.rebuild_header_group()
         self.save_schedule(enabled=False, day_at=theme_auto.DEFAULT_SCHEDULE["day_at"],
