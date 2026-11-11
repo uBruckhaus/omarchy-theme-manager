@@ -100,7 +100,7 @@ SELECT_PEEK_MS = 90    # brief settle guard so holding Arrow keys stays calm
 PEEK_PROGRESS = 0.19   # ~15.6° gentle 3D edge lift hinting that a wallpaper waits behind
 FLIP_DELAY_MS = 480    # pause after the 3D hint (>2x the old 220 ms) before full 180° rotation
 FLIP_DURATION = 0.42   # seconds for a 180° 3D card flip
-FLIP_STEP_DURATION = 0.30  # seconds for rotating between a theme's wallpapers on mouse move
+FLIP_STEP_DURATION = 0.30  # seconds for rotating between a theme's wallpapers via arrow buttons
 CURSOR_SLACK = 24  # px the pointer may move after opening before the keyboard is released
 MAX_DROPS = 10  # one drop gesture adds at most this many wallpapers
 MAX_DROP_LIST_BYTES = 1024 * 1024  # a dropped uri-list or text, as for the clipboard
@@ -169,7 +169,7 @@ class FixedPicture(Gtk.Picture):
 
 class FlipPicture(FixedPicture):
     """A theme preview that rotates 180° in 3D on hover to reveal the theme's
-    wallpapers, rotating forward and backward through them on mouse moves."""
+    wallpapers, with left/right arrow controls when a theme has several."""
 
     def __init__(self, width: int, height: int, wallpapers=(),
                  back_path: str | Path | None = None,
@@ -186,6 +186,7 @@ class FlipPicture(FixedPicture):
         self._radius_fn = radius_fn
         self._badges: Gtk.Widget | None = None
         self._pin_button: Gtk.Button | None = None
+        self._nav_buttons: tuple[Gtk.Button, ...] = ()
         self._shown_pin_state = None
         self._textures: dict[str, Gdk.Paintable] = {}
         self._requested: set[str] = set()
@@ -216,6 +217,10 @@ class FlipPicture(FixedPicture):
     def set_pin_button(self, button: Gtk.Button | None):
         self._pin_button = button
         self._shown_pin_state = None
+        self._sync_overlays()
+
+    def set_nav_buttons(self, *buttons: Gtk.Button):
+        self._nav_buttons = tuple(b for b in buttons if b is not None)
         self._sync_overlays()
 
     def set_back_paintable(self, paintable):
@@ -265,13 +270,6 @@ class FlipPicture(FixedPicture):
 
     def is_showing_wallpaper(self) -> bool:
         return self.visible_face() >= 0
-
-    def is_settled_on_wallpaper(self) -> bool:
-        return ((self._progress >= 1.0 and self._to_face >= 0)
-                or (self._progress <= 0.0 and self._from_face >= 0))
-
-    def can_scrub(self) -> bool:
-        return len(self._wallpapers) > 1 and self._hovered and self.is_settled_on_wallpaper()
 
     def current_wallpaper_path(self) -> str | None:
         face = self.visible_face()
@@ -385,7 +383,7 @@ class FlipPicture(FixedPicture):
 
     def rotate_step(self, step_dir: int):
         n = len(self._wallpapers)
-        if n <= 1 or not self._hovered or not self.is_showing_wallpaper():
+        if n <= 1 or not self.is_showing_wallpaper():
             return
         sign = 1.0 if step_dir >= 0 else -1.0
         delta = 1 if step_dir >= 0 else -1
@@ -497,13 +495,21 @@ class FlipPicture(FixedPicture):
             else:
                 self._badges.set_opacity(0.0)
         pin = self._pin_button
-        if pin is None:
-            return
         if face < 0 or face >= len(self._wallpapers):
-            pin.set_visible(False)
-            pin.set_opacity(0.0)
+            if pin is not None:
+                pin.set_visible(False)
+                pin.set_opacity(0.0)
+            for nav in self._nav_buttons:
+                nav.set_visible(False)
+                nav.set_opacity(0.0)
             return
         pin_opacity = max(0.0, 1.0 - abs(local_deg) / 55.0)
+        nav_opacity = 1.0 if (self._from_face >= 0 and self._to_face >= 0) else pin_opacity
+        for nav in self._nav_buttons:
+            nav.set_visible(len(self._wallpapers) > 1)
+            nav.set_opacity(nav_opacity)
+        if pin is None:
+            return
         pin.set_visible(True)
         pin.set_opacity(pin_opacity)
         wp_name = Path(self._wallpapers[face]).name
@@ -4380,9 +4386,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-tile-label {{ font-size: 13px; color: {muted_hex}; }}
         .tm-tile-name {{ font-size: 14px; font-weight: 600; }}
         .tm-list flowboxchild .tm-tile {{ margin: 0; }}
-        button.tm-tile-menu, button.tm-tile-pin {{ padding: 3px; min-width: 0; min-height: 0; margin: 5px;
+        button.tm-tile-menu, button.tm-tile-pin, button.tm-tile-nav {{ padding: 3px; min-width: 0; min-height: 0; margin: 5px;
             background: rgba(0, 0, 0, 0.6); color: #ffffff; border-radius: {control}px; }}
-        button.tm-tile-menu:hover, button.tm-tile-pin:hover {{ background: {accent_hex}; color: {bg_hex}; }}
+        button.tm-tile-menu:hover, button.tm-tile-pin:hover, button.tm-tile-nav:hover {{ background: {accent_hex}; color: {bg_hex}; }}
         button.tm-tile-pin.pinned, button.tm-tile-pin.pinned:hover {{ background: {current_hex}; color: {bg_hex}; }}
         .tm-tile-badge {{ margin: 6px; background: rgba(0, 0, 0, 0.6); }}
         .tm-tile-badge:not(.current):not(.workspace) label {{ color: #ffffff; }}
@@ -4709,7 +4715,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         radius = getattr(self, "ui_radius", 0)
         return max(2, radius - inset) if radius else 0
 
-    def _build_pin_button(self, theme: theme_core.ThemeInfo, picture: FlipPicture) -> Gtk.Button:
+    def _add_flip_overlays(self, overlay: Gtk.Overlay, theme: theme_core.ThemeInfo, picture: FlipPicture):
         pin = Gtk.Button(icon_name="view-pin-symbolic")
         pin.add_css_class("flat")
         pin.add_css_class("tm-tile-pin")
@@ -4719,7 +4725,29 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         pin.set_visible(False)
         pin.connect("clicked", lambda _btn, target=theme, pic=picture: self.pin_theme_wallpaper(target, pic))
         picture.set_pin_button(pin)
-        return pin
+        overlay.add_overlay(pin)
+        if len(picture._wallpapers) > 1:
+            prev_btn = Gtk.Button(icon_name="go-previous-symbolic")
+            prev_btn.add_css_class("flat")
+            prev_btn.add_css_class("tm-tile-nav")
+            prev_btn.set_halign(Gtk.Align.START)
+            prev_btn.set_valign(Gtk.Align.CENTER)
+            prev_btn.set_focusable(False)
+            prev_btn.set_visible(False)
+            prev_btn.set_tooltip_text(_("Previous wallpaper"))
+            prev_btn.connect("clicked", lambda _btn, pic=picture: pic.rotate_step(-1))
+            next_btn = Gtk.Button(icon_name="go-next-symbolic")
+            next_btn.add_css_class("flat")
+            next_btn.add_css_class("tm-tile-nav")
+            next_btn.set_halign(Gtk.Align.END)
+            next_btn.set_valign(Gtk.Align.CENTER)
+            next_btn.set_focusable(False)
+            next_btn.set_visible(False)
+            next_btn.set_tooltip_text(_("Next wallpaper"))
+            next_btn.connect("clicked", lambda _btn, pic=picture: pic.rotate_step(1))
+            picture.set_nav_buttons(prev_btn, next_btn)
+            overlay.add_overlay(prev_btn)
+            overlay.add_overlay(next_btn)
 
     def pin_theme_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture):
         wp_path = picture.current_wallpaper_path()
@@ -4753,56 +4781,23 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self._async(apply_with_wallpaper, lambda ok, error: self.after_apply(theme, ok, error))
 
     def _attach_flip_hover(self, target: Gtk.Widget, picture: FlipPicture):
-        state = [None, 0.0, 0.0, 0.0]   # [last_pos, accum_dx, last_motion_t, cooldown_until]
+        state = [None]
 
         def on_enter(_ctrl, x, y):
-            state[0] = (float(x), float(y))
-            state[1] = 0.0
-            state[2] = 0.0
-            state[3] = 0.0
+            state[0] = (round(x), round(y))
             if self.pointer_moved and not self.actions_menu_open():
                 picture.on_hover_enter()
 
         def on_motion(_ctrl, x, y):
-            fx, fy = float(x), float(y)
-            prev = state[0]
-            state[0] = (fx, fy)
-            if prev is None:
-                return
-            if (round(fx), round(fy)) != (round(prev[0]), round(prev[1])):
+            pos = (round(x), round(y))
+            if state[0] is not None and state[0] != pos:
                 self.pointer_moved = True
                 if not self.actions_menu_open():
                     picture.on_hover_enter()
-            now = time.monotonic()
-            if not picture.can_scrub() or self.actions_menu_open() or now < state[3]:
-                state[1] = 0.0
-                return
-            if now - state[2] > 0.25:
-                state[1] = 0.0   # slow idle drift never adds up to an accidental flip
-            state[2] = now
-            dx = fx - prev[0]
-            dy = fy - prev[1]
-            # Keep the top control band and upward/diagonal trajectories free from
-            # scrubbing so normal cursor adjustments and clicking the pin never flip.
-            aiming_pin = dy < -0.5 and -20.0 <= fx + dx * (18.0 - fy) / dy <= 68.0
-            if fy < 38.0 or aiming_pin or abs(dx) <= abs(dy) * 1.6:
-                state[1] = 0.0
-                return
-            if state[1] * dx < 0.0:
-                state[1] = 0.0
-            state[1] += dx
-            step_px = max(72.0, picture._size[0] * 0.42)
-            if abs(state[1]) >= step_px:
-                step_dir = 1 if state[1] > 0.0 else -1
-                state[1] = 0.0
-                state[3] = now + FLIP_STEP_DURATION + 0.14
-                picture.rotate_step(step_dir)
+            state[0] = pos
 
         def on_leave(_ctrl):
             state[0] = None
-            state[1] = 0.0
-            state[2] = 0.0
-            state[3] = 0.0
             picture.on_hover_leave()
 
         hover = Gtk.EventControllerMotion()
@@ -4837,7 +4832,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         frame = Gtk.Overlay()
         frame.set_child(picture)
         if isinstance(picture, FlipPicture):
-            frame.add_overlay(self._build_pin_button(theme, picture))
+            self._add_flip_overlays(frame, theme, picture)
         actions = Gtk.Button(icon_name="open-menu-symbolic")
         actions.add_css_class("flat")
         actions.add_css_class("tm-tile-menu")
@@ -4924,7 +4919,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 self._attach_flip_hover(frame, picture)
                 overlay = Gtk.Overlay()
                 overlay.set_child(picture)
-                overlay.add_overlay(self._build_pin_button(theme, picture))
+                self._add_flip_overlays(overlay, theme, picture)
                 self.decoder.request(picture, theme.preview, width, height)
                 frame.append(overlay)
             else:

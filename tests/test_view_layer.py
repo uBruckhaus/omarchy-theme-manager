@@ -2923,6 +2923,8 @@ class Flip3DTests(ViewLayerTest):
         self.assertAlmostEqual(pic._progress, theme_popup.PEEK_PROGRESS, places=3)
         self.assertEqual(pic._badges.get_opacity(), 1.0)
         self.assertFalse(pic._pin_button.get_visible())
+        self.assertEqual(len(pic._nav_buttons), 2)
+        self.assertTrue(all(not b.get_visible() for b in pic._nav_buttons))
         if pic._delay_id:
             GLib.source_remove(pic._delay_id)
             pic._delay_id = 0
@@ -2934,25 +2936,28 @@ class Flip3DTests(ViewLayerTest):
             self.assertIsNotNone(snap.to_node())
         self.assertAlmostEqual(pic._progress, 1.0)
         self.assertEqual(pic._badges.get_opacity(), 0.0)
-        # First in cycle on current theme is already applied -> pin enabled!
+        # First in cycle on current theme is already applied -> pin enabled, left/right arrows visible!
         self.assertTrue(pic._pin_button.get_visible())
         self.assertTrue(pic._pin_button.has_css_class("pinned"))
+        prev_btn, next_btn = pic._nav_buttons
+        self.assertTrue(prev_btn.get_visible() and next_btn.get_visible())
 
-        # Rotate forward (+1 -> w3.png): pin unpinned; rotate backward (-1 -> w2.png): pin enabled again!
-        pic.rotate_step(1)
+        # Click right arrow (+1 -> w3.png): pin unpinned; click left arrow (-1 -> w2.png): pin enabled again!
+        next_btn.emit("clicked")
         for _step in range(4):
             pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
         self.assertTrue(pic.current_wallpaper_path().endswith("w3.png"))
         self.assertFalse(pic._pin_button.has_css_class("pinned"))
+        self.assertTrue(prev_btn.get_visible() and next_btn.get_visible())
 
-        pic.rotate_step(-1)
+        prev_btn.emit("clicked")
         for _step in range(4):
             pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
         self.assertTrue(pic.current_wallpaper_path().endswith("w2.png"))
         self.assertTrue(pic._pin_button.has_css_class("pinned"))
 
-        # Rotate forward to w3.png and click pin to apply it on current theme:
-        pic.rotate_step(1)
+        # Click right arrow to w3.png and click pin to apply it on current theme:
+        next_btn.emit("clicked")
         for _step in range(4):
             pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
         with patch.object(theme_popup.ThemeManager, "_async",
@@ -2965,9 +2970,11 @@ class Flip3DTests(ViewLayerTest):
         self.assertEqual(pic._progress, 0.0)
         self.assertEqual(pic._badges.get_opacity(), 1.0)
         self.assertFalse(pic._pin_button.get_visible())
+        self.assertTrue(all(not b.get_visible() for b in pic._nav_buttons))
         self.assertEqual(Path(pic._wallpapers[0]).name, "w3.png")  # promoted to first for next hover
 
-        # Non-current theme with 1 wallpaper: starts unpinned, ignores rotate_step, and pin applies theme + wallpaper.
+        # Non-current theme with 1 wallpaper: no arrow buttons, starts unpinned, and pin applies theme + wallpaper.
+        self.assertEqual(beta_pic._nav_buttons, ())
         beta_pic.set_paintable(tex)
         beta_pic.set_back_paintable(tex)
         beta_pic._hovered = True
