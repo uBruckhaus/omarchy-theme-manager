@@ -2956,6 +2956,30 @@ class Flip3DTests(ViewLayerTest):
         self.assertTrue(pic.current_wallpaper_path().endswith("w2.png"))
         self.assertTrue(pic._pin_button.has_css_class("pinned"))
 
+        # Rotating back once more shows the original theme preview (-1), keeping < / > arrows up:
+        prev_btn.emit("clicked")
+        for _step in range(4):
+            pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertEqual(pic.visible_face(), -1)
+        self.assertIsNone(pic.current_wallpaper_path())
+        self.assertFalse(pic._pin_button.get_visible())
+        self.assertEqual(pic._badges.get_opacity(), 1.0)
+        self.assertTrue(prev_btn.get_visible() and next_btn.get_visible())
+
+        # Rotating back again wraps to last wallpaper (w1.png); two right clicks reach w2.png again:
+        prev_btn.emit("clicked")
+        for _step in range(4):
+            pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(pic.current_wallpaper_path().endswith("w1.png"))
+        next_btn.emit("clicked")
+        for _step in range(4):
+            pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertEqual(pic.visible_face(), -1)
+        next_btn.emit("clicked")
+        for _step in range(4):
+            pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertTrue(pic.current_wallpaper_path().endswith("w2.png"))
+
         # Click right arrow to w3.png and click pin to apply it on current theme:
         next_btn.emit("clicked")
         for _step in range(4):

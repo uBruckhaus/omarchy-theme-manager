@@ -191,6 +191,8 @@ class FlipPicture(FixedPicture):
         self._textures: dict[str, Gdk.Paintable] = {}
         self._requested: set[str] = set()
         self._hovered = False
+        self._interactive = False  # True once initial hover delay starts the full flip
+        self._nav_steady = False   # True once arrow controls stay up across preview + wallpapers
         self._from_face = -1   # -1 = front preview, 0..N-1 = wallpaper index
         self._to_face = 0
         self._direction = 1.0
@@ -255,6 +257,11 @@ class FlipPicture(FixedPicture):
     def _prefetch_around(self, index: int):
         n = len(self._wallpapers)
         if n == 0:
+            return
+        if index < 0:
+            self._request_index(0)
+            if n > 1:
+                self._request_index(n - 1)
             return
         self._request_index(index % n)
         if n > 1:
@@ -347,8 +354,10 @@ class FlipPicture(FixedPicture):
                 if self._delay_id == 0:
                     self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
             else:
+                self._interactive = True
                 self._animate_to(1.0)
         elif self._to_face == -1:
+            self._interactive = True
             if self._progress < 0.5:
                 self._queued = None
                 self._animate_to(0.0)
@@ -373,6 +382,7 @@ class FlipPicture(FixedPicture):
         self._delay_id = 0
         if self._hovered:
             self._pulse_back = False
+            self._interactive = True
             self._from_face = -1
             self._to_face = 0
             self._direction = 1.0
@@ -381,15 +391,23 @@ class FlipPicture(FixedPicture):
                 self._animate_to(1.0)
         return GLib.SOURCE_REMOVE
 
+    def _next_face_in_cycle(self, face: int, delta: int) -> int:
+        # Cycle through original preview (-1) and all wallpapers (0 .. n - 1).
+        n = len(self._wallpapers)
+        return ((face + 1 + delta) % (n + 1)) - 1
+
     def rotate_step(self, step_dir: int):
         n = len(self._wallpapers)
-        if n <= 1 or not self.is_showing_wallpaper():
+        if n <= 1 or not self._interactive:
             return
+        if not self._nav_steady and not self.is_showing_wallpaper():
+            return
+        self._nav_steady = True
         sign = 1.0 if step_dir >= 0 else -1.0
         delta = 1 if step_dir >= 0 else -1
-        if self._progress >= 1.0 and self._to_face >= 0:
+        if self._progress >= 1.0:
             cur = self._to_face
-            nxt = (cur + delta) % n
+            nxt = self._next_face_in_cycle(cur, delta)
             self._prefetch_around(nxt)
             self._from_face = cur
             self._to_face = nxt
@@ -397,9 +415,9 @@ class FlipPicture(FixedPicture):
             self._progress = 0.0
             self._animate_to(1.0)
             return
-        if self._progress <= 0.0 and self._from_face >= 0:
+        if self._progress <= 0.0:
             cur = self._from_face
-            nxt = (cur + delta) % n
+            nxt = self._next_face_in_cycle(cur, delta)
             self._prefetch_around(nxt)
             self._from_face = cur
             self._to_face = nxt
@@ -407,20 +425,25 @@ class FlipPicture(FixedPicture):
             self._progress = 0.0
             self._animate_to(1.0)
             return
-        if (self._from_face >= 0 and self._to_face >= 0 and self._progress < 0.5
-                and (sign > 0) != (self._direction > 0)):
-            self._queued = None
-            self._animate_to(0.0 if self._target == 1.0 else 1.0)
-            return
+        if self._progress < 0.5:
+            if self._target == 1.0 and (sign > 0) != (self._direction > 0):
+                self._queued = None
+                self._animate_to(0.0)
+                return
+            if self._target == 0.0 and (sign > 0) == (self._direction > 0):
+                self._queued = None
+                self._animate_to(1.0)
+                return
         end_face = self._to_face if self._target == 1.0 else self._from_face
-        if end_face >= 0:
-            nxt = (end_face + delta) % n
-            self._prefetch_around(nxt)
-            self._queued = (nxt, sign)
-            self._animate_to(self._target)
+        nxt = self._next_face_in_cycle(end_face, delta)
+        self._prefetch_around(nxt)
+        self._queued = (nxt, sign)
+        self._animate_to(self._target)
 
     def on_hover_leave(self):
         self._hovered = False
+        self._interactive = False
+        self._nav_steady = False
         self._pulse_back = False
         if self._peek_id:
             GLib.source_remove(self._peek_id)
@@ -431,6 +454,10 @@ class FlipPicture(FixedPicture):
         self._queued = None
         if self._from_face == -1 and self._progress <= 0.0:
             self._target = 0.0
+            if self._promote_name:
+                self._promote(self._promote_name)
+                self._promote_name = None
+            self._sync_overlays()
             return
         if self._from_face == -1:
             self._animate_to(0.0)
@@ -456,6 +483,8 @@ class FlipPicture(FixedPicture):
 
     def reset_flip(self):
         self._hovered = False
+        self._interactive = False
+        self._nav_steady = False
         self._pulse_back = False
         self._queued = None
         if self._peek_id:
@@ -494,24 +523,29 @@ class FlipPicture(FixedPicture):
                 self._badges.set_opacity(max(0.0, 1.0 - fade))
             else:
                 self._badges.set_opacity(0.0)
-        pin = self._pin_button
-        if face < 0 or face >= len(self._wallpapers):
-            if pin is not None:
-                pin.set_visible(False)
-                pin.set_opacity(0.0)
-            for nav in self._nav_buttons:
-                nav.set_visible(False)
-                nav.set_opacity(0.0)
-            return
-        pin_opacity = max(0.0, 1.0 - abs(local_deg) / 55.0)
-        nav_opacity = 1.0 if (self._from_face >= 0 and self._to_face >= 0) else pin_opacity
+        face_opacity = max(0.0, 1.0 - abs(local_deg) / 55.0)
+        show_nav = len(self._wallpapers) > 1 and (
+            (self._interactive and self._nav_steady) or face >= 0
+        )
+        nav_opacity = 1.0 if (self._interactive and self._nav_steady) else face_opacity
         for nav in self._nav_buttons:
-            nav.set_visible(len(self._wallpapers) > 1)
-            nav.set_opacity(nav_opacity)
+            nav.set_visible(show_nav)
+            nav.set_opacity(nav_opacity if show_nav else 0.0)
+        if show_nav and len(self._nav_buttons) == 2:
+            prev_btn, next_btn = self._nav_buttons
+            prev_btn.set_tooltip_text(_("Preview") if self._next_face_in_cycle(face, -1) == -1
+                                      else _("Previous wallpaper"))
+            next_btn.set_tooltip_text(_("Preview") if self._next_face_in_cycle(face, 1) == -1
+                                      else _("Next wallpaper"))
+        pin = self._pin_button
         if pin is None:
             return
+        if face < 0 or face >= len(self._wallpapers):
+            pin.set_visible(False)
+            pin.set_opacity(0.0)
+            return
         pin.set_visible(True)
-        pin.set_opacity(pin_opacity)
+        pin.set_opacity(face_opacity)
         wp_name = Path(self._wallpapers[face]).name
         pinned = bool(self._active_name and wp_name == self._active_name)
         key = (face, pinned, self._theme_current, len(self._wallpapers))
@@ -532,7 +566,7 @@ class FlipPicture(FixedPicture):
             self._tick_id = self.add_tick_callback(self._on_tick)
 
     def _step(self, dt: float) -> bool:
-        dur = FLIP_STEP_DURATION if (self._from_face >= 0 and self._to_face >= 0) else FLIP_DURATION
+        dur = FLIP_STEP_DURATION if self._nav_steady else FLIP_DURATION
         if self._queued is not None:
             dur *= 0.6
         # Cushion into and out of the subtle ~16° 3D hint so it feels soft, never jerky.
@@ -557,26 +591,12 @@ class FlipPicture(FixedPicture):
             if self._target == PEEK_PROGRESS and self._pulse_back:
                 self._pulse_back = False
                 self._target = 0.0
-            elif self._target == 1.0 and self._to_face == -1:
-                self._from_face = -1
-                self._to_face = 0
-                self._direction = 1.0
-                self._progress = 0.0
-                self._target = 0.0
-                if self._promote_name:
-                    self._promote(self._promote_name)
-                    self._promote_name = None
-            elif self._target == 0.0 and self._from_face == -1:
-                if self._promote_name:
-                    self._promote(self._promote_name)
-                    self._promote_name = None
             elif self._queued is not None:
                 nxt_face, nxt_dir = self._queued
                 self._queued = None
                 cur_face = self._to_face if self._target == 1.0 else self._from_face
                 if nxt_face != cur_face:
-                    if nxt_face >= 0:
-                        self._prefetch_around(nxt_face)
+                    self._prefetch_around(nxt_face)
                     self._from_face = cur_face
                     self._to_face = nxt_face
                     self._direction = nxt_dir
@@ -585,6 +605,24 @@ class FlipPicture(FixedPicture):
                     self._sync_overlays()
                     self.queue_draw()
                     return True
+            if self._target == 1.0 and self._to_face == -1:
+                self._from_face = -1
+                self._to_face = 0
+                self._direction = 1.0
+                self._progress = 0.0
+                self._target = 0.0
+                if not self._hovered and self._promote_name:
+                    self._promote(self._promote_name)
+                    self._promote_name = None
+            elif self._target == 0.0 and self._from_face == -1:
+                if not self._hovered and self._promote_name:
+                    self._promote(self._promote_name)
+                    self._promote_name = None
+            if self._interactive and (
+                (self._target == 1.0 and self._progress >= 1.0)
+                or (self._target == 0.0 and self._progress <= 0.0)
+            ):
+                self._nav_steady = True
 
         self._sync_overlays()
         self.queue_draw()
