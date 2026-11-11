@@ -2892,6 +2892,23 @@ class FlipTextureTests(unittest.TestCase):
         self.assertEqual(set(pic._textures), {paths[i] for i in (3, 4, 5, 6)})
         self.assertNotIn(paths[0], pic._requested)
 
+    def test_a_decode_no_longer_wanted_is_dropped(self):
+        paths = [f"/w{i}.png" for i in range(10)]
+        pic = theme_popup.FlipPicture(16, 9, wallpapers=paths)
+        pic._from_face, pic._to_face = 4, 5
+        self.assertTrue(pic._still_wanted(paths[5]))
+        self.assertFalse(pic._still_wanted(paths[0]))
+        pic._on_card_gone()
+        self.assertFalse(pic._still_wanted(paths[5]))
+        called = []
+        decoder = theme_popup.ImageDecoder(1)
+        decoder.request(None, "/nonexistent.png", 16, 9, setter=lambda t: called.append("set"),
+                        failed=lambda: called.append("failed"), wanted=lambda: False)
+        import time
+        time.sleep(0.3)
+        theme_popup.GLib.MainContext.default().iteration(False)
+        self.assertEqual(called, [])
+
     def test_a_failed_decode_fills_the_face(self):
         paths = ["/missing.png"]
         pic = theme_popup.FlipPicture(16, 9, wallpapers=paths)
@@ -2914,6 +2931,20 @@ class FlipTextureTests(unittest.TestCase):
 
 
 class Flip3DTests(ViewLayerTest):
+    def test_a_pin_while_one_runs_waits_and_the_latest_wins(self):
+        from types import SimpleNamespace
+        theme = SimpleNamespace(current=False, slug="gamma")
+        pic = SimpleNamespace(current_wallpaper_path=lambda: "/t/g2.png", is_current_wallpaper_pinned=lambda: False)
+        started = []
+        with patch.object(self.app, "_pin_wallpaper", lambda t, p, path: started.append(path.name)):
+            self.app._pin_busy = True
+            self.app.pin_theme_wallpaper(theme, pic)
+            self.assertEqual(started, [])                      # waits
+            self.assertEqual(self.app._pin_next[2], "/t/g2.png")
+            self.app._pin_finished()                           # the running one ends
+            self.assertEqual(started, ["g2.png"])              # the latest choice runs then
+        self.app._pin_busy = False
+
     def test_another_themes_first_wallpaper_is_not_pinned_unless_remembered(self):
         from types import SimpleNamespace
         theme = SimpleNamespace(current=False, slug="gamma")

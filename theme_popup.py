@@ -195,6 +195,9 @@ class FlipPicture(FixedPicture):
         self._shown_pin_state = None
         self._textures: dict[str, Gdk.Paintable] = {}
         self._requested: set[str] = set()
+        self._gone = False                    # unrealized: pending decodes are dropped
+        self.connect("unrealize", self._on_card_gone)
+        self.connect("realize", lambda *_: setattr(self, "_gone", False))
         self._selected = False
         self._hovered = False
         self._interactive = False  # True once rotation or manual arrow mode is active
@@ -256,6 +259,18 @@ class FlipPicture(FixedPicture):
             del self._textures[path]
             self._requested.discard(path)
 
+    def _still_wanted(self, path: str) -> bool:
+        """Asked by the decoder's worker before decoding: the card still shown and the wallpaper still
+        near the face shown (a plain read of a few fields; a stale answer only decodes one more)."""
+        if not self._gone and path in self._keep_paths():
+            return True
+        # Requested again if it comes back into the window (the set is changed on GTK's loop only).
+        GLib.idle_add(lambda: self._requested.discard(path) and False)
+        return False
+
+    def _on_card_gone(self, *_args):
+        self._gone = True
+
     def _wallpaper_failed(self, path: str):
         """A wallpaper that cannot be decoded shows the preview (or an empty face) instead, so a
         flip waiting for it goes on."""
@@ -287,7 +302,8 @@ class FlipPicture(FixedPicture):
         self._requested.add(path)
         self._decoder.request(self, path, self._size[0], self._size[1],
                               setter=lambda tex, p=path: self._set_wallpaper_paintable(p, tex),
-                              failed=lambda p=path: self._wallpaper_failed(p))
+                              failed=lambda p=path: self._wallpaper_failed(p),
+                              wanted=lambda p=path: self._still_wanted(p))
 
     def _prefetch_around(self, index: int):
         n = len(self._wallpapers)
@@ -812,14 +828,17 @@ class ImageDecoder:
         for _worker in range(workers):
             threading.Thread(target=self.work, daemon=True).start()
 
-    def request(self, picture, path: str, width: int, height: int, setter=None, failed=None):
+    def request(self, picture, path: str, width: int, height: int, setter=None, failed=None, wanted=None):
         """`failed`: called on the main loop when the picture cannot be decoded (a waiting animation
-        must not wait for it forever)."""
-        self.jobs.put((setter or picture.set_paintable, str(path), width, height, failed))
+        must not wait for it forever). `wanted`: asked before decoding; a job no longer wanted (its
+        card gone, its wallpaper rotated away) is dropped without decoding."""
+        self.jobs.put((setter or picture.set_paintable, str(path), width, height, failed, wanted))
 
     def work(self):
         while True:
-            setter, path, width, height, failed = self.jobs.get()
+            setter, path, width, height, failed, wanted = self.jobs.get()
+            if wanted is not None and not wanted():
+                continue
             pixbuf = scaled_pixbuf(path, width, height)
             if pixbuf is not None:
                 GLib.idle_add(self.show, setter, pixbuf)
@@ -983,7 +1002,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             GLib.timeout_add(100, lambda: True)  # Let Python dispatch SIGUSR1.
             self.watch_current_theme()
             write_pid_file()
-            theme_auto.store_default_settings()
+            # Under the shared settings lock (it may wait): on a worker, never at GTK's start.
+            self._async(theme_auto.store_default_settings, lambda *_: None)
             try:
                 if theme_core.sync_enabled():   # opt-in, see the settings button
                     theme_core.ensure_menu_override(SWITCHER_WRAPPER)
@@ -4939,26 +4959,50 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             overlay.add_overlay(next_btn)
 
     def pin_theme_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture):
+        """One pin at a time: a click while one is still being applied is kept (the latest only)
+        and runs once that one has finished, so the last choice is the one that stays."""
         wp_path = picture.current_wallpaper_path()
         if not wp_path or picture.is_current_wallpaper_pinned():
             return
-        path = Path(wp_path)
+        if self.__dict__.get("_pin_busy"):
+            self._pin_next = (theme, picture, wp_path)
+            return
+        self._pin_busy = True
+        self._pin_next = None
+        self._pin_wallpaper(theme, picture, Path(wp_path))
+
+    def _pin_finished(self):
+        self._pin_busy = False
+        nxt, self._pin_next = self.__dict__.get("_pin_next"), None
+        if nxt is not None:
+            theme, picture, wp_path = nxt
+            if picture.current_wallpaper_path() == wp_path:
+                self.pin_theme_wallpaper(theme, picture)
+
+    def _pin_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture, path: Path):
         if theme.current:
             def done(ok, error):
-                if not ok or error is not None:
-                    theme_core.notify(_("Could not set background"), path.name)
-                    return
-                self.current_bg = theme_auto.current_background() or path
-                picture.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
+                try:
+                    if not ok or error is not None:
+                        theme_core.notify(_("Could not set background"), path.name)
+                        return
+                    self.current_bg = theme_auto.current_background() or path
+                    picture.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
+                finally:
+                    self._pin_finished()
             self._async(lambda: theme_auto.pin_current_wallpaper(theme.slug, path), done)
             return
         if not self.pin_apply_theme:
             # A state file write (folder, atomic write, fsync): on a worker, never on GTK's loop.
             def remembered(ok, error):
-                if not ok or error is not None:
-                    theme_core.notify(_("Could not set background"), path.name)
-                    return
-                picture.set_active_wallpaper(path, theme_current=False, pin_apply_theme=False, promote_on_reset=True)
+                try:
+                    if not ok or error is not None:
+                        theme_core.notify(_("Could not set background"), path.name)
+                        return
+                    picture.set_active_wallpaper(path, theme_current=False, pin_apply_theme=False,
+                                                 promote_on_reset=True)
+                finally:
+                    self._pin_finished()
             self._async(lambda: theme_auto.remember_omarchy_theme_background(theme.slug, path), remembered)
             return
         if theme.slug in self.hidden:
@@ -4976,7 +5020,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                     theme_core.set_desktop_background(path)
                 theme_auto.remember_base_wallpaper(theme.slug, path)
             return ok
-        self._async(apply_with_wallpaper, lambda ok, error: self.after_apply(theme, ok, error))
+        def applied(ok, error):
+            try:
+                self.after_apply(theme, ok, error)
+            finally:
+                self._pin_finished()
+        self._async(apply_with_wallpaper, applied)
 
     def _attach_flip_hover(self, target: Gtk.Widget, picture: FlipPicture):
         state = [None]
