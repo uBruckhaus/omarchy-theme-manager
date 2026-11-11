@@ -141,6 +141,10 @@ def _validate_settings(value: dict) -> None:
     if "slideshow_minutes" in value and (type(value["slideshow_minutes"]) is not int or
                                          value["slideshow_minutes"] not in theme_auto.SLIDESHOW_CHOICES):
         raise ValueError("invalid settings")
+    if "preview_flip_delay" in value and (isinstance(value["preview_flip_delay"], bool) or
+                                          not isinstance(value["preview_flip_delay"], (int, float)) or
+                                          value["preview_flip_delay"] not in theme_auto.FLIP_DELAY_CHOICES):
+        raise ValueError("invalid settings")
     if "own_font" in value and value["own_font"] is not None and \
             (not isinstance(value["own_font"], str) or not theme_custom.FONT_RE.fullmatch(value["own_font"])):
         raise ValueError("invalid settings")

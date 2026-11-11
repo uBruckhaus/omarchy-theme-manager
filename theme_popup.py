@@ -98,9 +98,9 @@ PREVIEW_WORKERS = 4    # parallel preview downloads on the import page
 PEEK_DELAY_MS = 70     # brief skim guard so sweeping fast across cards stays still
 SELECT_PEEK_MS = 90    # brief settle guard so holding Arrow keys stays calm
 PEEK_PROGRESS = 0.19   # ~15.6° gentle 3D edge lift hinting that a wallpaper waits behind
-FLIP_DELAY_MS = 480    # pause after the 3D hint (>2x the old 220 ms) before full 180° rotation
+FLIP_DELAY_MS = 1000   # default 1 s from selecting a theme until automatic 3D rotation starts
 FLIP_DURATION = 0.42   # seconds for a 180° 3D card flip
-FLIP_STEP_DURATION = 0.30  # seconds for rotating between a theme's wallpapers via arrow buttons
+FLIP_STEP_DURATION = 0.30  # seconds for rotating between faces via arrow buttons
 CURSOR_SLACK = 24  # px the pointer may move after opening before the keyboard is released
 MAX_DROPS = 10  # one drop gesture adds at most this many wallpapers
 MAX_DROP_LIST_BYTES = 1024 * 1024  # a dropped uri-list or text, as for the clipboard
@@ -175,12 +175,14 @@ class FlipPicture(FixedPicture):
                  back_path: str | Path | None = None,
                  active_bg: str | Path | None = None,
                  theme_current: bool = False,
+                 delay_s: float = theme_auto.DEFAULT_FLIP_DELAY,
                  decoder=None, radius_fn=None):
         super().__init__(width, height)
         paths = [str(p) for p in wallpapers] if wallpapers else ([str(back_path)] if back_path else [])
         self._wallpapers = paths
         self._theme_current = bool(theme_current)
         self._active_name = Path(active_bg).name if (active_bg and theme_current) else None
+        self._delay_ms = max(0, round(float(delay_s) * 1000))
         self._promote_name: str | None = None
         self._decoder = decoder
         self._radius_fn = radius_fn
@@ -190,8 +192,9 @@ class FlipPicture(FixedPicture):
         self._shown_pin_state = None
         self._textures: dict[str, Gdk.Paintable] = {}
         self._requested: set[str] = set()
+        self._selected = False
         self._hovered = False
-        self._interactive = False  # True once initial hover delay starts the full flip
+        self._interactive = False  # True once rotation or manual arrow mode is active
         self._nav_steady = False   # True once arrow controls stay up across preview + wallpapers
         self._from_face = -1   # -1 = front preview, 0..N-1 = wallpaper index
         self._to_face = 0
@@ -231,7 +234,7 @@ class FlipPicture(FixedPicture):
 
     def _set_wallpaper_paintable(self, path: str, paintable):
         self._textures[path] = paintable
-        if (self._hovered and self._delay_id == 0 and self._target == 1.0
+        if ((self._hovered or self._selected) and self._delay_id == 0 and self._target == 1.0
                 and 0 <= self._to_face < len(self._wallpapers)
                 and self._wallpapers[self._to_face] == path):
             self._animate_to(1.0)
@@ -336,23 +339,35 @@ class FlipPicture(FixedPicture):
         if self._from_face == -1 and self._progress > 0.0:
             self._animate_to(0.0)
 
-    def on_hover_enter(self):
-        if not self._wallpapers or self._hovered:
+    def _activate(self):
+        if not self._wallpapers:
             return
-        self._hovered = True
         self._pulse_back = False
-        if self._peek_id:
-            GLib.source_remove(self._peek_id)
-            self._peek_id = 0
         self.request_back()
+        if self._delay_ms <= 0:
+            if self._peek_id:
+                GLib.source_remove(self._peek_id)
+                self._peek_id = 0
+            if self._delay_id:
+                GLib.source_remove(self._delay_id)
+                self._delay_id = 0
+            self._interactive = True
+            self._nav_steady = True
+            self._sync_overlays()
+            self.queue_draw()
+            return
+        if self._interactive or self._peek_id or self._delay_id:
+            return
+        peek_ms = min(PEEK_DELAY_MS, self._delay_ms)
+        rem_ms = max(40, self._delay_ms - peek_ms)
         if self._from_face == -1 and self._progress <= 0.0:
-            self._peek_id = GLib.timeout_add(PEEK_DELAY_MS, self._on_hover_peek)
+            self._peek_id = GLib.timeout_add(peek_ms, self._on_hover_peek)
         elif self._from_face == -1 and self._to_face >= 0:
             self._queued = None
             if self._progress <= PEEK_PROGRESS + 0.02:
                 self._animate_to(PEEK_PROGRESS)
                 if self._delay_id == 0:
-                    self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+                    self._delay_id = GLib.timeout_add(rem_ms, self._on_delay_done)
             else:
                 self._interactive = True
                 self._animate_to(1.0)
@@ -365,9 +380,68 @@ class FlipPicture(FixedPicture):
                 self._queued = (0, 1.0)
                 self._animate_to(1.0)
 
+    def _close_to_preview(self):
+        self._interactive = False
+        self._nav_steady = False
+        self._pulse_back = False
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+            self._peek_id = 0
+        if self._delay_id:
+            GLib.source_remove(self._delay_id)
+            self._delay_id = 0
+        self._queued = None
+        if self._from_face == -1 and self._progress <= 0.0:
+            self._target = 0.0
+            if self._promote_name:
+                self._promote(self._promote_name)
+                self._promote_name = None
+            self._sync_overlays()
+            return
+        if self._from_face == -1:
+            self._animate_to(0.0)
+        elif self._to_face == -1:
+            self._animate_to(1.0)
+        elif self._progress >= 1.0:
+            self._from_face = self._to_face
+            self._to_face = -1
+            self._direction = -1.0
+            self._progress = 0.0
+            self._animate_to(1.0)
+        elif self._progress <= 0.0:
+            self._to_face = -1
+            self._direction = -1.0
+            self._progress = 0.0
+            self._animate_to(1.0)
+        elif self._progress < 0.5 and self._target == 1.0:
+            self._queued = (-1, -1.0)
+            self._animate_to(0.0)
+        else:
+            self._queued = (-1, -1.0)
+            self._animate_to(self._target)
+
+    def set_selected(self, selected: bool):
+        selected = bool(selected)
+        if selected == self._selected:
+            if selected:
+                self._activate()
+            return
+        self._selected = selected
+        if selected:
+            self._activate()
+        else:
+            self._hovered = False
+            self._close_to_preview()
+
+    def on_hover_enter(self):
+        if not self._wallpapers or self._hovered:
+            return
+        self._hovered = True
+        self._activate()
+
     def _on_hover_peek(self):
         self._peek_id = 0
-        if not self._hovered:
+        if not (self._hovered or self._selected):
             return GLib.SOURCE_REMOVE
         self._from_face = -1
         self._to_face = 0
@@ -375,12 +449,13 @@ class FlipPicture(FixedPicture):
         self._pulse_back = False
         self._animate_to(PEEK_PROGRESS)
         if self._delay_id == 0:
-            self._delay_id = GLib.timeout_add(FLIP_DELAY_MS, self._on_delay_done)
+            rem_ms = max(40, self._delay_ms - min(PEEK_DELAY_MS, self._delay_ms))
+            self._delay_id = GLib.timeout_add(rem_ms, self._on_delay_done)
         return GLib.SOURCE_REMOVE
 
     def _on_delay_done(self):
         self._delay_id = 0
-        if self._hovered:
+        if self._hovered or self._selected:
             self._pulse_back = False
             self._interactive = True
             self._from_face = -1
@@ -397,8 +472,7 @@ class FlipPicture(FixedPicture):
         return ((face + 1 + delta) % (n + 1)) - 1
 
     def rotate_step(self, step_dir: int):
-        n = len(self._wallpapers)
-        if n <= 1 or not self._interactive:
+        if not self._wallpapers or not self._interactive:
             return
         if not self._nav_steady and not self.is_showing_wallpaper():
             return
@@ -442,46 +516,12 @@ class FlipPicture(FixedPicture):
 
     def on_hover_leave(self):
         self._hovered = False
-        self._interactive = False
-        self._nav_steady = False
-        self._pulse_back = False
-        if self._peek_id:
-            GLib.source_remove(self._peek_id)
-            self._peek_id = 0
-        if self._delay_id:
-            GLib.source_remove(self._delay_id)
-            self._delay_id = 0
-        self._queued = None
-        if self._from_face == -1 and self._progress <= 0.0:
-            self._target = 0.0
-            if self._promote_name:
-                self._promote(self._promote_name)
-                self._promote_name = None
-            self._sync_overlays()
+        if self._selected:
             return
-        if self._from_face == -1:
-            self._animate_to(0.0)
-        elif self._to_face == -1:
-            self._animate_to(1.0)
-        elif self._progress >= 1.0:
-            self._from_face = self._to_face
-            self._to_face = -1
-            self._direction = -1.0
-            self._progress = 0.0
-            self._animate_to(1.0)
-        elif self._progress <= 0.0:
-            self._to_face = -1
-            self._direction = -1.0
-            self._progress = 0.0
-            self._animate_to(1.0)
-        elif self._progress < 0.5 and self._target == 1.0:
-            self._queued = (-1, -1.0)
-            self._animate_to(0.0)
-        else:
-            self._queued = (-1, -1.0)
-            self._animate_to(self._target)
+        self._close_to_preview()
 
     def reset_flip(self):
+        self._selected = False
         self._hovered = False
         self._interactive = False
         self._nav_steady = False
@@ -524,7 +564,7 @@ class FlipPicture(FixedPicture):
             else:
                 self._badges.set_opacity(0.0)
         face_opacity = max(0.0, 1.0 - abs(local_deg) / 55.0)
-        show_nav = len(self._wallpapers) > 1 and (
+        show_nav = bool(self._wallpapers) and (
             (self._interactive and self._nav_steady) or face >= 0
         )
         nav_opacity = 1.0 if (self._interactive and self._nav_steady) else face_opacity
@@ -869,6 +909,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.theme_tile_w = TILE
         self.theme_keys = {}
         self.flip_3d = True
+        self.flip_delay = theme_auto.DEFAULT_FLIP_DELAY
         self.hidden_wallpapers = {}
         self.current_bg = None
         self.pointer_moved = False
@@ -2548,6 +2589,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           _("Hovering a theme card flips its preview in 3D to show the theme's wallpaper."),
                           self.switch(theme_auto.preview_flip_enabled(),   # on by default
                                       lambda on: self.save_setting(preview_flip_3d=on)))
+        delay_choices = theme_auto.FLIP_DELAY_CHOICES
+        delay_labels = [_("0 s (arrows only)") if s == 0 else _("{0} s").format(s) for s in delay_choices]
+        self.setting_line(box, _("3D rotation delay"),
+                          _("Seconds before a selected theme card starts rotating. 0 keeps the preview and shows left/right arrows immediately."),
+                          self.dropdown(delay_labels, delay_choices.index(theme_auto.preview_flip_delay()),
+                                        lambda i: self.save_setting(preview_flip_delay=delay_choices[i])))
         self.setting_line(box, _("Also hide in Omarchy's pickers"),
                           _("Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
                           "omarchy-menu.jsonc and a theme-set hook; off removes them again."),
@@ -3436,7 +3483,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             theme_auto.update_settings(**values)
         except OSError as error:
             theme_core.notify(_("Could not save the setting"), str(error))
-        if "sort" in values or "preview_flip_3d" in values:
+        if "sort" in values or "preview_flip_3d" in values or "preview_flip_delay" in values:
             self.refresh_themes()
 
     def corner_labels(self) -> list[str]:
@@ -3479,6 +3526,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           slideshow_minutes=0, corners="windows",
                           screenshot_key=True, screenshot_folder=None,
                           ask_ai_web=True, preview_flip_3d=True,
+                          preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
                           header_order=list(header_order.DEFAULT))
         self.header_order = list(header_order.DEFAULT)
         self.rebuild_header_group()
@@ -4578,6 +4626,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                            if shortcuts.theme_of(a)}
         self.workspace_theme_map = theme_auto.load_workspace_themes()
         self.flip_3d = theme_auto.preview_flip_enabled()
+        self.flip_delay = theme_auto.preview_flip_delay() if self.flip_3d else theme_auto.DEFAULT_FLIP_DELAY
         self.hidden_wallpapers = theme_core.load_hidden_wallpapers() if self.flip_3d else {}
         self.current_bg = theme_auto.current_background() if self.flip_3d else None
         ordered = theme_auto.order_themes(self.theme_list, self.favorites, theme_auto.load_recent(),
@@ -4608,6 +4657,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         selected = selected or self.rows.get_first_child()
         if selected is not None:
             self.rows.select_row(selected)
+            if (self.window is not None and self.window.get_visible()
+                    and self.stack.get_visible_child_name() == "themes"):
+                self._peek_row = selected
+                pic = self._row_flip_picture(selected)
+                if pic is not None:
+                    pic.set_selected(True)
 
     @staticmethod
     def load_hidden_list() -> set[str]:
@@ -4764,7 +4819,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         pin.connect("clicked", lambda _btn, target=theme, pic=picture: self.pin_theme_wallpaper(target, pic))
         picture.set_pin_button(pin)
         overlay.add_overlay(pin)
-        if len(picture._wallpapers) > 1:
+        if picture._wallpapers:
             prev_btn = Gtk.Button(icon_name="go-previous-symbolic")
             prev_btn.add_css_class("flat")
             prev_btn.add_css_class("tm-tile-nav")
@@ -4860,6 +4915,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             picture = FlipPicture(self.theme_tile_w, tile_h, wallpapers=wallpapers,
                                   active_bg=self.current_bg if theme.current else None,
                                   theme_current=theme.current,
+                                  delay_s=self.flip_delay,
                                   decoder=self.decoder,
                                   radius_fn=lambda: self._tile_picture_radius(4))
             self._attach_flip_hover(tile, picture)
@@ -4952,6 +5008,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 picture = FlipPicture(width, height, wallpapers=wallpapers,
                                       active_bg=self.current_bg if theme.current else None,
                                       theme_current=theme.current,
+                                      delay_s=self.flip_delay,
                                       decoder=self.decoder,
                                       radius_fn=lambda: self._tile_picture_radius(6))
                 self._attach_flip_hover(frame, picture)
@@ -5334,7 +5391,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if prev is not None and prev is not row:
             prev_pic = self._row_flip_picture(prev)
             if prev_pic is not None:
-                prev_pic.cancel_peek()
+                prev_pic.set_selected(False)
         self._peek_row = row
         if row is not None:
             self.rows.select_row(row)
@@ -5342,8 +5399,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if (self.window is not None and self.window.get_visible()
                     and self.stack.get_visible_child_name() == "themes"):
                 pic = self._row_flip_picture(row)
-                if pic is not None and not pic._hovered:
-                    pic.schedule_select_peek()
+                if pic is not None:
+                    pic.set_selected(True)
 
     # --- list actions ----------------------------------------------------------------
 

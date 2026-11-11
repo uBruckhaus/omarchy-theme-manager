@@ -259,9 +259,11 @@ class BackupHelperChoiceTests(unittest.TestCase):
 
     def test_preview_flip_3d_setting_is_validated_as_boolean(self):
         import theme_backup
-        for valid in ({"preview_flip_3d": True}, {"preview_flip_3d": False}):
+        for valid in ({"preview_flip_3d": True}, {"preview_flip_3d": False},
+                      {"preview_flip_delay": 0}, {"preview_flip_delay": 1}, {"preview_flip_delay": 0.5}):
             theme_backup._validate_settings(valid)
-        for bad in ({"preview_flip_3d": "yes"}, {"preview_flip_3d": 1}):
+        for bad in ({"preview_flip_3d": "yes"}, {"preview_flip_3d": 1},
+                    {"preview_flip_delay": True}, {"preview_flip_delay": -1}, {"preview_flip_delay": 99}):
             with self.assertRaises(ValueError):
                 theme_backup._validate_settings(bad)
 

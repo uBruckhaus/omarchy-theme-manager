@@ -521,12 +521,16 @@ class CommandLineTests(AutoTestCase):
 
     def test_flip_wallpaper_uses_active_background_when_current_else_first_visible(self):
         self.assertTrue(theme_auto.preview_flip_enabled())
+        self.assertEqual(theme_auto.preview_flip_delay(), 1)
         theme_auto.store_default_settings()
         self.assertIs(theme_auto.settings().get("preview_flip_3d"), True)
-        theme_auto.update_settings(preview_flip_3d=False)
+        self.assertEqual(theme_auto.settings().get("preview_flip_delay"), 1)
+        theme_auto.update_settings(preview_flip_3d=False, preview_flip_delay=0)
         self.assertFalse(theme_auto.preview_flip_enabled())
+        self.assertEqual(theme_auto.preview_flip_delay(), 0)
         theme_auto.store_default_settings()
         self.assertIs(theme_auto.settings().get("preview_flip_3d"), False)  # explicit off stays off
+        self.assertEqual(theme_auto.settings().get("preview_flip_delay"), 0)  # explicit 0 stays 0
 
         bg_nord = self.make_theme("nord", ("a.png", "b.png", "c.png"), current=True)
         self.make_theme("alpha", ("first.png", "second.png"))

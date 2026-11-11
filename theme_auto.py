@@ -34,6 +34,8 @@ import theme_looks
 from i18n import _
 
 SLIDESHOW_CHOICES = (0, 5, 10, 15, 30, 60, 120)   # minutes; 0 = off
+FLIP_DELAY_CHOICES = (0, 0.5, 1, 1.5, 2, 3, 5, 10)  # seconds; 0 = arrows on preview, no auto-flip
+DEFAULT_FLIP_DELAY = 1
 SORT_CHOICES = ("name", "recent")
 TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
 DEFAULT_SCHEDULE = {"enabled": False, "day": "", "night": "", "day_at": "07:00", "night_at": "19:00"}
@@ -163,8 +165,11 @@ def store_default_settings() -> None:
     them: Search the web for wallpapers and 3D wallpaper flip (only missing
     values; yours stay)."""
     current = settings()
-    missing = {key: True for key in ("ask_ai_web", "preview_flip_3d")
-               if not isinstance(current.get(key), bool)}
+    missing: dict = {key: True for key in ("ask_ai_web", "preview_flip_3d")
+                     if not isinstance(current.get(key), bool)}
+    delay = current.get("preview_flip_delay")
+    if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay not in FLIP_DELAY_CHOICES:
+        missing["preview_flip_delay"] = DEFAULT_FLIP_DELAY
     if missing:
         try:
             update_settings(**missing)
@@ -174,6 +179,13 @@ def store_default_settings() -> None:
 
 def preview_flip_enabled() -> bool:
     return settings().get("preview_flip_3d") is not False
+
+
+def preview_flip_delay() -> int | float:
+    value = settings().get("preview_flip_delay")
+    if not isinstance(value, bool) and isinstance(value, (int, float)) and value in FLIP_DELAY_CHOICES:
+        return int(value) if value == int(value) else float(value)
+    return DEFAULT_FLIP_DELAY
 
 
 def workspace_wallpapers_enabled() -> bool:

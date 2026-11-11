@@ -2914,8 +2914,9 @@ class Flip3DTests(ViewLayerTest):
         self.assertEqual(pic._progress, 0.0)
         self.assertEqual(pic._badges.get_opacity(), 1.0)
 
-        # Hover peek: lifts to PEEK_PROGRESS while keeping front badges crisp, then waits FLIP_DELAY_MS (>=440 ms).
-        self.assertGreaterEqual(theme_popup.FLIP_DELAY_MS, 440)
+        # Default delay is 1 s (1000 ms): lifts to PEEK_PROGRESS keeping front badges crisp, then waits to 1000 ms.
+        self.assertEqual(theme_popup.FLIP_DELAY_MS, 1000)
+        self.assertEqual(pic._delay_ms, 1000)
         pic._hovered = True
         pic._on_hover_peek()
         for _step in range(12):
@@ -2997,16 +2998,25 @@ class Flip3DTests(ViewLayerTest):
         self.assertTrue(all(not b.get_visible() for b in pic._nav_buttons))
         self.assertEqual(Path(pic._wallpapers[0]).name, "w3.png")  # promoted to first for next hover
 
-        # Non-current theme with 1 wallpaper: no arrow buttons, starts unpinned, and pin applies theme + wallpaper.
-        self.assertEqual(beta_pic._nav_buttons, ())
+        # Non-current theme with 1 wallpaper: starts unpinned, rotates back to preview (-1) and forward to b1.png, and pin applies theme + wallpaper.
+        self.assertEqual(len(beta_pic._nav_buttons), 2)
         beta_pic.set_paintable(tex)
         beta_pic.set_back_paintable(tex)
-        beta_pic._hovered = True
+        beta_pic.set_selected(True)
+        if beta_pic._peek_id:
+            GLib.source_remove(beta_pic._peek_id)
+            beta_pic._peek_id = 0
         beta_pic._on_delay_done()
         for _step in range(4):
             beta_pic._step(theme_popup.FLIP_DURATION / 4.0)
         self.assertFalse(beta_pic._pin_button.has_css_class("pinned"))
+        beta_pic.rotate_step(-1)
+        for _step in range(4):
+            beta_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
+        self.assertEqual(beta_pic.visible_face(), -1)
         beta_pic.rotate_step(1)
+        for _step in range(4):
+            beta_pic._step(theme_popup.FLIP_STEP_DURATION / 4.0)
         self.assertTrue(beta_pic.current_wallpaper_path().endswith("b1.png"))
         applied = []
         with patch.object(theme_popup.ThemeManager, "_async",
@@ -3019,8 +3029,27 @@ class Flip3DTests(ViewLayerTest):
             beta_pic._pin_button.emit("clicked")
         self.assertEqual(applied, [("theme", "beta"), ("bg", "b1.png")])
 
-        # Turning off the setting disables 3D flip; Reset to defaults turns it back on.
+        # Setting delay to 0 s: selecting a theme keeps original preview (-1) and shows < / > arrows immediately.
         self.app.open_settings()
+        drops = [w for w in self.descendants(self.app.settings_sections["themes"])
+                 if isinstance(w, Gtk.DropDown)]
+        delay_drop = drops[1]  # second dropdown in Themes section (after Sort)
+        self.assertEqual(theme_popup.theme_auto.FLIP_DELAY_CHOICES[delay_drop.get_selected()], 1)
+        delay_drop.set_selected(0)  # 0 s (arrows only)
+        self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 0)
+        pic_zero = {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
+        self.assertEqual(pic_zero._delay_ms, 0)
+        self.assertTrue(all(not b.get_visible() for b in pic_zero._nav_buttons))
+        pic_zero.set_selected(True)
+        self.assertEqual(pic_zero._peek_id, 0)
+        self.assertEqual(pic_zero._delay_id, 0)
+        self.assertEqual(pic_zero.visible_face(), -1)
+        self.assertFalse(pic_zero._pin_button.get_visible())
+        self.assertTrue(all(b.get_visible() for b in pic_zero._nav_buttons))
+        pic_zero.set_selected(False)
+        self.assertTrue(all(not b.get_visible() for b in pic_zero._nav_buttons))
+
+        # Turning off the setting disables 3D flip; Reset to defaults restores On and 1 s.
         switches = [w for w in self.descendants(self.app.settings_sections["themes"])
                     if isinstance(w, Gtk.Switch)]
         flip_switch = switches[0]  # first switch in Themes section
@@ -3031,6 +3060,7 @@ class Flip3DTests(ViewLayerTest):
         self.assertNotIsInstance(pic_off, theme_popup.FlipPicture)
         self.app.reset_settings()
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), True)
+        self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 1)
 
 
 if __name__ == "__main__":

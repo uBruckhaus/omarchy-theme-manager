@@ -560,3 +560,39 @@ EXTRA['Apply theme with this wallpaper'] = {
     'nl': 'Thema met deze achtergrond toepassen',
     'pl': 'Zastosuj motyw z tą tapetą',
 }
+EXTRA['3D rotation delay'] = {
+    'de': 'Verzögerung der 3D-Drehung',
+    'fr': 'Délai de rotation 3D',
+    'es': 'Retardo del giro 3D',
+    'it': 'Ritardo rotazione 3D',
+    'pt': 'Atraso da rotação 3D',
+    'nl': 'Vertraging voor 3D-draai',
+    'pl': 'Opóźnienie obrotu 3D',
+}
+EXTRA['Seconds before a selected theme card starts rotating. 0 keeps the preview and shows left/right arrows immediately.'] = {
+    'de': 'Sekunden, bis sich eine ausgewählte Theme-Karte zu drehen beginnt. 0 behält die Vorschau und zeigt sofort Links-/Rechtspfeile.',
+    'fr': 'Secondes avant que la carte du thème sélectionné commence à pivoter. 0 garde l’aperçu et affiche aussitôt les flèches gauche/droite.',
+    'es': 'Segundos antes de que la tarjeta del tema seleccionado empiece a girar. 0 mantiene la vista previa y muestra enseguida las flechas izquierda/derecha.',
+    'it': 'Secondi prima che la scheda del tema selezionato inizi a ruotare. 0 mantiene l’anteprima e mostra subito le frecce sinistra/destra.',
+    'pt': 'Segundos até o cartão do tema selecionado começar a rodar. 0 mantém a pré-visualização e mostra logo as setas esquerda/direita.',
+    'nl': 'Seconden voordat een geselecteerde themakaart begint te draaien. 0 behoudt het voorbeeld en toont direct pijl-links/rechts.',
+    'pl': 'Sekundy do rozpoczęcia obrotu wybranej karty motywu. 0 zachowuje podgląd i od razu pokazuje strzałki w lewo/prawo.',
+}
+EXTRA['0 s (arrows only)'] = {
+    'de': '0 s (nur Pfeile)',
+    'fr': '0 s (flèches seules)',
+    'es': '0 s (solo flechas)',
+    'it': '0 s (solo frecce)',
+    'pt': '0 s (só setas)',
+    'nl': '0 s (alleen pijlen)',
+    'pl': '0 s (tylko strzałki)',
+}
+EXTRA['{0} s'] = {
+    'de': '{0} s',
+    'fr': '{0} s',
+    'es': '{0} s',
+    'it': '{0} s',
+    'pt': '{0} s',
+    'nl': '{0} s',
+    'pl': '{0} s',
+}
