@@ -3027,9 +3027,9 @@ class Flip3DTests(ViewLayerTest):
         self.assertEqual(pic._progress, 0.0)
         self.assertEqual(pic._badges.get_opacity(), 1.0)
 
-        # Default delay is 1 s (1000 ms): lifts to PEEK_PROGRESS keeping front badges crisp, then waits to 1000 ms.
-        self.assertEqual(theme_popup.FLIP_DELAY_MS, 1000)
-        self.assertEqual(pic._delay_ms, 1000)
+        # Default delay is 2 s (2000 ms): lifts to PEEK_PROGRESS keeping front badges crisp, then waits to 2000 ms.
+        self.assertEqual(theme_popup.FLIP_DELAY_MS, 2000)
+        self.assertEqual(pic._delay_ms, 2000)
         pic._hovered = True
         pic._on_hover_peek()
         for _step in range(12):
@@ -3147,7 +3147,7 @@ class Flip3DTests(ViewLayerTest):
         drops = [w for w in self.descendants(self.app.settings_sections["themes"])
                  if isinstance(w, Gtk.DropDown)]
         delay_drop = drops[1]  # second dropdown in Themes section (after Sort)
-        self.assertEqual(theme_popup.theme_auto.FLIP_DELAY_CHOICES[delay_drop.get_selected()], 1)
+        self.assertEqual(theme_popup.theme_auto.FLIP_DELAY_CHOICES[delay_drop.get_selected()], 2)
         delay_drop.set_selected(0)  # 0 s (arrows only)
         alpha_pic = lambda: {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
         self.spin_until(lambda: getattr(alpha_pic(), "_delay_ms", None) == 0)
@@ -3214,7 +3214,7 @@ class Flip3DTests(ViewLayerTest):
         self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_big_card"), True)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_big_auto_rotate"), False)
-        self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 1)
+        self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 2)
 
     def test_big_preview_overlay_all_features_and_setting(self):
         """Clicking or pressing Enter opens the centered big preview overlay inside the window with
@@ -3331,7 +3331,7 @@ class Flip3DTests(ViewLayerTest):
         rows_by_slug = {r.tm_theme.slug: r for r in self.rows_list()}
         self.app.rows.emit("child-activated", rows_by_slug["alpha"])
         auto_pic = self.app.big_preview_picture
-        self.assertEqual(auto_pic._delay_ms, 1000)
+        self.assertEqual(auto_pic._delay_ms, 2000)
         self.assertNotEqual(auto_pic._peek_id, 0)
         auto_pic.set_paintable(tex)
         for wp in auto_pic._wallpapers:

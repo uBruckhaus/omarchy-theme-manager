@@ -35,7 +35,7 @@ from i18n import _
 
 SLIDESHOW_CHOICES = (0, 5, 10, 15, 30, 60, 120)   # minutes; 0 = off
 FLIP_DELAY_CHOICES = (0, 0.5, 1, 1.5, 2, 3, 5, 10)  # seconds; 0 = arrows on preview, no auto-flip
-DEFAULT_FLIP_DELAY = 1
+DEFAULT_FLIP_DELAY = 2
 SORT_CHOICES = ("name", "recent")
 TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
 DEFAULT_SCHEDULE = {"enabled": False, "day": "", "night": "", "day_at": "07:00", "night_at": "19:00"}
