@@ -2914,6 +2914,26 @@ class FlipTextureTests(unittest.TestCase):
 
 
 class Flip3DTests(ViewLayerTest):
+    def test_another_themes_first_wallpaper_is_not_pinned_unless_remembered(self):
+        from types import SimpleNamespace
+        theme = SimpleNamespace(current=False, slug="gamma")
+        self.app.pin_apply_theme = False
+        with patch.object(theme_popup.theme_auto, "remembered_omarchy_theme_background", return_value=None):
+            self.assertIsNone(self.app.flip_active_bg(theme, ["/t/g1.png", "/t/g2.png"]))
+        with patch.object(theme_popup.theme_auto, "remembered_omarchy_theme_background", return_value="g1.png"):
+            self.assertEqual(self.app.flip_active_bg(theme, ["/t/g1.png", "/t/g2.png"]), "/t/g1.png")
+        self.app.pin_apply_theme = True
+        self.assertIsNone(self.app.flip_active_bg(theme, ["/t/g1.png"]))
+
+    def spin_until(self, condition, seconds: float = 5.0):
+        """The flip settings are saved by a worker: run GTK's loop until `condition()` holds."""
+        import time
+        context = theme_popup.GLib.MainContext.default()
+        deadline = time.monotonic() + seconds
+        while not condition() and time.monotonic() < deadline:
+            context.iteration(False)
+            time.sleep(0.01)
+
     def test_theme_tile_flips_in_3d_on_hover_and_respects_setting(self):
         t_with = self.make_theme("user", "alpha", wallpapers=("w1.png", "w2.png", "w3.png")).path
         (t_with / "preview.png").write_bytes(PNG)
@@ -3071,6 +3091,8 @@ class Flip3DTests(ViewLayerTest):
         delay_drop = drops[1]  # second dropdown in Themes section (after Sort)
         self.assertEqual(theme_popup.theme_auto.FLIP_DELAY_CHOICES[delay_drop.get_selected()], 1)
         delay_drop.set_selected(0)  # 0 s (arrows only)
+        alpha_pic = lambda: {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
+        self.spin_until(lambda: getattr(alpha_pic(), "_delay_ms", None) == 0)
         self.assertEqual(theme_popup.theme_auto.settings().get("preview_flip_delay"), 0)
         pic_zero = {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
         self.assertEqual(pic_zero._delay_ms, 0)
@@ -3092,13 +3114,16 @@ class Flip3DTests(ViewLayerTest):
         self.assertTrue(flip_switch.get_active())
         self.assertTrue(pin_apply_switch.get_active())
         pin_apply_switch.set_active(False)
+        beta_pic = lambda: {r.tm_theme.slug: r for r in self.rows_list()}["beta"].get_child().get_first_child().get_first_child()
+        self.spin_until(lambda: getattr(beta_pic(), "_pin_apply_theme", True) is False)
         self.assertIs(theme_popup.theme_auto.settings().get("preview_pin_apply_theme"), False)
         beta_no_apply = {r.tm_theme.slug: r for r in self.rows_list()}["beta"].get_child().get_first_child().get_first_child()
         beta_no_apply.set_paintable(tex)
         for wp in beta_no_apply._wallpapers:
             beta_no_apply._set_wallpaper_paintable(wp, tex)
         beta_no_apply.set_selected(True)  # delay is still 0 s from above
-        beta_no_apply.rotate_step(1)      # -> b1.png (already current for beta -> pinned)
+        self.assertEqual(theme_popup.theme_auto.remembered_omarchy_theme_background("beta"), "b1.png")
+        beta_no_apply.rotate_step(1)      # -> b1.png (remembered for beta by the pin above -> pinned)
         for _step in range(4):
             beta_no_apply._step(theme_popup.FLIP_STEP_DURATION / 4.0)
         self.assertTrue(beta_no_apply._pin_button.has_css_class("pinned"))
@@ -3110,12 +3135,18 @@ class Flip3DTests(ViewLayerTest):
         with patch.object(theme_popup.theme_auto, "apply_theme",
                           side_effect=lambda slug: (applied_no_switch.append(slug), True)[-1]):
             beta_no_apply._pin_button.emit("clicked")
+            self.spin_until(lambda: theme_popup.theme_auto.remembered_omarchy_theme_background("beta") == "b2.png"
+                            and beta_no_apply._pin_button.has_css_class("pinned"))
         self.assertEqual(applied_no_switch, [])
         self.assertEqual(theme_popup.theme_auto.remembered_omarchy_theme_background("beta"), "b2.png")
         self.assertTrue(beta_no_apply._pin_button.has_css_class("pinned"))
 
         # Turning off 3D flip disables it; Reset to defaults restores On, 1 s, and pin-apply On.
         flip_switch.set_active(False)
+        self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_flip_3d") is False)
+        self.spin_until(lambda: not isinstance({r.tm_theme.slug: r for r in self.rows_list()}["alpha"]
+                                               .get_child().get_first_child().get_first_child(),
+                                               theme_popup.FlipPicture))
         self.assertIs(theme_popup.theme_auto.settings().get("preview_flip_3d"), False)
         pic_off = {r.tm_theme.slug: r for r in self.rows_list()}["alpha"].get_child().get_first_child().get_first_child()
         self.assertNotIsInstance(pic_off, theme_popup.FlipPicture)

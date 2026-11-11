@@ -3531,14 +3531,54 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if shortcuts.load_state():
             self._async(lambda: shortcuts.save_and_apply(shortcuts.load_state()), lambda *_: None)
 
+    def flip_active_bg(self, theme, wallpapers):
+        """The wallpaper a card shows as pinned: the desktop's for the theme in use; on another
+        theme's card (pinning without applying) only the one Omarchy really remembers for it
+        (flip_wallpapers puts it first), never a first wallpaper that was never chosen."""
+        if theme.current:
+            return self.current_bg
+        if self.pin_apply_theme or not wallpapers:
+            return None
+        remembered = theme_auto.remembered_omarchy_theme_background(theme.slug)
+        return wallpapers[0] if remembered and Path(wallpapers[0]).name == remembered else None
+
+    FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme")
+
     def save_setting(self, **values):
+        if any(key in values for key in self.FLIP_SETTINGS):
+            # The 3D flip's settings: written by one settings worker in order (the shared lock may
+            # wait), the cards rebuilt once it is stored, never a wait on GTK's loop.
+            self._save_in_background(values)
+            return
         try:
             theme_auto.update_settings(**values)
         except OSError as error:
             theme_core.notify(_("Could not save the setting"), str(error))
-        if ("sort" in values or "preview_flip_3d" in values
-                or "preview_flip_delay" in values or "preview_pin_apply_theme" in values):
+        if "sort" in values:
             self.refresh_themes()
+
+    def _save_in_background(self, values: dict):
+        jobs = self.__dict__.get("_settings_jobs")
+        if jobs is None:
+            jobs = self._settings_jobs = queue.SimpleQueue()
+
+            def worker():
+                while True:
+                    job = jobs.get()
+                    try:
+                        theme_auto.update_settings(**job)
+                        error = None
+                    except OSError as failure:
+                        error = failure
+                    GLib.idle_add(lambda e=error: self._background_saved(e) and False)
+            threading.Thread(target=worker, daemon=True).start()
+        jobs.put(dict(values))
+
+    def _background_saved(self, error):
+        if error is not None:
+            theme_core.notify(_("Could not save the setting"), str(error))
+        self.refresh_themes()
+        return False
 
     def corner_labels(self) -> list[str]:
         """In the order of corners.CHOICES."""
@@ -4977,7 +5017,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
                       if self.flip_3d and theme.preview else [])
         if wallpapers:
-            active_bg = self.current_bg if theme.current else (wallpapers[0] if not self.pin_apply_theme else None)
+            active_bg = self.flip_active_bg(theme, wallpapers)
             picture = FlipPicture(self.theme_tile_w, tile_h, wallpapers=wallpapers,
                                   active_bg=active_bg,
                                   theme_current=theme.current,
@@ -5072,7 +5112,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
                           if self.flip_3d else [])
             if wallpapers:
-                active_bg = self.current_bg if theme.current else (wallpapers[0] if not self.pin_apply_theme else None)
+                active_bg = self.flip_active_bg(theme, wallpapers)
                 picture = FlipPicture(width, height, wallpapers=wallpapers,
                                       active_bg=active_bg,
                                       theme_current=theme.current,
@@ -6483,13 +6523,27 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         while row is not None:
             theme = getattr(row, "tm_theme", None)
             if theme is not None and theme.current:
-                child = row.get_child()
-                frame = child.get_first_child() if child is not None else None
-                pic = frame.get_first_child() if frame is not None else None
-                if isinstance(pic, FlipPicture):
+                pic = self._flip_picture_in(row)          # wide tile or list row (with its overlay)
+                if pic is not None:
                     pic.set_active_wallpaper(self.current_bg, theme_current=True, promote_on_reset=True)
             row = row.get_next_sibling()
         return GLib.SOURCE_REMOVE
+
+    @staticmethod
+    def _flip_picture_in(widget, depth: int = 6):
+        """The card's FlipPicture, a few levels below the row (whatever the layout puts between)."""
+        stack = [(widget, 0)]
+        while stack:
+            node, level = stack.pop()
+            if isinstance(node, FlipPicture):
+                return node
+            if level >= depth or node is None:
+                continue
+            child = node.get_first_child()
+            while child is not None:
+                stack.append((child, level + 1))
+                child = child.get_next_sibling()
+        return None
 
     def follow_theme_change(self):
         self.theme_sync = 0
