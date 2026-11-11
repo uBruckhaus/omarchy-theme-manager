@@ -163,18 +163,22 @@ def update_settings(**values) -> None:
 def store_default_settings() -> None:
     """Defaults that are on stored as on, so settings.json and a backup show
     them: Search the web for wallpapers and 3D wallpaper flip (only missing
-    values; yours stay)."""
-    current = settings()
-    missing: dict = {key: True for key in ("ask_ai_web", "preview_flip_3d", "preview_pin_apply_theme")
-                     if not isinstance(current.get(key), bool)}
-    delay = current.get("preview_flip_delay")
-    if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay not in FLIP_DELAY_CHOICES:
-        missing["preview_flip_delay"] = DEFAULT_FLIP_DELAY
-    if missing:
-        try:
-            update_settings(**missing)
-        except OSError:
-            pass
+    values; yours stay). Which ones are missing is decided under the settings
+    lock, so a choice saved meanwhile is never overwritten by a default."""
+    path = theme_core.settings_file()
+    try:
+        with theme_core.settings_lock(path):
+            data = theme_core._load_settings(path)
+            missing: dict = {key: True for key in ("ask_ai_web", "preview_flip_3d", "preview_pin_apply_theme")
+                             if not isinstance(data.get(key), bool)}
+            delay = data.get("preview_flip_delay")
+            if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay not in FLIP_DELAY_CHOICES:
+                missing["preview_flip_delay"] = DEFAULT_FLIP_DELAY
+            if missing:
+                data.update(missing)
+                theme_core._atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o600)
+    except OSError:
+        pass
 
 
 def preview_flip_enabled() -> bool:

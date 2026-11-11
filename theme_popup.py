@@ -818,6 +818,10 @@ def scaled_pixbuf(path: str, width: int, height: int):
         return None
 
 
+class BackgroundNotSet(Exception):
+    """A pinned theme was applied, but its wallpaper could not be set."""
+
+
 class ImageDecoder:
     """Decodes previews and wallpaper thumbnails on worker threads and hands
     the result to a Gtk.Picture on the main loop, so neither a large image
@@ -5016,13 +5020,18 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             theme_auto.remember_omarchy_theme_background(theme.slug, path)
             ok = theme_auto.apply_theme(theme.slug)
             if ok:
-                if not theme_auto._same_wallpaper(theme_auto.current_background(), path):
-                    theme_core.set_desktop_background(path)
+                if not theme_auto._same_wallpaper(theme_auto.current_background(), path) \
+                        and not theme_core.set_desktop_background(path):
+                    raise BackgroundNotSet(path.name)   # the theme is applied, not the picture
                 theme_auto.remember_base_wallpaper(theme.slug, path)
             return ok
         def applied(ok, error):
             try:
-                self.after_apply(theme, ok, error)
+                if isinstance(error, BackgroundNotSet):
+                    self.after_apply(theme, True, None)        # the theme is in use …
+                    theme_core.notify(_("Could not set background"), path.name)   # … its picture is not
+                else:
+                    self.after_apply(theme, ok, error)
             finally:
                 self._pin_finished()
         self._async(apply_with_wallpaper, applied)
