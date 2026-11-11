@@ -190,7 +190,11 @@ BarWidget {
     tilingDeadline.restart()
     tilingWorker.running = true
     if (tilingWorker.running) markTilingSeen(address)            // handed over (once; no retries)
-    else Qt.callLater(root.tilingSettled)                        // it did not start: a rescan may pick it up
+    else {                                                       // it did not start:
+      tilingOverflow = true                                      // looked for again by a rescan,
+      tilingRetry.restart()                                      // at most every 30 s
+      Qt.callLater(root.tilingSettled)
+    }
   }
 
   property bool tilingBusy: false
@@ -199,7 +203,7 @@ BarWidget {
     if (!tilingBusy || tilingWorker.running) return   // settled already, or still going
     tilingBusy = false
     tilingDeadline.stop()
-    if (tilingQueue.length === 0 && tilingOverflow) rescanMissedWindows()
+    if (tilingQueue.length === 0 && tilingOverflow && !tilingRetry.running) rescanMissedWindows()
     tilingSettle.restart()                   // the next window, if any
   }
 
@@ -235,8 +239,8 @@ BarWidget {
     if (!key || tilingSeen[key]) return
     tilingSeen[key] = true
     tilingSeenOrder.push(key)
-    // Pruned to the open windows on every rescan; this cap only guards a desktop never rescanned.
-    while (tilingSeenOrder.length > tilingSeenMax) delete tilingSeen[tilingSeenOrder.shift()]
+    // Pruned to the windows still open (never an open one evicted): on every rescan and here.
+    if (tilingSeenOrder.length > tilingSeenMax) pruneTilingSeen()
   }
 
   function openWindows() {
@@ -249,16 +253,21 @@ BarWidget {
     return found
   }
 
-  function rescanMissedWindows() {
-    tilingOverflow = false
-    var queue = tilingQueue.slice()
-    var windows = openWindows()
+  function pruneTilingSeen() {
     // The history keeps only windows still open (so it stays as small as the desktop itself).
+    var windows = openWindows()
     var kept = {}, order = []
     for (var j = 0; j < windows.length; j++)
       if (tilingSeen[windows[j]]) { kept[windows[j]] = true; order.push(windows[j]) }
     tilingSeen = kept
     tilingSeenOrder = order
+    return windows
+  }
+
+  function rescanMissedWindows() {
+    tilingOverflow = false
+    var queue = tilingQueue.slice()
+    var windows = pruneTilingSeen()
     for (var i = 0; i < windows.length; i++) {
       if (tilingSeen[windows[i]] || queue.indexOf(windows[i]) >= 0) continue
       if (queue.length >= tilingQueueMax) { tilingOverflow = true; break }
@@ -291,6 +300,13 @@ BarWidget {
     }
   }
   Timer { id: tilingSettle; interval: 150; onTriggered: root.nextTilingWindow() }
+  // After a helper that could not start: the next rescan waits this long (no busy retry loop).
+  Timer {
+    id: tilingRetry
+    interval: 30000
+    repeat: false
+    onTriggered: if (!root.tilingBusy && root.tilingQueue.length === 0 && root.tilingOverflow) root.rescanMissedWindows()
+  }
   Process {
     id: tilingWorker
     onRunningChanged: if (!running) Qt.callLater(root.tilingSettled)
