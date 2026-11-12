@@ -646,6 +646,34 @@ class ExifStripTests(unittest.TestCase):
         tagged = b"RIFF" + (4 + len(body)).to_bytes(4, "little") + b"WEBP" + body
         self.assertEqual(theme_core.without_exif(tagged), plain)
 
+    def test_malformed_files_are_refused_not_passed_on_with_exif(self):
+        plain = self.real_jpeg()
+        # EXIF, then a segment that claims to run past the end of the file.
+        broken = with_jpeg_exif(plain[:2] + b"\xff\xe2\xff\xf0abc" + plain[2:])
+        broken = broken[:broken.index(b"\xff\xe2") + 8]
+        with self.assertRaises(ValueError):
+            theme_core.without_exif(broken)
+        with self.assertRaises(ValueError):   # cut off inside the scan
+            theme_core.without_exif(with_jpeg_exif(plain)[:-20])
+        tagged_png = png(2, 2, extra=png_chunk(b"eXIf", GLYCIN_PANIC_EXIF))
+        with self.assertRaises(ValueError):
+            theme_core.without_exif(tagged_png[:-30])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "broken.jpg"
+            path.write_bytes(broken)
+            self.assertIsNone(theme_core.scaled_pixbuf(path, 20, 20))
+
+    def test_exif_between_scans_is_removed(self):
+        plain = self.real_jpeg()
+        eoi = plain.rindex(b"\xff\xd9")
+        exif = with_jpeg_exif(b"\xff\xd8")[2:]   # just the APP1 segment
+        self.assertEqual(theme_core.without_exif(plain[:eoi] + exif + plain[eoi:]), plain)
+
+    def test_bytes_after_eoi_or_riff_are_ignored(self):
+        plain = self.real_jpeg()
+        self.assertEqual(theme_core.without_exif(with_jpeg_exif(plain) + b"junk"), plain)
+        self.assertIsNone(theme_core.without_exif(webp(4, 4) + b"junk"))
+
     def test_other_formats_are_left_alone(self):
         self.assertIsNone(theme_core.without_exif(gif(2, 2)))
         self.assertIsNone(theme_core.without_exif(b"not an image"))

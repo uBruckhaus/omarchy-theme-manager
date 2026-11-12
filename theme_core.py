@@ -1773,10 +1773,29 @@ def check_image_size(source) -> None:
 
 
 def _without_jpeg_exif(data: bytes) -> bytes | None:
-    """The JPEG without its APP1 Exif segments, or None if it has none.
-    Segments are walked by length up to the start of scan."""
+    """The JPEG without its APP1 Exif segments (also those between the scans
+    of a progressive JPEG), or None if it has none. Raises ValueError on a
+    malformed segment list: such a file is not decoded at all, so an Exif
+    segment before the damage can never reach glycin."""
     out, pos, found = [data[:2]], 2, False
-    while pos + 4 <= len(data) and data[pos] == 0xFF:
+    while pos < len(data):
+        if data[pos] != 0xFF:
+            # Entropy-coded data after a start of scan: up to the next marker
+            # (0xFF00 is a stuffed byte, 0xFFD0-D7 restart markers).
+            nxt = pos
+            while True:
+                nxt = data.find(b"\xff", nxt)
+                if nxt < 0 or nxt + 1 >= len(data):
+                    raise ValueError("JPEG ends inside a scan")
+                if data[nxt + 1] == 0x00 or 0xD0 <= data[nxt + 1] <= 0xD7:
+                    nxt += 2
+                    continue
+                break
+            out.append(data[pos:nxt])
+            pos = nxt
+            continue
+        if pos + 1 >= len(data):
+            raise ValueError("JPEG ends inside a marker")
         code = data[pos + 1]
         if code == 0xFF:   # fill byte
             out.append(data[pos:pos + 1])
@@ -1786,11 +1805,15 @@ def _without_jpeg_exif(data: bytes) -> bytes | None:
             out.append(data[pos:pos + 2])
             pos += 2
             continue
-        if code in (0xD9, 0xDA):
+        if code == 0xD9:   # end of image: anything after it is not parsed
+            out.append(data[pos:pos + 2])
             break
-        end = pos + 2 + int.from_bytes(data[pos + 2:pos + 4], "big")
-        if end > len(data):
-            return None
+        if pos + 4 > len(data):
+            raise ValueError("JPEG ends inside a segment header")
+        length = int.from_bytes(data[pos + 2:pos + 4], "big")
+        end = pos + 2 + length
+        if length < 2 or end > len(data):
+            raise ValueError("JPEG segment runs past the end")
         if code == 0xE1 and data[pos + 4:pos + 10] == b"Exif\0\0":
             found = True
         else:
@@ -1798,26 +1821,30 @@ def _without_jpeg_exif(data: bytes) -> bytes | None:
         pos = end
     if not found:
         return None
-    out.append(data[pos:])
     return b"".join(out)
 
 
 def _without_png_exif(data: bytes) -> bytes | None:
-    """The PNG without its eXIf chunks, or None if it has none."""
+    """The PNG without its eXIf chunks, or None if it has none. Raises
+    ValueError when a chunk runs past the end of the file."""
     out, pos, found = [data[:8]], 8, False
-    while pos + 12 <= len(data):
+    while pos < len(data):
+        if pos + 12 > len(data):
+            raise ValueError("PNG ends inside a chunk header")
         length = int.from_bytes(data[pos:pos + 4], "big")
         end = pos + 12 + length
         if end > len(data):
-            break
-        if data[pos + 4:pos + 8] == b"eXIf":
+            raise ValueError("PNG chunk runs past the end")
+        kind = data[pos + 4:pos + 8]
+        if kind == b"eXIf":
             found = True
         else:
             out.append(data[pos:end])
         pos = end
+        if kind == b"IEND":
+            break
     if not found:
         return None
-    out.append(data[pos:])
     return b"".join(out)
 
 
@@ -1825,9 +1852,14 @@ def _without_webp_exif(data: bytes) -> bytes | None:
     """The WebP without its EXIF chunks (and the VP8X 'has EXIF' flag), or
     None if it has none."""
     chunks, pos, found = [], 12, False
-    while pos + 8 <= len(data):
+    limit = min(len(data), 8 + int.from_bytes(data[4:8], "little"))   # bytes after the RIFF are no chunks
+    while pos < limit:
+        if pos + 8 > limit:
+            raise ValueError("WebP ends inside a chunk header")
         length = int.from_bytes(data[pos + 4:pos + 8], "little")
-        end = min(len(data), pos + 8 + length + (length & 1))
+        if pos + 8 + length > limit:
+            raise ValueError("WebP chunk runs past the end")
+        end = min(limit, pos + 8 + length + (length & 1))
         kind = data[pos:pos + 4]
         if kind == b"EXIF":
             found = True
@@ -1846,7 +1878,8 @@ def _without_webp_exif(data: bytes) -> bytes | None:
 
 def without_exif(data: bytes) -> bytes | None:
     """``data`` with its EXIF block removed, or None if it carries none (or
-    is not a JPEG, PNG or WebP).
+    is not a JPEG, PNG or WebP). Raises ValueError on a JPEG, PNG or WebP
+    whose structure cannot be walked to the end.
 
     glycin (gdk-pixbuf's image loader since 2.44) parses EXIF inside the
     calling process to read the orientation, and glycin 2.2.3 panics, i.e.
@@ -1897,7 +1930,10 @@ def scaled_pixbuf(path, width: int, height: int):
     data = read_image_bytes(path)
     if data is None or image_size_problem(data):
         return None
-    data = without_exif(data) or data
+    try:
+        data = without_exif(data) or data
+    except ValueError:
+        return None   # malformed: never handed to glycin with its EXIF
     import gi
     gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import GdkPixbuf, GLib
