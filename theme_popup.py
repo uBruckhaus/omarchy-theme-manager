@@ -194,6 +194,7 @@ class FlipPicture(FixedPicture):
         self._radius_fn = radius_fn
         self._badges: Gtk.Widget | None = None
         self._pin_button: Gtk.Button | None = None
+        self._apply_button: Gtk.Button | None = None
         self._nav_buttons: tuple[Gtk.Button, ...] = ()
         self._shown_pin_state = None
         self._textures: dict[str, Gdk.Paintable] = {}
@@ -231,6 +232,17 @@ class FlipPicture(FixedPicture):
         self._pin_button = button
         self._shown_pin_state = None
         self._sync_overlays()
+
+    def set_apply_button(self, button: Gtk.Button | None):
+        """The big preview's Apply: for the theme in use it is enabled only while a wallpaper
+        other than the desktop's is shown (Apply then sets that one)."""
+        self._apply_button = button
+        self._sync_overlays()
+
+    def apply_would_change(self) -> bool:
+        if not self._theme_current:
+            return True
+        return bool(self.current_wallpaper_path()) and not self.is_current_wallpaper_pinned()
 
     def set_nav_buttons(self, *buttons: Gtk.Button):
         self._nav_buttons = tuple(b for b in buttons if b is not None)
@@ -683,6 +695,8 @@ class FlipPicture(FixedPicture):
                                       else _("Previous wallpaper"))
             next_btn.set_tooltip_text(_("Preview") if self._next_face_in_cycle(face, 1) == -1
                                       else _("Next wallpaper"))
+        if self._apply_button is not None:
+            self._apply_button.set_sensitive(self.apply_would_change())
         pin = self._pin_button
         if pin is None:
             return
@@ -5164,21 +5178,38 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         wp_path = picture.current_wallpaper_path()
         if not wp_path or picture.is_current_wallpaper_pinned():
             return
+        self._queue_pin(theme, picture, wp_path, apply=False)
+
+    def apply_from_big_preview(self, theme: theme_core.ThemeInfo, picture):
+        """Apply in the big preview: rotated to one of the theme's wallpapers, the theme is
+        applied with that wallpaper pinned (whatever "Apply theme when pinning" says);
+        on the theme's own preview it is applied as usual."""
+        wp_path = picture.current_wallpaper_path() if isinstance(picture, FlipPicture) else None
+        if theme.current:
+            if wp_path and not picture.is_current_wallpaper_pinned():
+                self._queue_pin(theme, picture, wp_path, apply=True)   # the theme stays, its background changes
+            return
+        if not wp_path:
+            self.apply_theme_action(theme)
+            return
+        self._queue_pin(theme, picture, wp_path, apply=True)
+
+    def _queue_pin(self, theme, picture, wp_path: str, *, apply: bool):
         if self.__dict__.get("_pin_busy"):
-            self._pin_next = (theme, picture, wp_path)
+            self._pin_next = (theme, picture, wp_path, apply)
             return
         self._pin_busy = True
         self._pin_next = None
-        self._pin_wallpaper(theme, picture, Path(wp_path))
+        self._pin_wallpaper(theme, picture, Path(wp_path), apply=apply)
 
     def _pin_finished(self):
         self._pin_busy = False
         nxt, self._pin_next = self.__dict__.get("_pin_next"), None
         if nxt is not None:
             # The chosen wallpaper itself (the picture may have been rebuilt meanwhile, e.g. resizing).
-            theme, picture, wp_path = nxt
+            theme, picture, wp_path, apply = nxt
             self._pin_busy = True
-            self._pin_wallpaper(theme, self._live_picture(theme, picture), Path(wp_path))
+            self._pin_wallpaper(theme, self._live_picture(theme, picture), Path(wp_path), apply=apply)
 
     def _sync_theme_flip_wallpaper(self, slug: str, bg: Path, *, theme_current: bool, pin_apply_theme: bool | None = None):
         row = self.rows.get_first_child()
@@ -5202,7 +5233,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return big
         return picture
 
-    def _pin_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture, path: Path):
+    def _pin_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture, path: Path, *, apply: bool = False):
         if theme.current:
             def done(ok, error):
                 try:
@@ -5216,7 +5247,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                     self._pin_finished()
             self._async(lambda: theme_auto.pin_current_wallpaper(theme.slug, path), done)
             return
-        if not self.pin_apply_theme:
+        if not self.pin_apply_theme and not apply:
             # A state file write (folder, atomic write, fsync): on a worker, never on GTK's loop.
             def remembered(ok, error):
                 try:
@@ -5934,7 +5965,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             keyhint.set_max_width_chars(14)
             footer.append(keyhint)
 
-        if not theme.current:
+        rotatable = isinstance(picture, FlipPicture) and bool(picture._wallpapers)
+        if not theme.current or rotatable:
             apply_btn = Gtk.Button()
             apply_btn.add_css_class("tm-paste")
             apply_btn.add_css_class("suggested")
@@ -5943,9 +5975,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             apply_row.append(Gtk.Image.new_from_icon_name("media-playback-start-symbolic"))
             apply_row.append(Gtk.Label(label=_("Apply theme")))
             apply_btn.set_child(apply_row)
-            apply_btn.connect("clicked", lambda *_, target=theme: self.apply_theme_action(target))
+            apply_btn.connect("clicked", lambda *_, target=theme, pic=picture: self.apply_from_big_preview(target, pic))
+            if theme.current:
+                apply_btn.set_tooltip_text(_("Set the shown wallpaper as background"))
             footer.append(apply_btn)
-        elif self.look_pending.get(theme.slug):
+            if rotatable:
+                picture.set_apply_button(apply_btn)
+        if theme.current and self.look_pending.get(theme.slug):
             reapply_btn = Gtk.Button()
             reapply_btn.add_css_class("tm-paste")
             reapply_btn.add_css_class("tm-big-btn")

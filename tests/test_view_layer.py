@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -3014,7 +3015,7 @@ class Flip3DTests(ViewLayerTest):
         theme = SimpleNamespace(current=False, slug="gamma")
         pic = SimpleNamespace(current_wallpaper_path=lambda: "/t/g2.png", is_current_wallpaper_pinned=lambda: False)
         started = []
-        with patch.object(self.app, "_pin_wallpaper", lambda t, p, path: started.append(path.name)):
+        with patch.object(self.app, "_pin_wallpaper", lambda t, p, path, apply=False: started.append(path.name)):
             self.app._pin_busy = True
             self.app.pin_theme_wallpaper(theme, pic)
             self.assertEqual(started, [])                      # waits
@@ -3022,6 +3023,81 @@ class Flip3DTests(ViewLayerTest):
             self.app._pin_finished()                           # the running one ends
             self.assertEqual(started, ["g2.png"])              # the latest choice runs then
         self.app._pin_busy = False
+
+    def test_big_preview_apply_pins_the_shown_wallpaper(self):
+        theme = SimpleNamespace(current=False, slug="gamma")
+        pic = theme_popup.FlipPicture.__new__(theme_popup.FlipPicture)
+        calls = []
+        with patch.object(theme_popup.FlipPicture, "current_wallpaper_path", lambda _self: "/t/g2.png"), \
+                patch.object(self.app, "_pin_wallpaper",
+                             lambda t, p, path, apply=False: calls.append((path.name, apply))), \
+                patch.object(self.app, "apply_theme_action", lambda t: calls.append("plain")):
+            self.app._pin_busy = False
+            self.app.pin_apply_theme = False           # Apply pins even with that setting off
+            self.app.apply_from_big_preview(theme, pic)
+        self.assertEqual(calls, [("g2.png", True)])
+        self.app._pin_busy = False
+
+    def test_big_preview_apply_on_the_theme_face_applies_as_usual(self):
+        theme = SimpleNamespace(current=False, slug="gamma")
+        pic = theme_popup.FlipPicture.__new__(theme_popup.FlipPicture)
+        calls = []
+        with patch.object(theme_popup.FlipPicture, "current_wallpaper_path", lambda _self: None), \
+                patch.object(self.app, "_pin_wallpaper", lambda *a, **k: calls.append("pin")), \
+                patch.object(self.app, "apply_theme_action", lambda t: calls.append("plain")):
+            self.app.apply_from_big_preview(theme, pic)
+            self.app.apply_from_big_preview(theme, None)   # no wallpapers: a fixed picture or none
+        self.assertEqual(calls, ["plain", "plain"])
+
+    def test_big_preview_apply_while_a_pin_runs_waits_with_apply(self):
+        theme = SimpleNamespace(current=False, slug="gamma")
+        pic = theme_popup.FlipPicture.__new__(theme_popup.FlipPicture)
+        calls = []
+        with patch.object(theme_popup.FlipPicture, "current_wallpaper_path", lambda _self: "/t/g3.png"), \
+                patch.object(self.app, "_live_picture", lambda t, p: p), \
+                patch.object(self.app, "_pin_wallpaper",
+                             lambda t, p, path, apply=False: calls.append((path.name, apply))):
+            self.app._pin_busy = True
+            self.app.apply_from_big_preview(theme, pic)
+            self.assertEqual(calls, [])
+            self.app._pin_finished()
+        self.assertEqual(calls, [("g3.png", True)])
+        self.app._pin_busy = False
+
+    def test_big_preview_apply_on_the_current_theme_sets_another_wallpaper(self):
+        theme = SimpleNamespace(current=True, slug="gamma")
+        pic = theme_popup.FlipPicture.__new__(theme_popup.FlipPicture)
+        calls = []
+        pinned = [False]
+        with patch.object(theme_popup.FlipPicture, "current_wallpaper_path", lambda _self: "/t/g4.png"), \
+                patch.object(theme_popup.FlipPicture, "is_current_wallpaper_pinned", lambda _self: pinned[0]), \
+                patch.object(self.app, "_pin_wallpaper",
+                             lambda t, p, path, apply=False: calls.append((path.name, apply))), \
+                patch.object(self.app, "apply_theme_action", lambda t: calls.append("plain")):
+            self.app._pin_busy = False
+            self.app.apply_from_big_preview(theme, pic)
+            pinned[0] = True                                  # already the desktop's: nothing to do
+            self.app._pin_busy = False
+            self.app.apply_from_big_preview(theme, pic)
+        self.assertEqual(calls, [("g4.png", True)])
+        self.app._pin_busy = False
+
+    def test_big_preview_apply_button_follows_the_shown_wallpaper(self):
+        pic = theme_popup.FlipPicture(40, 30, wallpapers=["/t/a.png", "/t/b.png"],
+                                      active_bg="/t/a.png", theme_current=True)
+        button = theme_popup.Gtk.Button()
+        pic.set_apply_button(button)
+        self.assertFalse(button.get_sensitive())              # theme face: nothing to apply
+        pic._from_face = pic._to_face = 0                     # a.png, already the desktop's
+        pic._sync_overlays()
+        self.assertFalse(button.get_sensitive())
+        pic._from_face = pic._to_face = 1                     # rotated further: b.png
+        pic._sync_overlays()
+        self.assertTrue(button.get_sensitive())
+        other = theme_popup.FlipPicture(40, 30, wallpapers=["/t/a.png"], theme_current=False)
+        other_btn = theme_popup.Gtk.Button()
+        other.set_apply_button(other_btn)
+        self.assertTrue(other_btn.get_sensitive())            # another theme: always applicable
 
     def test_another_themes_first_wallpaper_is_not_pinned_unless_remembered(self):
         from types import SimpleNamespace

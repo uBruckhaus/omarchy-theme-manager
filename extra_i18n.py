@@ -677,3 +677,12 @@ EXTRA['Automatically flips the big preview to its first wallpaper after the 3D r
     'nl': 'Draait het grote voorbeeld na de 3D-draaivertraging automatisch naar de eerste achtergrond. Uit behoudt het themavoorbeeld totdat u de pijlen gebruikt.',
     'pl': 'Automatycznie obraca duży podgląd do pierwszej tapety po opóźnieniu obrotu 3D. Wyłączone zachowuje podgląd motywu do użycia strzałek.',
 }
+EXTRA['Set the shown wallpaper as background'] = {
+    'de': 'Den gezeigten Hintergrund als Desktop-Hintergrund setzen',
+    'fr': 'Définir le fond d’écran affiché comme arrière-plan',
+    'es': 'Usar el fondo mostrado como fondo de escritorio',
+    'it': 'Imposta lo sfondo mostrato come sfondo',
+    'pt': 'Definir o papel de parede mostrado como fundo',
+    'nl': 'Getoonde achtergrond als bureaubladachtergrond instellen',
+    'pl': 'Ustaw pokazaną tapetę jako tło',
+}
