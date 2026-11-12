@@ -2692,11 +2692,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         # Under the shared settings lock: on the settings worker, after what was saved before it.
         self._save_in_background(store, then=stored)
 
-    def restart_in_language(self, _waited: float = 0.0):
+    def restart_in_language(self):
         """Restart in the new language, but only once every queued settings write is stored (a
-        setting changed just after the language must not be lost by the restart)."""
-        if self.__dict__.get("_jobs_pending", 0) > 0 and _waited < 15.0:
-            GLib.timeout_add(50, lambda: self.restart_in_language(_waited + 0.05) and False)
+        setting changed just after the language must not be lost by the restart). Each write's
+        wait for the shared lock is bounded, so this always comes."""
+        if self.__dict__.get("_jobs_pending", 0) > 0:
+            GLib.timeout_add(50, lambda: self.restart_in_language() and False)
             return
         os.environ["THEME_MANAGER_PAGE"] = "settings"
         sys.stdout.flush()
@@ -7213,6 +7214,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return
         self._wp_gen = self.__dict__.get("_wp_gen", 0) + 1
         gen = self._wp_gen
+        if self.__dict__.get("_wp_shown_slug") != theme.slug:
+            # Another theme: the old tiles go at once (no click on one meant for the theme before).
+            first = self.wp_grid.get_first_child()
+            while first is not None:
+                self.wp_grid.remove(first)
+                first = self.wp_grid.get_first_child()
+            self._wp_shown_slug = theme.slug
 
         def listed(found, error):
             if gen == self._wp_gen and self.active_theme is theme:
