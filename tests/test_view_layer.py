@@ -1645,6 +1645,9 @@ class ViewLayerTest(unittest.TestCase):
         self.assertIn("This is the night theme", self.menu_entries(theme))
 
     def test_resize_changes_columns_and_is_saved(self):
+        limits = patch.object(self.app, "size_limits", return_value=(3000, 2000))   # any monitor
+        limits.start()
+        self.addCleanup(limits.stop)
         Gdk = gi.repository.Gdk
         theme = self.make_theme("system", "gamma", tuple(f"w{i}.png" for i in range(6)))
         self.app.open_wallpapers_for(theme)
@@ -1682,6 +1685,9 @@ class ViewLayerTest(unittest.TestCase):
         self.assertEqual(caption.get_halign(), Gtk.Align.FILL)   # a centered box gave the name no room
 
     def test_double_click_on_title_resets_size_and_centers(self):
+        limits = patch.object(self.app, "size_limits", return_value=(3000, 2000))   # any monitor
+        limits.start()
+        self.addCleanup(limits.stop)
         self.app.resize_to(900, 700, save=True)
         self.app.move_to((50, 60), save=True)
         self.app.on_move_begin(None, 0, 0)
