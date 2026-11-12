@@ -1772,13 +1772,34 @@ def check_image_size(source) -> None:
         raise ValueError(problem)
 
 
+EXIF_WALK_LIMIT = 65536   # markers/chunks walked per image; real files have a few dozen
+
+
+def _cut(data: bytes, drops: list[tuple[int, int]]) -> bytes | None:
+    """``data`` without the byte ranges in ``drops`` (sorted, disjoint), or
+    None when there is nothing to drop."""
+    if not drops:
+        return None
+    out, pos = bytearray(), 0
+    for start, end in drops:
+        out += data[pos:start]
+        pos = end
+    out += data[pos:]
+    return bytes(out)
+
+
 def _without_jpeg_exif(data: bytes) -> bytes | None:
     """The JPEG without its APP1 Exif segments (also those between the scans
     of a progressive JPEG), or None if it has none. Raises ValueError on a
-    malformed segment list: such a file is not decoded at all, so an Exif
-    segment before the damage can never reach glycin."""
-    out, pos, found = [data[:2]], 2, False
+    malformed segment list or more than EXIF_WALK_LIMIT markers: such a file
+    is not decoded at all, so an Exif segment before the damage can never
+    reach glycin. Only the ranges to drop are kept, never one object per
+    marker."""
+    drops, pos, steps = [], 2, 0
     while pos < len(data):
+        steps += 1
+        if steps > EXIF_WALK_LIMIT or len(drops) > 64:
+            raise ValueError("too many JPEG markers")
         if data[pos] != 0xFF:
             # Entropy-coded data after a start of scan: up to the next marker
             # (0xFF00 is a stuffed byte, 0xFFD0-D7 restart markers).
@@ -1791,22 +1812,20 @@ def _without_jpeg_exif(data: bytes) -> bytes | None:
                     nxt += 2
                     continue
                 break
-            out.append(data[pos:nxt])
             pos = nxt
             continue
         if pos + 1 >= len(data):
             raise ValueError("JPEG ends inside a marker")
         code = data[pos + 1]
         if code == 0xFF:   # fill byte
-            out.append(data[pos:pos + 1])
             pos += 1
             continue
         if code == 0x01 or 0xD0 <= code <= 0xD7:
-            out.append(data[pos:pos + 2])
             pos += 2
             continue
         if code == 0xD9:   # end of image: anything after it is not parsed
-            out.append(data[pos:pos + 2])
+            if drops:
+                drops.append((pos + 2, len(data)))
             break
         if pos + 4 > len(data):
             raise ValueError("JPEG ends inside a segment header")
@@ -1815,65 +1834,67 @@ def _without_jpeg_exif(data: bytes) -> bytes | None:
         if length < 2 or end > len(data):
             raise ValueError("JPEG segment runs past the end")
         if code == 0xE1 and data[pos + 4:pos + 10] == b"Exif\0\0":
-            found = True
-        else:
-            out.append(data[pos:end])
+            drops.append((pos, end))
         pos = end
-    if not found:
-        return None
-    return b"".join(out)
+    return _cut(data, drops)
 
 
 def _without_png_exif(data: bytes) -> bytes | None:
     """The PNG without its eXIf chunks, or None if it has none. Raises
-    ValueError when a chunk runs past the end of the file."""
-    out, pos, found = [data[:8]], 8, False
+    ValueError when a chunk runs past the end of the file or there are more
+    than EXIF_WALK_LIMIT chunks."""
+    drops, pos, steps = [], 8, 0
     while pos < len(data):
+        steps += 1
+        if steps > EXIF_WALK_LIMIT:
+            raise ValueError("too many PNG chunks")
         if pos + 12 > len(data):
             raise ValueError("PNG ends inside a chunk header")
-        length = int.from_bytes(data[pos:pos + 4], "big")
-        end = pos + 12 + length
+        end = pos + 12 + int.from_bytes(data[pos:pos + 4], "big")
         if end > len(data):
             raise ValueError("PNG chunk runs past the end")
         kind = data[pos + 4:pos + 8]
         if kind == b"eXIf":
-            found = True
-        else:
-            out.append(data[pos:end])
+            drops.append((pos, end))
         pos = end
         if kind == b"IEND":
             break
-    if not found:
-        return None
-    return b"".join(out)
+    return _cut(data, drops)
 
 
 def _without_webp_exif(data: bytes) -> bytes | None:
     """The WebP without its EXIF chunks (and the VP8X 'has EXIF' flag), or
-    None if it has none."""
-    chunks, pos, found = [], 12, False
-    limit = min(len(data), 8 + int.from_bytes(data[4:8], "little"))   # bytes after the RIFF are no chunks
+    None if it has none. Raises ValueError when the file ends before its
+    declared RIFF size, a chunk runs past it, or there are more than
+    EXIF_WALK_LIMIT chunks. Bytes after the RIFF are no chunks."""
+    limit = 8 + int.from_bytes(data[4:8], "little")
+    if limit > len(data):
+        raise ValueError("WebP ends before its declared size")
+    drops, pos, steps, vp8x = [], 12, 0, None
     while pos < limit:
+        steps += 1
+        if steps > EXIF_WALK_LIMIT:
+            raise ValueError("too many WebP chunks")
         if pos + 8 > limit:
             raise ValueError("WebP ends inside a chunk header")
         length = int.from_bytes(data[pos + 4:pos + 8], "little")
-        if pos + 8 + length > limit:
+        end = pos + 8 + length + (length & 1)
+        if end > limit:
             raise ValueError("WebP chunk runs past the end")
-        end = min(limit, pos + 8 + length + (length & 1))
         kind = data[pos:pos + 4]
         if kind == b"EXIF":
-            found = True
-        elif kind == b"VP8X" and length >= 1 and pos + 8 < len(data):
-            chunk = bytearray(data[pos:end])
-            chunk[8] &= ~0x08 & 0xFF
-            chunks.append(bytes(chunk))
-        else:
-            chunks.append(data[pos:end])
+            drops.append((pos, end))
+        elif kind == b"VP8X" and length >= 1 and vp8x is None:
+            vp8x = pos + 8
         pos = end
-    if not found:
+    if not drops:
         return None
-    body = b"WEBP" + b"".join(chunks)
-    return b"RIFF" + len(body).to_bytes(4, "little") + body
+    body = bytearray(_cut(data[:limit], drops))
+    if vp8x is not None:
+        removed = sum(end - start for start, end in drops if start < vp8x)
+        body[vp8x - removed] &= ~0x08 & 0xFF
+    body[4:8] = (len(body) - 8).to_bytes(4, "little")
+    return bytes(body)
 
 
 def without_exif(data: bytes) -> bytes | None:

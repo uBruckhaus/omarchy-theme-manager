@@ -674,6 +674,24 @@ class ExifStripTests(unittest.TestCase):
         self.assertEqual(theme_core.without_exif(with_jpeg_exif(plain) + b"junk"), plain)
         self.assertIsNone(theme_core.without_exif(webp(4, 4) + b"junk"))
 
+    def test_marker_floods_are_refused(self):
+        plain = self.real_jpeg()
+        flood = with_jpeg_exif(plain[:2] + (b"\xff\xfe\x00\x02" * (theme_core.EXIF_WALK_LIMIT + 1)) + plain[2:])
+        with self.assertRaises(ValueError):
+            theme_core.without_exif(flood)
+        chunks = b"JUNK\x00\x00\x00\x00" * (theme_core.EXIF_WALK_LIMIT + 1)
+        body = b"WEBP" + webp(4, 4)[12:] + chunks
+        with self.assertRaises(ValueError):
+            theme_core.without_exif(b"RIFF" + len(body).to_bytes(4, "little") + body)
+
+    def test_webp_cut_before_its_declared_size_is_refused(self):
+        exif = b"EXIF" + len(GLYCIN_PANIC_EXIF).to_bytes(4, "little") + GLYCIN_PANIC_EXIF
+        body = b"WEBP" + webp(4, 4)[12:] + exif
+        whole = b"RIFF" + len(body).to_bytes(4, "little") + body
+        self.assertIsNotNone(theme_core.without_exif(whole))
+        with self.assertRaises(ValueError):
+            theme_core.without_exif(whole[:-10])
+
     def test_other_formats_are_left_alone(self):
         self.assertIsNone(theme_core.without_exif(gif(2, 2)))
         self.assertIsNone(theme_core.without_exif(b"not an image"))
