@@ -665,6 +665,31 @@ class ExifStripTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), ["20", "10"])
 
+    def test_scaled_pixbuf_reads_only_regular_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fifo = Path(tmp) / "pipe.jpg"
+            os.mkfifo(fifo)
+            self.assertIsNone(theme_core.scaled_pixbuf(fifo, 20, 20))   # never blocks
+            self.assertIsNone(theme_core.scaled_pixbuf(Path(tmp), 20, 20))
+            self.assertIsNone(theme_core.scaled_pixbuf(Path(tmp) / "missing.png", 20, 20))
+
+    def test_scaled_pixbuf_decodes_the_bytes_it_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.jpg"
+            path.write_bytes(self.real_jpeg())
+            orig = theme_core.image_size_problem
+
+            def swap_after_check(data):
+                path.write_bytes(png(60000, 60000))   # replaced after the read
+                return orig(data)
+
+            theme_core.image_size_problem = swap_after_check
+            try:
+                image = theme_core.scaled_pixbuf(path, 20, 20)
+            finally:
+                theme_core.image_size_problem = orig
+            self.assertEqual((image.get_width(), image.get_height()), (20, 10))
+
     def test_scaled_pixbuf_refuses_oversized_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "huge.png"

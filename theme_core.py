@@ -1862,37 +1862,56 @@ def without_exif(data: bytes) -> bytes | None:
     return None
 
 
+def read_image_bytes(path) -> bytes | None:
+    """The bytes of the regular file ``path`` (at most MAX_BACKGROUND_BYTES),
+    read through one descriptor opened without blocking, or None. Checking
+    and decoding these same bytes leaves no window for the file to be
+    swapped (for a bigger image, a FIFO or one with EXIF) in between."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except (OSError, TypeError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, size = [], 0
+        while size <= MAX_BACKGROUND_BYTES:
+            chunk = os.read(fd, min(1 << 20, MAX_BACKGROUND_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None if size > MAX_BACKGROUND_BYTES else b"".join(chunks)
+
+
 def scaled_pixbuf(path, width: int, height: int):
     """``path`` decoded to fit width×height (aspect kept), or None if it is
-    unsafe or cannot be decoded. The header is checked first (GTK's loaders
-    allocate the declared canvas before scaling), and an EXIF block is
-    removed before glycin sees it (see ``without_exif``)."""
-    if image_size_problem(path):
+    unsafe or cannot be decoded. The file is read once; its header is
+    checked on those bytes (GTK's loaders allocate the declared canvas
+    before scaling), an EXIF block is removed before glycin sees it (see
+    ``without_exif``), and exactly the checked bytes are decoded."""
+    data = read_image_bytes(path)
+    if data is None or image_size_problem(data):
         return None
+    data = without_exif(data) or data
     import gi
     gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import GdkPixbuf, GLib
-    try:
-        with open(path, "rb") as handle:
-            data = handle.read(MAX_BACKGROUND_BYTES + 1)
-    except OSError:
-        return None
-    if len(data) > MAX_BACKGROUND_BYTES:
-        return None
-    clean = without_exif(data)
-    try:
-        if clean is None:
-            return GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
-        loader = GdkPixbuf.PixbufLoader()
+    loader = GdkPixbuf.PixbufLoader()
 
-        def fit(_loader, w, h):
-            if w > 0 and h > 0:
-                scale = min(width / w, height / h)
-                _loader.set_size(max(1, round(w * scale)), max(1, round(h * scale)))
+    def fit(_loader, w, h):
+        if w > 0 and h > 0:
+            scale = min(width / w, height / h)
+            _loader.set_size(max(1, round(w * scale)), max(1, round(h * scale)))
 
-        loader.connect("size-prepared", fit)
+    loader.connect("size-prepared", fit)
+    try:
         try:
-            loader.write(clean)
+            loader.write(data)
         finally:
             loader.close()
         return loader.get_pixbuf()

@@ -342,19 +342,20 @@ class ViewLayerTest(unittest.TestCase):
         (theme.path / "backgrounds" / "huge.png").write_bytes(png(60000, 60000))
         (theme.path / "preview.png").write_bytes(gif(1920, 1080, frames=40))
         decoded, requested = [], []
-        pixbuf = theme_popup.GdkPixbuf.Pixbuf
-        orig_load = pixbuf.new_from_file_at_scale
+        current = [None]
+        orig_strip = theme_popup.theme_core.without_exif   # reached only after the size check
         orig_request = self.app.decoder.request
-        pixbuf.new_from_file_at_scale = lambda path, *a: decoded.append(Path(path).name) or orig_load(path, *a)
+        theme_popup.theme_core.without_exif = lambda data: decoded.append(current[0]) or orig_strip(data)
         self.app.decoder.request = lambda picture, path, w, h: requested.append(str(path))
         try:
             self.app.refresh_themes()
             self.app.open_wallpapers_for(self.make_theme("system", "bomb"))
             self.assertEqual({Path(p).name for p in requested}, {"huge.png", "fine.png", "preview.png"})
             for path in requested:
+                current[0] = Path(path).name
                 theme_popup.scaled_pixbuf(path, 100, 100)   # what the worker thread runs
         finally:
-            pixbuf.new_from_file_at_scale = orig_load
+            theme_popup.theme_core.without_exif = orig_strip
             self.app.decoder.request = orig_request
         self.assertEqual(decoded, ["fine.png"])
 
