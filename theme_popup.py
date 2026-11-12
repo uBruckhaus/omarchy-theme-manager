@@ -1735,13 +1735,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     # --- size ----------------------------------------------------------------------
 
     def set_ask_ai(self, on: bool):
-        self.save_setting(ask_ai=on)
-        self.update_ask_symbol()
+        self.save_setting(ask_ai=on, then=self.update_ask_symbol)
 
     def set_maprisma_hints(self, on: bool):
-        self.save_setting(maprisma_hints=on)
-        if self.stack.get_visible_child_name() == "settings":
-            GLib.idle_add(self.fill_settings)    # the note: shown, or behind its ?
+        def shown():
+            if self.stack.get_visible_child_name() == "settings":
+                GLib.idle_add(self.fill_settings)    # the note: shown, or behind its ?
+        self.save_setting(maprisma_hints=on, then=shown)
 
     def update_ask_symbol(self):
         """Accent when Ask AI is on and a helper is ready; dim when off; a dot
@@ -2678,12 +2678,21 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def set_language(self, code: str):
         if code == i18n.language_setting():
             return
-        try:
-            i18n.save_language(code)
-        except OSError as error:
-            theme_core.notify(_("Could not save the setting"), str(error))
-            return
-        self.restart_in_language()
+        failed = []
+
+        def store():
+            try:
+                i18n.save_language(code)
+            except OSError as error:
+                failed.append(error)
+
+        def stored():
+            if failed:
+                theme_core.notify(_("Could not save the setting"), str(failed[0]))
+                return
+            self.restart_in_language()
+        # Under the shared settings lock: on the settings worker, after what was saved before it.
+        self._save_in_background(store, then=stored)
 
     def restart_in_language(self):
         os.environ["THEME_MANAGER_PAGE"] = "settings"
@@ -2832,8 +2841,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if theme_auto.settings().get("screenshot_folder"):
             default = Gtk.Button(label=_("Default"))
             default.add_css_class("sc-small")
-            default.connect("clicked", lambda *_: (self.save_setting(screenshot_folder=None),
-                                                   GLib.idle_add(self.fill_settings)))
+            default.connect("clicked", lambda *_: self.save_setting(
+                screenshot_folder=None, then=lambda: GLib.idle_add(self.fill_settings)))
             folder_row.append(default)
         choose = Gtk.Button(icon_name="folder-open-symbolic")
         choose.add_css_class("sc-small")
@@ -3661,21 +3670,33 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     FLIP_SETTINGS = ("preview_flip_3d", "preview_flip_delay", "preview_pin_apply_theme",
                      "preview_big_card", "preview_big_auto_rotate")
 
-    def save_setting(self, **values):
-        if any(key in values for key in self.FLIP_SETTINGS):
-            # The 3D flip's settings: written by one settings worker in order (the shared lock may
-            # wait), the cards rebuilt once it is stored, never a wait on GTK's loop.
-            self._save_in_background(values)
-            return
-        try:
-            theme_auto.update_settings(**values)
-        except OSError as error:
-            theme_core.notify(_("Could not save the setting"), str(error))
-        if "sort" in values or any(key in values for key in self.FLIP_SETTINGS):
-            self.refresh_themes()
+    def save_setting(self, then=None, **values):
+        """Every setting is written by one settings worker, in order (the shared lock may wait),
+        never on GTK's loop. `then` runs on GTK's loop once the value is stored (what reads it
+        back: the CSS, the settings page); the list is rebuilt after Sort or a flip setting."""
+        rebuild = "sort" in values or any(key in values for key in self.FLIP_SETTINGS)
+
+        def after():
+            if rebuild:
+                self.refresh_themes()
+            if then is not None:
+                then()
+        self._save_in_background(values, then=after)
+
+    # Tests run the settings writes and the flip-list reads inline (the order is the same; the
+    # tests of the workers themselves turn this off).
+    INLINE_WORKERS = False
 
     def _save_in_background(self, values: dict, then=None):
         """One worker writes these in order; `then` runs on GTK's loop once this write is stored."""
+        if self.INLINE_WORKERS:
+            try:
+                values() if callable(values) else theme_auto.update_settings(**values)
+                error = None
+            except OSError as failure:
+                error = failure
+            self._background_saved(error, then)
+            return
         jobs = self.__dict__.get("_settings_jobs")
         if jobs is None:
             jobs = self._settings_jobs = queue.SimpleQueue()
@@ -3700,8 +3721,6 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             theme_core.notify(_("Could not save the setting"), str(error))
         if then is not None:
             then()
-        else:
-            self.refresh_themes()
         return False
 
     def corner_labels(self) -> list[str]:
@@ -3723,9 +3742,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         return _("Corners of the popup, its cards and every control (buttons, choice boxes, fields). “Like windows” follows Hyprland's window rounding.") + " " + origin
 
     def set_corners(self, value: str):
-        self.save_setting(corners=corners.choice(value))
-        self.apply_theme_css()
-        self.redraw_pictures(self.window)      # the drawn pictures (workspaces, swatches) follow it
+        def follow():
+            self.apply_theme_css()
+            self.redraw_pictures(self.window)      # the drawn pictures (workspaces, swatches) follow it
+        self.save_setting(corners=corners.choice(value), then=follow)
 
     def redraw_pictures(self, widget):
         if widget is None:
@@ -3789,8 +3809,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 chosen = None
             self.window.present()
             if chosen is not None and chosen.get_path():
-                self.save_setting(screenshot_folder=chosen.get_path())
-                self.fill_settings()
+                self.save_setting(screenshot_folder=chosen.get_path(), then=self.fill_settings)
 
         dialog.select_folder(None, None, done)
 
@@ -3817,11 +3836,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
         self._async(lambda: screenshots.capture_to_settings(rectangle, theme_auto.settings()), done)
 
-    def save_schedule(self, **values):
-        try:
-            theme_auto.save_schedule(**values)
-        except OSError as error:
-            theme_core.notify(_("Could not save the setting"), str(error))
+    def save_schedule(self, then=None, **values):
+        """On the settings worker too (after any setting saved before it); `then` once stored."""
+        self._save_in_background(lambda: theme_auto.save_schedule(**values), then=then)
 
     def set_schedule_enabled(self, on: bool):
         plan = theme_auto.schedule()
@@ -4847,6 +4864,33 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
     # --- theme list -----------------------------------------------------------------
 
+    def flip_list(self, theme) -> list:
+        """The wallpapers of a theme card's flip, from the list read on a worker (load_flip_lists);
+        none until it is known: building a card never lists a folder on GTK's loop."""
+        return list(self.__dict__.get("flip_lists", {}).get(theme.slug, ()))
+
+    def load_flip_lists(self, themes):
+        """Every theme's flip wallpapers (folders listed, the remembered one read) on a worker; when
+        they differ from the ones the cards were built with, the list is built again once."""
+        self._flip_gen = self.__dict__.get("_flip_gen", 0) + 1
+        gen, hidden, current_bg = self._flip_gen, dict(self.hidden_wallpapers), self.current_bg
+        themes = [t for t in themes if t.preview]
+
+        def read():
+            return {t.slug: theme_auto.flip_wallpapers(t, hidden=hidden, current_bg=current_bg) for t in themes}
+
+        def done(lists, error):
+            if error is not None or gen != self._flip_gen:
+                return
+            if lists != self.__dict__.get("flip_lists"):
+                self.flip_lists = lists
+                self.refresh_themes()          # builds the cards with them (and reads again: same → stops)
+        if self.INLINE_WORKERS:
+            # Tests: known before the cards are built (no second build needed).
+            self.flip_lists = read()
+            return
+        self._async(read, done)
+
     def refresh_themes(self, keep: str | None = None):
         """Rebuild the list; `keep` is the slug to leave selected."""
         if keep is None:
@@ -4881,6 +4925,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                                           theme_auto.sort_order())
         # The theme in use first; the rest keep their order.
         ordered = [t for t in ordered if t.current] + [t for t in ordered if not t.current]
+        if need_walls:
+            self.load_flip_lists(ordered)      # read on a worker; the cards get them when known
         for theme in ordered:
             is_hidden = theme.slug in self.hidden
             # The active theme is always listed (marked when hidden), as in
@@ -4938,14 +4984,15 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.focus_selected_theme()
 
     def set_schedule_theme(self, key: str, theme: theme_core.ThemeInfo):
-        self.save_schedule(**{key: theme.slug})
-        plan = theme_auto.schedule()
-        if not plan["enabled"]:
-            theme_core.notify((_("{0} is the day theme") if key == "day" else _("{0} is the night theme")).format(
-                theme_core.plain_text(theme.name)), _("Switch on “Switch themes by time of day” in Settings (⚙)."))
-        else:
-            theme_core.notify((_("{0} is the day theme") if key == "day" else _("{0} is the night theme")).format(
-                theme_core.plain_text(theme.name)), _("From {0}.").format(plan[key + '_at']))
+        def told():
+            plan = theme_auto.schedule()
+            if not plan["enabled"]:
+                theme_core.notify((_("{0} is the day theme") if key == "day" else _("{0} is the night theme")).format(
+                    theme_core.plain_text(theme.name)), _("Switch on “Switch themes by time of day” in Settings (⚙)."))
+            else:
+                theme_core.notify((_("{0} is the day theme") if key == "day" else _("{0} is the night theme")).format(
+                    theme_core.plain_text(theme.name)), _("From {0}.").format(plan[key + '_at']))
+        self.save_schedule(then=told, **{key: theme.slug})
 
     def set_omarchy_sync(self, on: bool):
         def apply():
@@ -5234,7 +5281,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         # One size whatever the badges and the name (a plain picture would
         # grow with its image and widen the card).
         tile_h = self.theme_tile_w * 9 // 16
-        wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+        wallpapers = (self.flip_list(theme)
                       if self.flip_3d and theme.preview else [])
         if wallpapers:
             active_bg = self.flip_active_bg(theme, wallpapers)
@@ -5329,7 +5376,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         frame.set_valign(Gtk.Align.CENTER)
         width, height = self.preview_size()
         if theme.preview:
-            wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+            wallpapers = (self.flip_list(theme)
                           if self.flip_3d else [])
             if wallpapers:
                 active_bg = self.flip_active_bg(theme, wallpapers)
@@ -5621,7 +5668,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         try:
             theme_auto.set_workspace_theme(workspace, theme.slug if on else None)
             if on and not theme_auto.workspace_themes_enabled():
-                theme_auto.update_settings(workspace_themes=True)
+                self.save_setting(workspace_themes=True)
         except (OSError, ValueError) as error:
             theme_core.notify(_("Could not assign workspace"), str(error))
             return
@@ -5778,7 +5825,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if is_hidden:
             card.add_css_class("tm-row-hidden")
 
-        wallpapers = (theme_auto.flip_wallpapers(theme, hidden=self.hidden_wallpapers, current_bg=self.current_bg)
+        wallpapers = (self.flip_list(theme)
                       if theme.preview else [])
         frame = Gtk.Overlay()
         if wallpapers:
@@ -6333,7 +6380,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if 0 <= index < len(theme_ai.WALLPAPER_COUNTS):
             count = theme_ai.WALLPAPER_COUNTS[index]
             if count != self.web_count():
-                self.save_setting(wallpaper_count=count)
+                self.save_setting(wallpaper_count=count, then=self.update_web_next)
+                return
         self.update_web_next()
 
     def web_more_results(self) -> bool:
@@ -7375,7 +7423,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         try:
             theme_auto.set_workspace_wallpaper(theme.slug, workspace, wallpaper.name if on else None)
             if on and not theme_auto.workspace_wallpapers_enabled():
-                theme_auto.update_settings(workspace_wallpapers=True)
+                self.save_setting(workspace_wallpapers=True)
                 theme_core.notify(_("Wallpapers per workspace are on"),
                                   _("Switch it off again in Settings (⚙)."))
         except (OSError, ValueError) as error:

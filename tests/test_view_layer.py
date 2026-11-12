@@ -196,6 +196,7 @@ class ViewLayerTest(unittest.TestCase):
 
         # --- build the real window ----------------------------------------
         self.app = theme_popup.ThemeManager()
+        self.app.INLINE_WORKERS = True      # the worker tests switch this off
         # Deterministic, in-process async (no GLib main loop in the test).
         def sync_async(self_, fn, on_done):
             try:
@@ -2948,7 +2949,47 @@ class FlipTextureTests(unittest.TestCase):
 
 
 class Flip3DTests(ViewLayerTest):
+    def test_cards_never_list_wallpapers_on_gtks_thread(self):
+        import threading
+        self.app.INLINE_WORKERS = False
+        fake_async = theme_popup.ThemeManager._async
+        theme_popup.ThemeManager._async = self._orig_async          # a real worker thread here
+        self.addCleanup(setattr, theme_popup.ThemeManager, "_async", fake_async)
+        t = self.make_theme("user", "delta", wallpapers=("d1.png", "d2.png")).path
+        (t / "preview.png").write_bytes(PNG)
+        threads = []
+        real = theme_popup.theme_auto.flip_wallpapers
+
+        def spy(*a, **k):
+            threads.append(threading.current_thread() is threading.main_thread())
+            return real(*a, **k)
+        with patch.object(theme_popup.theme_auto, "flip_wallpapers", spy):
+            self.app.flip_lists = {}
+            self.app.refresh_themes()
+            delta = lambda: {r.tm_theme.slug: r for r in self.rows_list()}["delta"]
+            self.spin_until(lambda: self.app._flip_picture_in(delta()) is not None)
+        self.assertIsNotNone(self.app._flip_picture_in(delta()))   # the cards got them from the worker
+        self.assertTrue(threads)
+        self.assertFalse(any(threads))                             # never on GTK's thread
+
+    def test_settings_are_written_off_gtks_thread_then_followed(self):
+        import threading
+        self.app.INLINE_WORKERS = False
+        seen, followed = [], []
+        real = theme_popup.theme_auto.update_settings
+
+        def spy(**values):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return real(**values)
+        with patch.object(theme_popup.theme_auto, "update_settings", spy):
+            self.app.save_setting(sort="recent", then=lambda: followed.append(
+                theme_popup.theme_auto.settings().get("sort")))
+            self.spin_until(lambda: followed)
+        self.assertEqual(followed, ["recent"])          # `then` sees the stored value
+        self.assertEqual(seen, [False])
+
     def test_reset_right_after_a_flip_change_wins(self):
+        self.app.INLINE_WORKERS = False
         self.app.save_setting(preview_flip_3d=False)      # queued on the settings worker
         self.app.reset_settings()                          # queued after it: FIFO
         self.spin_until(lambda: theme_popup.theme_auto.settings().get("preview_flip_3d") is True
