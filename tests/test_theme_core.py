@@ -13,7 +13,7 @@ import theme_core
 import i18n  # noqa: E402
 
 i18n._lang = "en"  # the assertions below read English texts
-from images import bmp, gif, heif, itxt, jpeg, png, png_chunk, webp, ztxt
+from images import GLYCIN_PANIC_EXIF, bmp, gif, heif, itxt, jpeg, png, png_chunk, webp, with_jpeg_exif, ztxt
 
 
 def make_roots(tmp: Path) -> theme_core.Roots:
@@ -611,6 +611,65 @@ class PlainTextTests(unittest.TestCase):
             self.assertNotIn("&", theme_core.plain_text(text))
         self.assertEqual(theme_core.plain_text("a\tb\nc"), "a b c")
         self.assertEqual(len(theme_core.plain_text("x" * 500)), 300)
+
+
+class ExifStripTests(unittest.TestCase):
+    """glycin 2.2.3 aborts the whole process on some EXIF blocks, so previews
+    are decoded with the EXIF removed (crash of 2026-11-12)."""
+
+    @staticmethod
+    def real_jpeg() -> bytes:
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 40, 20)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("jpeg", [], [])
+        assert ok
+        return bytes(data)
+
+    def test_jpeg_exif_segment_is_removed(self):
+        plain = self.real_jpeg()
+        self.assertIsNone(theme_core.without_exif(plain))
+        self.assertEqual(theme_core.without_exif(with_jpeg_exif(plain)), plain)
+
+    def test_png_exif_chunk_is_removed(self):
+        plain = png(2, 2)
+        self.assertIsNone(theme_core.without_exif(plain))
+        tagged = png(2, 2, extra=png_chunk(b"eXIf", GLYCIN_PANIC_EXIF))
+        self.assertEqual(theme_core.without_exif(tagged), plain)
+
+    def test_webp_exif_chunk_and_flag_are_removed(self):
+        plain = webp(4, 4)
+        exif = b"EXIF" + len(GLYCIN_PANIC_EXIF).to_bytes(4, "little") + GLYCIN_PANIC_EXIF
+        body = plain[12:].replace(b"VP8X\x0a\x00\x00\x00\x02", b"VP8X\x0a\x00\x00\x00\x0a") + exif
+        tagged = b"RIFF" + (4 + len(body)).to_bytes(4, "little") + b"WEBP" + body
+        self.assertEqual(theme_core.without_exif(tagged), plain)
+
+    def test_other_formats_are_left_alone(self):
+        self.assertIsNone(theme_core.without_exif(gif(2, 2)))
+        self.assertIsNone(theme_core.without_exif(b"not an image"))
+
+    def test_scaled_pixbuf_survives_the_glycin_panic_exif(self):
+        # In a child process: on a regression glycin aborts, which must fail
+        # this test, not kill the test run.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "camera.jpg"
+            path.write_bytes(with_jpeg_exif(self.real_jpeg()))
+            code = ("import sys; sys.path.insert(0, sys.argv[1]); import theme_core; "
+                    "p = theme_core.scaled_pixbuf(sys.argv[2], 20, 20); "
+                    "print(p.get_width(), p.get_height())")
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(Path(theme_core.__file__).parent), str(path)],
+                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["20", "10"])
+
+    def test_scaled_pixbuf_refuses_oversized_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "huge.png"
+            path.write_bytes(png(60000, 60000))
+            self.assertIsNone(theme_core.scaled_pixbuf(path, 20, 20))
 
 
 class MimeTests(unittest.TestCase):

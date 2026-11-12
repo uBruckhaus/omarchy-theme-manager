@@ -879,12 +879,7 @@ def scaled_pixbuf(path: str, width: int, height: int):
     The header is checked first: GTK's loaders allocate the declared canvas
     before scaling, so a small crafted file with huge dimensions (or frames)
     is never handed to them."""
-    if theme_core.image_size_problem(path):
-        return None
-    try:
-        return GdkPixbuf.Pixbuf.new_from_file_at_scale(path, width * 2, height * 2, True)
-    except (GLib.Error, TypeError):
-        return None
+    return theme_core.scaled_pixbuf(path, width * 2, height * 2)
 
 
 class BackgroundNotSet(Exception):

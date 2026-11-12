@@ -2458,12 +2458,7 @@ def fade(widget, target: float, hide: bool = False, duration_ms: int = 180):
 
 def load_cover(path: str, width: int, height: int):
     """A wallpaper decoded at twice the preview size (header checked first)."""
-    if theme_core.image_size_problem(path):
-        return None
-    try:
-        return GdkPixbuf.Pixbuf.new_from_file_at_scale(path, width * 2, height * 2, True)
-    except (GLib.Error, TypeError):
-        return None
+    return theme_core.scaled_pixbuf(path, width * 2, height * 2)
 
 
 class WorkspaceUndo:

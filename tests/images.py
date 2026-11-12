@@ -89,3 +89,23 @@ def heif(width: int = 64, height: int = 64, grid: tuple[int, int] | None = None,
     idat = _box(b"idat", grid_data)
     meta = _box(b"meta", hdlr + pitm + iinf + iloc + iprp + idat, full=True)
     return ftyp + meta + _box(b"mdat", b"\x00" * 16)
+
+
+# The EXIF (TIFF) block of a camera JPEG on which glycin 2.2.3's EXIF parser
+# (gufo-exif 0.5.3) panics and aborts the decoding process.
+GLYCIN_PANIC_EXIF = __import__("base64").b64decode(
+    "TU0AKgAAAT4AAwEPAAIAAAAKAAAAMgEQAAIAAAAIAAAAPIdpAAQAAAABAAAARAAAAABNRURJT04g"
+    "QUcATUQ4NjgyNgAADoKaAAUAAAABAAAA8oKdAAUAAAABAAAA+ogiAAMAAAABAAIAAJADAAIAAAAU"
+    "AAABApIBAAoAAAABAAABFpICAAUAAAABAAABHpIEAAoAAAABAAABJpIFAAUAAAABAAABLpIHAAMA"
+    "AAABAAQAAJIIAAMAAAABAAAAAJIJAAMAAAABAAAAAJIKAAUAAAABAAABNqACAAQAAAABAAAIAKAD"
+    "AAQAAAABAAAGAAAAAAAAAAABAAAAyAAAAGEAAAAKMjAxMzowMjoyNyAyMToxNDoyOAAAACiUAAAF"
+    "TwAAUpcAAAyZAAAAAAAAAAEAAAGYAAAAfQAAAAQAAAABAAQBDwACAAAACgAAADIBEAACAAAACAAA"
+    "ADwBMQACAAAACAAAAXSHaQAEAAAAAQAAAXwAAAAAVjAuZmMwMAAAD4KaAAUAAAABAAAA8oKdAAUA"
+    "AAABAAAA+ogiAAMAAAABAAIAAIgnAAMAAAABAGQAAJADAAIAAAAUAAABApIBAAoAAAABAAABFpIC"
+    "AAUAAAABAAABHpIEAAoAAAABAAABJpIFAAUAAAABAAABLpIHAAMAAAABAAQAAJIIAAMAAAABAAAA"
+    "AJIJAAMAAAABAAAAAJIKAAUAAAABAAABNqACAAQAAAABAAAIAKADAAQAAAABAAAGAAAAAAA=")
+
+
+def with_jpeg_exif(data: bytes, tiff: bytes = GLYCIN_PANIC_EXIF) -> bytes:
+    """`data` (a JPEG) with an APP1 Exif segment holding `tiff` after SOI."""
+    return data[:2] + b"\xff\xe1" + struct.pack(">H", 8 + len(tiff)) + b"Exif\x00\x00" + tiff + data[2:]

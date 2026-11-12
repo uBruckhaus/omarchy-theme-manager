@@ -214,13 +214,9 @@ def image_pixels(path, size: int = 64) -> list[tuple[float, float, float]]:
     The header is checked first, like everywhere else."""
     if theme_core.image_size_problem(path):
         raise ValueError(_("the image is too large to read"))
-    import gi
-    gi.require_version("GdkPixbuf", "2.0")
-    from gi.repository import GdkPixbuf, GLib
-    try:
-        image = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), size, size, True)
-    except GLib.Error as error:
-        raise ValueError(_("cannot read the image: {0}").format(error.message)) from error
+    image = theme_core.scaled_pixbuf(path, size, size)
+    if image is None:
+        raise ValueError(_("cannot read the image: {0}").format(Path(path).name))
     data = image.get_pixels()
     channels, stride = image.get_n_channels(), image.get_rowstride()
     pixels = []
@@ -629,11 +625,8 @@ def make_preview(directory: Path, palette: Palette, wallpaper: Path | None = Non
         (images(directory / "backgrounds") or
          images(Path.home() / ".config/omarchy/backgrounds" / directory.name))
     for wall in walls[:1]:
-        if theme_core.image_size_problem(wall):
-            continue
-        try:
-            image = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(wall), width * 2, height * 2, True)
-        except GLib.Error:
+        image = theme_core.scaled_pixbuf(wall, width * 2, height * 2)
+        if image is None:
             continue
         crop = cover_crop(image.get_width(), image.get_height(), width, height)
         if crop is None:

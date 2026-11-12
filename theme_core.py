@@ -1772,6 +1772,134 @@ def check_image_size(source) -> None:
         raise ValueError(problem)
 
 
+def _without_jpeg_exif(data: bytes) -> bytes | None:
+    """The JPEG without its APP1 Exif segments, or None if it has none.
+    Segments are walked by length up to the start of scan."""
+    out, pos, found = [data[:2]], 2, False
+    while pos + 4 <= len(data) and data[pos] == 0xFF:
+        code = data[pos + 1]
+        if code == 0xFF:   # fill byte
+            out.append(data[pos:pos + 1])
+            pos += 1
+            continue
+        if code == 0x01 or 0xD0 <= code <= 0xD7:
+            out.append(data[pos:pos + 2])
+            pos += 2
+            continue
+        if code in (0xD9, 0xDA):
+            break
+        end = pos + 2 + int.from_bytes(data[pos + 2:pos + 4], "big")
+        if end > len(data):
+            return None
+        if code == 0xE1 and data[pos + 4:pos + 10] == b"Exif\0\0":
+            found = True
+        else:
+            out.append(data[pos:end])
+        pos = end
+    if not found:
+        return None
+    out.append(data[pos:])
+    return b"".join(out)
+
+
+def _without_png_exif(data: bytes) -> bytes | None:
+    """The PNG without its eXIf chunks, or None if it has none."""
+    out, pos, found = [data[:8]], 8, False
+    while pos + 12 <= len(data):
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        end = pos + 12 + length
+        if end > len(data):
+            break
+        if data[pos + 4:pos + 8] == b"eXIf":
+            found = True
+        else:
+            out.append(data[pos:end])
+        pos = end
+    if not found:
+        return None
+    out.append(data[pos:])
+    return b"".join(out)
+
+
+def _without_webp_exif(data: bytes) -> bytes | None:
+    """The WebP without its EXIF chunks (and the VP8X 'has EXIF' flag), or
+    None if it has none."""
+    chunks, pos, found = [], 12, False
+    while pos + 8 <= len(data):
+        length = int.from_bytes(data[pos + 4:pos + 8], "little")
+        end = min(len(data), pos + 8 + length + (length & 1))
+        kind = data[pos:pos + 4]
+        if kind == b"EXIF":
+            found = True
+        elif kind == b"VP8X" and length >= 1 and pos + 8 < len(data):
+            chunk = bytearray(data[pos:end])
+            chunk[8] &= ~0x08 & 0xFF
+            chunks.append(bytes(chunk))
+        else:
+            chunks.append(data[pos:end])
+        pos = end
+    if not found:
+        return None
+    body = b"WEBP" + b"".join(chunks)
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
+def without_exif(data: bytes) -> bytes | None:
+    """``data`` with its EXIF block removed, or None if it carries none (or
+    is not a JPEG, PNG or WebP).
+
+    glycin (gdk-pixbuf's image loader since 2.44) parses EXIF inside the
+    calling process to read the orientation, and glycin 2.2.3 panics, i.e.
+    aborts the whole popup, on some cameras' EXIF ("range start index …
+    out of range"). The previews never use the orientation, so they are
+    decoded without it."""
+    if data[:3] == b"\xff\xd8\xff":
+        return _without_jpeg_exif(data)
+    if data[:8] == PNG_SIGNATURE:
+        return _without_png_exif(data)
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return _without_webp_exif(data)
+    return None
+
+
+def scaled_pixbuf(path, width: int, height: int):
+    """``path`` decoded to fit width×height (aspect kept), or None if it is
+    unsafe or cannot be decoded. The header is checked first (GTK's loaders
+    allocate the declared canvas before scaling), and an EXIF block is
+    removed before glycin sees it (see ``without_exif``)."""
+    if image_size_problem(path):
+        return None
+    import gi
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf, GLib
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_BACKGROUND_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_BACKGROUND_BYTES:
+        return None
+    clean = without_exif(data)
+    try:
+        if clean is None:
+            return GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
+        loader = GdkPixbuf.PixbufLoader()
+
+        def fit(_loader, w, h):
+            if w > 0 and h > 0:
+                scale = min(width / w, height / h)
+                _loader.set_size(max(1, round(w * scale)), max(1, round(h * scale)))
+
+        loader.connect("size-prepared", fit)
+        try:
+            loader.write(clean)
+        finally:
+            loader.close()
+        return loader.get_pixbuf()
+    except (GLib.Error, TypeError):
+        return None
+
+
 def add_background_data(roots: Roots | None, slug: str, data: bytes,
                         name: str = "image") -> Path:
     """Store image bytes of unknown origin (e.g. dragged out of a browser).
