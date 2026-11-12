@@ -3044,10 +3044,45 @@ class Flip3DTests(ViewLayerTest):
         calls = []
         with patch.object(theme_popup.FlipPicture, "current_wallpaper_path", lambda _self: None), \
                 patch.object(self.app, "_pin_wallpaper", lambda *a, **k: calls.append("pin")), \
-                patch.object(self.app, "apply_theme_action", lambda t: calls.append("plain")):
+                patch.object(self.app, "apply_theme_action",
+                             lambda t, then=None: (calls.append("plain"), then and then())):
+            self.app._pin_busy = False
             self.app.apply_from_big_preview(theme, pic)
             self.app.apply_from_big_preview(theme, None)   # no wallpapers: a fixed picture or none
         self.assertEqual(calls, ["plain", "plain"])
+        self.assertFalse(self.app._pin_busy)               # each finished and freed the queue
+
+    def test_a_plain_apply_while_a_pin_runs_waits(self):
+        theme = SimpleNamespace(current=False, slug="gamma")
+        calls = []
+        with patch.object(self.app, "_live_picture", lambda t, p: p), \
+                patch.object(self.app, "apply_theme_action",
+                             lambda t, then=None: calls.append(t.slug)):
+            self.app._pin_busy = True
+            self.app.apply_from_big_preview(theme, None)
+            self.assertEqual(calls, [])                     # no second apply at the same time
+            self.app._pin_finished()
+        self.assertEqual(calls, ["gamma"])
+        self.app._pin_busy = False
+
+    def test_a_queued_request_sees_whether_its_theme_is_current_now(self):
+        from pathlib import Path
+        info = theme_popup.theme_core.ThemeInfo
+        import dataclasses
+        fields = {f.name for f in dataclasses.fields(info)}
+        base = {"slug": "alpha", "name": "Alpha", "path": Path("/t/alpha")}
+        theme = info(**base, **{k: None for k in fields - set(base) - {"current"}}, current=True) \
+            if "current" in fields else None
+        seen = []
+        with patch.object(self.app, "_live_picture", lambda t, p: p), \
+                patch.object(self.app, "_pin_wallpaper",
+                             lambda t, p, path, apply=False: seen.append(t.current)):
+            self.app._pin_busy = True
+            self.app._pin_next = (theme, None, "/t/a2.png", True)
+            self.app.current_slug = "beta"                  # another theme was applied meanwhile
+            self.app._pin_finished()
+        self.assertEqual(seen, [False])                     # so the whole theme is applied, not just the picture
+        self.app._pin_busy = False
 
     def test_big_preview_apply_while_a_pin_runs_waits_with_apply(self):
         theme = SimpleNamespace(current=False, slug="gamma")

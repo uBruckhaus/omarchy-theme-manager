@@ -8,6 +8,7 @@ by pasting an image copied from the web, remove the ones no longer wanted.
 All file work goes through theme_core, which enforces the trust rules.
 """
 
+import dataclasses
 import colorsys
 import math
 import os
@@ -5189,18 +5190,32 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if wp_path and not picture.is_current_wallpaper_pinned():
                 self._queue_pin(theme, picture, wp_path, apply=True)   # the theme stays, its background changes
             return
-        if not wp_path:
-            self.apply_theme_action(theme)
-            return
+        # On the theme's own preview (no wallpaper shown) a plain apply, queued like a pin
+        # so two applies never run at once and the latest click wins.
         self._queue_pin(theme, picture, wp_path, apply=True)
 
-    def _queue_pin(self, theme, picture, wp_path: str, *, apply: bool):
+    def _queue_pin(self, theme, picture, wp_path: str | None, *, apply: bool):
         if self.__dict__.get("_pin_busy"):
             self._pin_next = (theme, picture, wp_path, apply)
             return
         self._pin_busy = True
         self._pin_next = None
-        self._pin_wallpaper(theme, picture, Path(wp_path), apply=apply)
+        self._run_pin(theme, picture, wp_path, apply)
+
+    def _run_pin(self, theme, picture, wp_path: str | None, apply: bool):
+        if wp_path is None:
+            self.apply_theme_action(theme, then=self._pin_finished)
+        else:
+            self._pin_wallpaper(theme, picture, Path(wp_path), apply=apply)
+
+    def _as_now(self, theme):
+        """A queued request's theme with `current` as it is now: another apply may have
+        finished meanwhile (after_apply has updated current_slug by then)."""
+        if isinstance(theme, theme_core.ThemeInfo):
+            now = theme.slug == getattr(self, "current_slug", None)
+            if now != theme.current:
+                return dataclasses.replace(theme, current=now)
+        return theme
 
     def _pin_finished(self):
         self._pin_busy = False
@@ -5208,8 +5223,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if nxt is not None:
             # The chosen wallpaper itself (the picture may have been rebuilt meanwhile, e.g. resizing).
             theme, picture, wp_path, apply = nxt
+            theme = self._as_now(theme)
             self._pin_busy = True
-            self._pin_wallpaper(theme, self._live_picture(theme, picture), Path(wp_path), apply=apply)
+            self._run_pin(theme, self._live_picture(theme, picture), wp_path, apply)
 
     def _sync_theme_flip_wallpaper(self, slug: str, bg: Path, *, theme_current: bool, pin_apply_theme: bool | None = None):
         row = self.rows.get_first_child()
@@ -7072,7 +7088,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             child = child.get_next_sibling()
         return child
 
-    def apply_theme_action(self, theme: theme_core.ThemeInfo):
+    def apply_theme_action(self, theme: theme_core.ThemeInfo, then=None):
         # Applying a hidden theme means it is wanted again: unhide it first, so
         # the theme-set hook's picker rebuild already includes it.
         if theme.slug in self.hidden:
@@ -7081,8 +7097,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 theme_core.unhide_theme(theme.slug)
             except OSError:
                 pass
-        self._async(lambda: theme_auto.apply_theme(theme.slug),
-                    lambda ok, error: self.after_apply(theme, ok, error))
+        def applied(ok, error):
+            try:
+                self.after_apply(theme, ok, error)
+            finally:
+                if then is not None:
+                    then()
+        self._async(lambda: theme_auto.apply_theme(theme.slug), applied)
 
     def after_apply(self, theme: theme_core.ThemeInfo, ok: bool, error: Exception | None):
         if ok:
