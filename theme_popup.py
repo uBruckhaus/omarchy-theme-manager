@@ -161,6 +161,9 @@ class FixedPicture(Gtk.Picture):
         self.set_can_shrink(True)
         self.set_hexpand(False)
         self.set_vexpand(False)
+        self._gone = False                    # unrealized: its pending decodes are dropped
+        self.connect("unrealize", lambda *_: setattr(self, "_gone", True))
+        self.connect("realize", lambda *_: setattr(self, "_gone", False))
 
     def do_measure(self, orientation, _for_size):
         size = self._size[0] if orientation == Gtk.Orientation.HORIZONTAL else self._size[1]
@@ -196,9 +199,7 @@ class FlipPicture(FixedPicture):
         self._textures: dict[str, Gdk.Paintable] = {}
         self._requested: set[str] = set()
         self._pending: set[str] = set()       # queued at the decoder, not decoded yet
-        self._gone = False                    # unrealized: pending decodes are dropped
         self.connect("unrealize", self._on_card_gone)
-        self.connect("realize", lambda *_: setattr(self, "_gone", False))
         self._selected = False
         self._hovered = False
         self._interactive = False  # True once rotation or manual arrow mode is active
@@ -886,6 +887,9 @@ class ImageDecoder:
             threading.Thread(target=self.work, daemon=True).start()
 
     def request(self, picture, path: str, width: int, height: int, setter=None, failed=None, wanted=None):
+        if wanted is None and picture is not None:
+            # A card's own preview: dropped when its picture has left the window before its turn.
+            wanted = lambda pic=picture: not getattr(pic, "_gone", False)
         """`failed`: called on the main loop when the picture cannot be decoded (a waiting animation
         must not wait for it forever). `wanted`: asked before decoding; a job no longer wanted (its
         card gone, its wallpaper rotated away) is dropped without decoding."""
@@ -5933,6 +5937,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         slot.set_visible(True)
         if isinstance(picture, FlipPicture):
             picture.start_big_preview(preserve_face=preserve_face)
+        # Keyboard focus into the preview (its Close button), so Tab and Space work inside it and
+        # never on the list behind it.
+        GLib.idle_add(lambda: (close_btn.grab_focus() if close_btn.get_root() is not None else None) and False)
 
     def on_theme_row_activated(self, row):
         if row is None or not hasattr(row, "tm_theme"):
@@ -7873,7 +7880,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return True
         if self.theme_preview_open():
             # The big preview has the keys: arrows, Enter, Esc/Backspace (above); typing does not
-            # filter the list behind it.
+            # filter the list behind it. Space and Tab go to its focused button.
+            focus = self.window.get_focus()
+            in_preview = focus is not None and focus.is_ancestor(self.big_preview_slot)
+            if in_preview and keyval in (Gdk.KEY_space, Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab,
+                                         Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                return False
             if self.typed_char(keyval, state):
                 return True
             return self.on_list_key(keyval)
