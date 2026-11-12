@@ -2988,6 +2988,16 @@ class Flip3DTests(ViewLayerTest):
         self.assertEqual(followed, ["recent"])          # `then` sees the stored value
         self.assertEqual(seen, [False])
 
+    def test_a_language_restart_waits_for_queued_writes(self):
+        started = []
+        self.app._jobs_pending = 1                       # a write still queued
+        with patch.object(theme_popup.os, "execv", lambda *a: started.append(a)):
+            self.app.restart_in_language()
+            self.assertEqual(started, [])
+            self.app._jobs_pending = 0                   # … now stored
+            self.spin_until(lambda: started, seconds=2)
+        self.assertEqual(len(started), 1)
+
     def test_reset_right_after_a_flip_change_wins(self):
         self.app.INLINE_WORKERS = False
         self.app.save_setting(preview_flip_3d=False)      # queued on the settings worker

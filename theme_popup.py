@@ -1845,10 +1845,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.update_mouse_hint()
         if save:
             default = (self.card_w, self.list_h) == (CARD_WIDTH, LIST_HEIGHT)
-            try:
-                theme_core.save_window_size(None if default else (self.card_w, self.list_h))
-            except OSError:
-                pass
+            size = None if default else (self.card_w, self.list_h)
+            self._save_in_background(lambda: theme_core.save_window_size(size))     # under the lock: worker
 
     def on_resize_begin(self, _gesture, _x, _y):
         # A second press on the grip within the double-click time: default size.
@@ -2694,7 +2692,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         # Under the shared settings lock: on the settings worker, after what was saved before it.
         self._save_in_background(store, then=stored)
 
-    def restart_in_language(self):
+    def restart_in_language(self, _waited: float = 0.0):
+        """Restart in the new language, but only once every queued settings write is stored (a
+        setting changed just after the language must not be lost by the restart)."""
+        if self.__dict__.get("_jobs_pending", 0) > 0 and _waited < 15.0:
+            GLib.timeout_add(50, lambda: self.restart_in_language(_waited + 0.05) and False)
+            return
         os.environ["THEME_MANAGER_PAGE"] = "settings"
         sys.stdout.flush()
         sys.stderr.flush()
@@ -3714,9 +3717,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                         error = failure
                     GLib.idle_add(lambda e=error, a=after: self._background_saved(e, a) and False)
             threading.Thread(target=worker, daemon=True).start()
+        self._jobs_pending = self.__dict__.get("_jobs_pending", 0) + 1
         jobs.put((values if callable(values) else dict(values), then))
 
     def _background_saved(self, error, then=None):
+        if not self.INLINE_WORKERS:
+            self._jobs_pending = max(0, self.__dict__.get("_jobs_pending", 0) - 1)
         if error is not None:
             theme_core.notify(_("Could not save the setting"), str(error))
         if then is not None:
@@ -3772,15 +3778,16 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                       preview_big_card=True,
                       preview_big_auto_rotate=True,
                       header_order=list(header_order.DEFAULT))
-        restart = i18n.language_setting() != "auto"
+        restart = []                     # decided on the worker, after any language change queued before
 
         def reset_all():
             theme_auto.update_settings(**values)
             theme_auto.save_schedule(enabled=False, day_at=theme_auto.DEFAULT_SCHEDULE["day_at"],
                                      night_at=theme_auto.DEFAULT_SCHEDULE["night_at"])
-            if restart:
+            if i18n.language_setting() != "auto":
                 i18n.save_language("auto")
-        self._save_in_background(reset_all, then=lambda: self._reset_after_saved(restart))
+                restart.append(True)
+        self._save_in_background(reset_all, then=lambda: self._reset_after_saved(bool(restart)))
 
     def _reset_after_saved(self, restart: bool = False):
         self.refresh_themes()
@@ -4012,7 +4019,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if not ed["edit"] and not ed.get("from_ask"):
             # Which wallpapers the new theme gets: a compact row up here too.
             # (An Ask AI theme: the card's picture, else its base's wallpapers, without a row.)
-            count = sum(1 for w in theme_core.list_backgrounds(None, ed["base"]) if not w.hidden)
+            count = self.__dict__.get("wallpaper_counts", {}).get(ed["base"].slug, 0)   # read on the worker
             base = theme_core.plain_text(ed["base"].name)
             if ed.get("ask_wallpaper") is not None and ed["wallpaper"] is None:
                 walls = self.switch(ed["wallpapers"], self.set_editor_wallpapers)
@@ -4874,22 +4881,29 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         they differ from the ones the cards were built with, the list is built again once."""
         self._flip_gen = self.__dict__.get("_flip_gen", 0) + 1
         gen, hidden, current_bg = self._flip_gen, dict(self.hidden_wallpapers), self.current_bg
+        all_themes = list(themes)
         themes = [t for t in themes if t.preview]
 
         def read():
             return {t.slug: theme_auto.flip_wallpapers(t, hidden=hidden, current_bg=current_bg) for t in themes}
 
-        def done(lists, error):
-            if error is not None or gen != self._flip_gen:
+        every = list(all_themes)
+
+        def counts():
+            return {t.slug: sum(1 for w in theme_core.list_backgrounds(None, t) if not w.hidden) for t in every}
+
+        def done(result, error):
+            if error is not None or gen != self._flip_gen or result is None:
                 return
+            lists, self.wallpaper_counts = result
             if lists != self.__dict__.get("flip_lists"):
                 self.flip_lists = lists
                 self.refresh_themes()          # builds the cards with them (and reads again: same → stops)
         if self.INLINE_WORKERS:
             # Tests: known before the cards are built (no second build needed).
-            self.flip_lists = read()
+            self.flip_lists, self.wallpaper_counts = read(), counts()
             return
-        self._async(read, done)
+        self._async(lambda: (read(), counts()), done)
 
     def refresh_themes(self, keep: str | None = None):
         """Rebuild the list; `keep` is the slug to leave selected."""
@@ -4925,8 +4939,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                                           theme_auto.sort_order())
         # The theme in use first; the rest keep their order.
         ordered = [t for t in ordered if t.current] + [t for t in ordered if not t.current]
-        if need_walls:
-            self.load_flip_lists(ordered)      # read on a worker; the cards get them when known
+        self.load_flip_lists(ordered)          # read on a worker; the cards get them when known
         for theme in ordered:
             is_hidden = theme.slug in self.hidden
             # The active theme is always listed (marked when hidden), as in
@@ -7193,17 +7206,27 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     # --- wallpapers --------------------------------------------------------------------
 
     def refresh_wallpapers(self):
+        """The theme's wallpaper folder is listed on a worker; the grid is filled when it is known
+        (the newest request only)."""
         theme = self.active_theme
         if theme is None:
             return
+        self._wp_gen = self.__dict__.get("_wp_gen", 0) + 1
+        gen = self._wp_gen
+
+        def listed(found, error):
+            if gen == self._wp_gen and self.active_theme is theme:
+                self.fill_wallpapers(theme, found if error is None and found is not None else [])
+        self._async(lambda: theme_core.list_backgrounds(None, theme), listed)
+
+    def fill_wallpapers(self, theme, found):
         first = self.wp_grid.get_first_child()
         while first is not None:
             self.wp_grid.remove(first)
             first = self.wp_grid.get_first_child()
         query = self.wp_filter.casefold().strip()
         self.update_wp_title()
-        wallpapers = [w for w in theme_core.list_backgrounds(None, theme)
-                      if (self.show_hidden or not w.hidden) and query in w.name.casefold()]
+        wallpapers = [w for w in found if (self.show_hidden or not w.hidden) and query in w.name.casefold()]
         if query and not wallpapers:
             self.wp_grid.append(self._empty_tile(_("No wallpaper matches “{0}”").format(self.wp_filter)))
             return
@@ -8173,10 +8196,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.LEFT, position[0])
             Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.TOP, position[1])
         if save:
-            try:
-                theme_core.save_window_position(position)
-            except OSError:
-                pass
+            self._save_in_background(lambda: theme_core.save_window_position(position))
 
     def on_move_begin(self, _gesture, _x, _y):
         picked = self.main_header.pick(_x, _y, Gtk.PickFlags.DEFAULT)
