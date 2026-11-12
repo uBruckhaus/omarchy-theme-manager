@@ -145,6 +145,20 @@ def monitor_height() -> int:
     return min(heights) if heights else 1080
 
 
+def monitor_size() -> tuple[int, int]:
+    """Logical width and height of the smallest monitor (each taken alone)."""
+    display = Gdk.Display.get_default()
+    sizes = []
+    if display is not None:
+        monitors = display.get_monitors()
+        for i in range(monitors.get_n_items()):
+            geo = monitors.get_item(i).get_geometry()
+            sizes.append((geo.width, geo.height))
+    if not sizes:
+        return 1920, 1080
+    return min(w for w, _h in sizes), min(h for _w, h in sizes)
+
+
 class FixedPicture(Gtk.Picture):
     """A picture that always measures exactly width × height.
 
@@ -1177,6 +1191,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         grip = Gtk.Image.new_from_icon_name("pan-down-symbolic")
         grip.add_css_class("tm-grip")
         grip.set_pixel_size(14)
+        grip.set_size_request(28, 28)
         grip.set_halign(Gtk.Align.END)
         grip.set_valign(Gtk.Align.END)
         grip.set_cursor_from_name("se-resize")
@@ -1206,8 +1221,6 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         drop.connect("drag-leave", lambda *_: self.light_add_tile(False))
         drop.connect("drop", self.on_drop)
         card.add_controller(drop)
-        self.list_h = max(theme_core.MIN_WINDOW_SIZE[1], min(self.list_h, monitor_height() - 2 * SCREEN_MARGIN))
-
         header = Gtk.Box(spacing=8)
         self.main_header = header
         title = Gtk.Label(label="Theme Manager")
@@ -1738,8 +1751,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.stack = stack
         # Like the other plugins, the gear and (i) are gone while their pages are open.
         stack.connect("notify::visible-child-name", lambda st, _p: self.update_page_buttons(st))
-        self.resize_to(self.card_w, self.list_h)
         self.apply_theme_css()
+        self.resize_to(self.card_w, self.list_h)
         self.refresh_themes()
 
     # --- size ----------------------------------------------------------------------
@@ -1787,22 +1800,47 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.sized.append(widget)
         widget.set_size_request(self.card_w, -1)
 
-    def size_limits(self) -> tuple[int, int]:
-        geo = self.monitor_geometry() if self.window is not None else None
-        width = geo.width if geo is not None else 1920
-        return max(CARD_WIDTH, width - 80), max(theme_core.MIN_WINDOW_SIZE[1], monitor_height() - 2 * SCREEN_MARGIN)
+    def size_limits(self, applied: bool = False) -> tuple[int, int]:
+        """(max card width, max list height). `applied`: the card width is
+        already in the size requests (resize_to sets it first), so the height
+        overhead is measured at that width and not at the last allocation."""
+        # Not mapped yet: the layer surface opens on the focused monitor, which
+        # is unknown, so assume the smallest one. Mapped: the real monitor.
+        mapped = self.window is not None and self.window.get_mapped()
+        geo = self.monitor_geometry() if mapped else None
+        if geo is not None:
+            width, height = geo.width, geo.height
+        else:
+            width, height = monitor_size()
+        # The screen margin, less what the window adds around the list (header,
+        # card, the scroller's own frame). No page is taller than the list.
+        window_width = self.window.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        stack_width = self.stack.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        if not applied:
+            stack_width = max(self.stack.get_width(), stack_width)
+        window_min = self.window.measure(Gtk.Orientation.VERTICAL, window_width)[0]
+        stack_min = self.stack.measure(Gtk.Orientation.VERTICAL, stack_width)[0]
+        scroll_min = self.list_scroller.measure(Gtk.Orientation.VERTICAL, stack_width)[0]
+        content_min = max(0, self.list_scroller.get_min_content_height())
+        overhead = max(0, window_min - stack_min) + max(0, scroll_min - content_min)
+        return (max(CARD_WIDTH, width - 80),
+                max(theme_core.MIN_WINDOW_SIZE[1], height - 2 * SCREEN_MARGIN - overhead))
 
     def resize_to(self, width: int, height: int, save: bool = False):
         """Card width and list height, kept within the monitor. The grids
         show as many columns as fit."""
-        max_w, max_h = self.size_limits()
-        self.card_w = max(CARD_WIDTH, min(int(width), max_w))
-        self.list_h = max(theme_core.MIN_WINDOW_SIZE[1], min(int(height), max_h))
+        # Width first, applied to everything that follows it: the height limit
+        # is the monitor less what the window adds around the list, and that
+        # (wrapped labels) depends on the new width, not the previous one.
+        self.card_w = max(CARD_WIDTH, min(int(width), self.size_limits()[0]))
         self.update_settings_navigation_layout()
         for widget in self.sized:
             widget.set_size_request(self.card_w, -1)
         if getattr(self, "ask_prompt_scroller", None) is not None:
             self.ask_prompt_height()                 # Ask AI's suggestions: 2 rows narrow, 4 wide
+        self.ws_set_width(self.card_w)
+        self.ed_set_width(self.card_w)
+        self.list_h = max(theme_core.MIN_WINDOW_SIZE[1], min(int(height), self.size_limits(applied=True)[1]))
         # Raise the maximum first: GTK refuses a minimum above the maximum.
         self.list_scroller.set_max_content_height(100000)
         self.list_scroller.set_min_content_height(self.list_h)
@@ -1842,8 +1880,6 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             if getattr(self, "catalog", None):
                 self.fill_catalog(self.catalog, None)          # import page tiles
             self.rebuild_web_tiles()
-        self.ws_set_width(self.card_w)
-        self.ed_set_width(self.card_w)
         for grid in (self.wp_grid, self.web_grid, self.import_grid):
             grid.set_min_children_per_line(self.columns)
             grid.set_max_children_per_line(self.columns)
@@ -4606,7 +4642,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         .tm-title {{ font-size: 15px; font-weight: 600; }}
         .tm-confirm {{ font-size: 18px; font-weight: 600; }}
         .tm-hint {{ color: {muted_hex}; font-size: 14px; }}
-        .tm-header-btn {{ padding: 4px; min-width: 0; min-height: 0; margin-right: 4px; }}
+        .tm-header-btn {{ padding: 4px; min-width: 20px; min-height: 20px; margin-right: 4px; }}
         .tm-header-group {{ background: alpha({fg_hex}, 0.05); border-radius: {radius}px;
             padding: 2px 4px; }}
         .tm-header-group button.tm-header-btn {{ margin-right: 0; }}
@@ -8211,6 +8247,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self.refresh_themes()
         self.refresh_look_pending()
         self.grab_keyboard()
+        self.resize_to(self.card_w, self.list_h)
         self.move_to(self.position)
         self.window.present()
         self.layer_watch.start()
@@ -8247,8 +8284,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if position is not None:
             geo = self.monitor_geometry()
             if geo is not None:
-                position = (min(max(0, int(position[0])), max(0, geo.width - self.window.get_width())),
-                            min(max(0, int(position[1])), max(0, geo.height - self.window.get_height())))
+                # Cover both the current allocation and a pending larger request.
+                width = max(self.window.get_width(), self.window.measure(Gtk.Orientation.HORIZONTAL, -1)[0])
+                height = max(self.window.get_height(), self.window.measure(Gtk.Orientation.VERTICAL, width)[0])
+                max_x = max(0, geo.width - width)
+                max_y = max(0, geo.height - height)
+                position = (min(max(0, int(position[0])), max_x),
+                            min(max(0, int(position[1])), max_y))
         self.position = position
         for edge in (Gtk4LayerShell.Edge.TOP, Gtk4LayerShell.Edge.LEFT):
             Gtk4LayerShell.set_anchor(self.window, edge, position is not None)
