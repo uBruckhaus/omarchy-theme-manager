@@ -2677,6 +2677,9 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         except OSError as error:
             theme_core.notify(_("Could not save the setting"), str(error))
             return
+        self.restart_in_language()
+
+    def restart_in_language(self):
         os.environ["THEME_MANAGER_PAGE"] = "settings"
         sys.stdout.flush()
         sys.stderr.flush()
@@ -3675,13 +3678,16 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 while True:
                     job, after = jobs.get()
                     try:
-                        theme_auto.update_settings(**job)
+                        if callable(job):              # several writes in one go (Reset to defaults)
+                            job()
+                        else:
+                            theme_auto.update_settings(**job)
                         error = None
                     except OSError as failure:
                         error = failure
                     GLib.idle_add(lambda e=error, a=after: self._background_saved(e, a) and False)
             threading.Thread(target=worker, daemon=True).start()
-        jobs.put((dict(values), then))
+        jobs.put((values if callable(values) else dict(values), then))
 
     def _background_saved(self, error, then=None):
         if error is not None:
@@ -3728,31 +3734,38 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
     def reset_settings(self):
         """Back to the defaults (see the button's tooltip). A new language
         restarts the popup (on this page), so it comes last."""
-        # Through the same ordered worker as the flip settings: a flip change just before stays before
-        # it, and the rest of the reset (a language restart last) runs once this write is stored.
-        self._save_in_background(dict(sort="name", workspace_wallpapers=True, workspace_themes=False,
-                                      slideshow_minutes=0, corners="windows",
-                                      screenshot_key=True, screenshot_folder=None,
-                                      ask_ai_web=True, preview_flip_3d=True,
-                                      preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
-                                      preview_pin_apply_theme=True,
-                                      preview_big_card=True,
-                                      preview_big_auto_rotate=True,
-                                      header_order=list(header_order.DEFAULT)),
-                                 then=self._reset_after_saved)
+        # Through the same ordered worker as the flip settings (every write under the shared lock, so
+        # never a wait on GTK's loop): a flip change just before stays before it, and the rest of the
+        # reset (a language restart last) runs once all of it is stored.
+        values = dict(sort="name", workspace_wallpapers=True, workspace_themes=False,
+                      slideshow_minutes=0, corners="windows",
+                      screenshot_key=True, screenshot_folder=None,
+                      ask_ai_web=True, preview_flip_3d=True,
+                      preview_flip_delay=theme_auto.DEFAULT_FLIP_DELAY,
+                      preview_pin_apply_theme=True,
+                      preview_big_card=True,
+                      preview_big_auto_rotate=True,
+                      header_order=list(header_order.DEFAULT))
+        restart = i18n.language_setting() != "auto"
 
-    def _reset_after_saved(self):
+        def reset_all():
+            theme_auto.update_settings(**values)
+            theme_auto.save_schedule(enabled=False, day_at=theme_auto.DEFAULT_SCHEDULE["day_at"],
+                                     night_at=theme_auto.DEFAULT_SCHEDULE["night_at"])
+            if restart:
+                i18n.save_language("auto")
+        self._save_in_background(reset_all, then=lambda: self._reset_after_saved(restart))
+
+    def _reset_after_saved(self, restart: bool = False):
         self.refresh_themes()
         self.header_order = list(header_order.DEFAULT)
         self.rebuild_header_group()
-        self.save_schedule(enabled=False, day_at=theme_auto.DEFAULT_SCHEDULE["day_at"],
-                           night_at=theme_auto.DEFAULT_SCHEDULE["night_at"])
         if not theme_core.sync_enabled():
             self.set_omarchy_sync(True)
         self.apply_theme_css()
         self.redraw_pictures(self.window)       # the drawn pictures follow Corners too
-        if i18n.language_setting() != "auto":
-            self.set_language("auto")
+        if restart:                      # the language is stored as "auto" already: restart in it
+            self.restart_in_language()
             return
         GLib.idle_add(self.fill_settings)  # Not from inside the button's own handler.
 
@@ -5095,9 +5108,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         self._pin_busy = False
         nxt, self._pin_next = self.__dict__.get("_pin_next"), None
         if nxt is not None:
+            # The chosen wallpaper itself (the picture may have been rebuilt meanwhile, e.g. resizing).
             theme, picture, wp_path = nxt
-            if picture.current_wallpaper_path() == wp_path:
-                self.pin_theme_wallpaper(theme, picture)
+            self._pin_busy = True
+            self._pin_wallpaper(theme, self._live_picture(theme, picture), Path(wp_path))
 
     def _sync_theme_flip_wallpaper(self, slug: str, bg: Path, *, theme_current: bool, pin_apply_theme: bool | None = None):
         row = self.rows.get_first_child()
@@ -5112,6 +5126,14 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if self.theme_preview_open() and self.big_preview_theme.slug == slug and self.big_preview_picture is not None:
             self.big_preview_picture.set_active_wallpaper(bg, theme_current=theme_current,
                                                           pin_apply_theme=pin_apply_theme, promote_on_reset=True)
+
+    def _live_picture(self, theme, picture):
+        """The theme's card picture now shown (the big preview's, or the one given)."""
+        big = getattr(self, "big_preview_picture", None)
+        if self.theme_preview_open() and big is not None and getattr(self, "big_preview_theme", None) is not None \
+                and self.big_preview_theme.slug == theme.slug:
+            return big
+        return picture
 
     def _pin_wallpaper(self, theme: theme_core.ThemeInfo, picture: FlipPicture, path: Path):
         if theme.current:
@@ -5755,8 +5777,8 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         frame = Gtk.Overlay()
         if wallpapers:
             active_bg = self.flip_active_bg(theme, wallpapers)
-            big_delay = ((self.flip_delay if self.flip_delay > 0 else theme_auto.DEFAULT_FLIP_DELAY)
-                         if getattr(self, "big_preview_auto_rotate", True) else 0)
+            # 0 s ("arrows only") stays arrows only here too; otherwise auto-rotation when it is on.
+            big_delay = self.flip_delay if getattr(self, "big_preview_auto_rotate", True) else 0
             picture = FlipPicture(pic_w, pic_h, wallpapers=wallpapers,
                                   active_bg=active_bg,
                                   theme_current=theme.current,
@@ -7710,6 +7732,10 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             return True
         if keyval == Gdk.KEY_space and self.preview is not None and page in ("wallpapers", "websearch"):
             return True   # auto-repeat while Space is held for a preview
+        if keyval == Gdk.KEY_BackSpace and self.theme_preview_open() and self.preview is None \
+                and not self.actions_menu_open():
+            self.hide_theme_preview()          # Backspace closes the big preview first, as Esc does
+            return True
         if keyval == Gdk.KEY_Escape:
             if self.preview is not None:
                 self.stop_preview()
