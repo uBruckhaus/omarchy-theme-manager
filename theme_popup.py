@@ -195,6 +195,7 @@ class FlipPicture(FixedPicture):
         self._shown_pin_state = None
         self._textures: dict[str, Gdk.Paintable] = {}
         self._requested: set[str] = set()
+        self._pending: set[str] = set()       # queued at the decoder, not decoded yet
         self._gone = False                    # unrealized: pending decodes are dropped
         self.connect("unrealize", self._on_card_gone)
         self.connect("realize", lambda *_: setattr(self, "_gone", False))
@@ -264,8 +265,8 @@ class FlipPicture(FixedPicture):
         near the face shown (a plain read of a few fields; a stale answer only decodes one more)."""
         if not self._gone and path in self._keep_paths():
             return True
-        # Requested again if it comes back into the window (the set is changed on GTK's loop only).
-        GLib.idle_add(lambda: self._requested.discard(path) and False)
+        # Requested again if it comes back into the window (the sets are changed on GTK's loop only).
+        GLib.idle_add(lambda: (self._requested.discard(path), self._pending.discard(path)) and False)
         return False
 
     def _on_card_gone(self, *_args):
@@ -297,12 +298,13 @@ class FlipPicture(FixedPicture):
         if self._decoder is None or not (0 <= index < len(self._wallpapers)):
             return
         path = self._wallpapers[index]
-        if path in self._requested:
-            return
+        if path in self._requested or path in self._pending:
+            return                           # shown, or a decode of it still queued: never twice
         self._requested.add(path)
+        self._pending.add(path)
         self._decoder.request(self, path, self._size[0], self._size[1],
-                              setter=lambda tex, p=path: self._set_wallpaper_paintable(p, tex),
-                              failed=lambda p=path: self._wallpaper_failed(p),
+                              setter=lambda tex, p=path: (self._pending.discard(p), self._set_wallpaper_paintable(p, tex)),
+                              failed=lambda p=path: (self._pending.discard(p), self._wallpaper_failed(p)),
                               wanted=lambda p=path: self._still_wanted(p))
 
     def _prefetch_around(self, index: int):
@@ -7869,6 +7871,12 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         if keyval in (Gdk.KEY_i, Gdk.KEY_I) and state & Gdk.ModifierType.CONTROL_MASK:
             self.open_import()
             return True
+        if self.theme_preview_open():
+            # The big preview has the keys: arrows, Enter, Esc/Backspace (above); typing does not
+            # filter the list behind it.
+            if self.typed_char(keyval, state):
+                return True
+            return self.on_list_key(keyval)
         if keyval == Gdk.KEY_BackSpace and self.filter_query:
             self.set_filter(self.filter_query[:-1])
             return True
