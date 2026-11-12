@@ -900,6 +900,9 @@ def _clean_env():
     return env
 
 
+GIO_LAUNCH_TIMEOUT = 15
+
+
 def launch_app(app):
     """Start a saved app only from its installed launcher: uwsm-app with the
     .desktop file (in app-graphical.slice), Gio as the fallback. Never a saved
@@ -924,14 +927,24 @@ def launch_app(app):
         except OSError:
             pass
 
-    # 2. Native Gio fallback
-    if desktop_path:
+    # 2. Gio fallback: `gio launch` in a session of its own, so the app is never a member of the
+    # bar helper's process group (bounded_run ends that group when the helper is done). Its exit
+    # status is Gio's launch result (it returns once the app is spawned), like the old in-process
+    # launch_uris; a launcher that hangs is given up after GIO_LAUNCH_TIMEOUT.
+    gio = shutil.which("gio") if desktop_path else None
+    if gio:
         try:
-            from gi.repository import GioUnix
-            info = GioUnix.DesktopAppInfo.new_from_filename(desktop_path)
-            if info:
-                return bool(info.launch_uris([], None))
-        except Exception:
+            done = subprocess.run(
+                [gio, "launch", desktop_path],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=_clean_env(),
+                timeout=GIO_LAUNCH_TIMEOUT,
+            )
+            return done.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
     return False

@@ -19,6 +19,7 @@ BarWidget {
   // limits with overflow and App Preset autostart. The helper itself stays
   // idle while that plugin is still on the bar.
   readonly property string tilingPath: Qt.resolvedUrl("workspace_tiling.py").toString().replace(/^file:\/\//, "")
+  readonly property string boundedPath: Qt.resolvedUrl("bounded_run.py").toString().replace(/^file:\/\//, "")
   property bool tilingActive: false
   property bool hasAutostart: false
   property bool hasWorkspacePresets: false
@@ -39,13 +40,16 @@ BarWidget {
   readonly property string lang: I18n.resolve(languageSetting, systemLang)
   function t(key, args) { return I18n.tr(lang, key, args) }
 
-  // A finite helper (menu, bar state, store setup, mode sync, autostart) ends within its whole
-  // deadline: coreutils `timeout` stops it (SIGTERM, SIGKILL 5 s later), so a stalled one exits,
-  // its Process settles and the next try can run. --foreground: only the helper itself is
-  // stopped; apps it opened (through Hyprland) are never its children anyway. The popup, the
-  // event listener and the user's apps are not run this way.
+  // Every finite helper (menu, bar state, store setup, mode sync, autostart, the theme/wallpaper
+  // helper, tiling) runs under bounded_run.py: in a process group of its own, ended as a whole
+  // (SIGTERM, SIGKILL 5 s later to what is left) when the helper exits, when its deadline passes,
+  // or when the shell stops the supervisor (Process running = false sends it SIGTERM, and it
+  // passes that on to the whole group). So a stalled helper and anything it left running end,
+  // its Process settles and the next try can run. Apps, notifications and `omarchy theme set`
+  // are started in sessions of their own and are not part of that group. The popup, the event
+  // listener and the user's apps are not run this way.
   function bounded(seconds, argv) {
-    return ["/usr/bin/timeout", "--foreground", "-k", "5", String(seconds)].concat(argv)
+    return ["/usr/bin/python3", "-I", root.boundedPath, String(seconds), "--"].concat(argv)
   }
   // The bar exists once per monitor: only the first monitor's widget
   // follows workspaces and runs the timer (the helper is idempotent anyway).
@@ -81,13 +85,15 @@ BarWidget {
   function run(args) {
     if (helperBusy) { pending = args; return }
     helperBusy = true
-    helper.command = ["/usr/bin/python3", root.autoPath].concat(args)
+    helper.command = root.bounded(helperLimit, ["/usr/bin/python3", root.autoPath].concat(args))
     helperDeadline.restart()
     helper.running = true
     if (!helper.running) Qt.callLater(root.helperSettled)   // it did not start
   }
 
   property bool helperBusy: false
+  // The helper's own deadline (bounded_run); the outer one below adds the group's grace period.
+  readonly property int helperLimit: 190
 
   function helperSettled() {
     if (!helperBusy || helper.running) return  // settled already, or still going
@@ -102,7 +108,8 @@ BarWidget {
 
   // Applying a theme takes seconds; the helper itself gives up a lock wait after 60 s and stops
   // a theme switch (with all it started) after 120 s, so it always ends on its own before this:
-  // the lock is never released under a switch still going. A run still going after this is stopped.
+  // the lock is never released under a switch still going. Its supervisor ends the whole group at
+  // 190 s; should it still run after this, the supervisor is stopped, which ends the group too.
   Timer {
     id: helperDeadline
     interval: 200000
@@ -186,32 +193,47 @@ BarWidget {
     var address = queue.shift()
     tilingQueue = queue
     tilingBusy = true
-    tilingWorker.command = ["/usr/bin/python3", "-I", root.tilingPath, "--window", address]
+    tilingCurrent = address
+    tilingStarted = false
+    tilingWorker.command = ["/usr/bin/python3", "-I", root.boundedPath, "--report-start", String(tilingLimit), "--", "/usr/bin/python3", "-I", root.tilingPath, "--window", address]
     tilingDeadline.restart()
     tilingWorker.running = true
-    if (tilingWorker.running) markTilingSeen(address)            // handed over (once; no retries)
-    else {                                                       // it did not start:
-      tilingOverflow = true                                      // looked for again by a rescan,
-      tilingRetry.restart()                                      // at most every 30 s
-      Qt.callLater(root.tilingSettled)
-    }
+    // `running` only says a QProcess exists: the window counts as handed over once the helper
+    // has really started (bounded_run's start line). Not started at all → settled right here.
+    if (!tilingWorker.running) Qt.callLater(root.tilingSettled)
   }
 
   property bool tilingBusy: false
+  property string tilingCurrent: ""            // the window whose helper runs now
+  property bool tilingStarted: false           // its helper really started (Process.started)
+  readonly property int tilingLimit: 70        // the helper's own deadline (bounded_run)
+
+  function tilingHelperStarted() {
+    if (!tilingBusy || tilingStarted) return
+    tilingStarted = true
+    markTilingSeen(tilingCurrent)              // handed over (once; no retries)
+  }
 
   function tilingSettled() {
     if (!tilingBusy || tilingWorker.running) return   // settled already, or still going
     tilingBusy = false
     tilingDeadline.stop()
+    if (!tilingStarted) {                     // it never started (failed start or no process):
+      tilingOverflow = true                   // looked for again by a rescan,
+      tilingRetry.restart()                   // at most every 30 s
+    }
+    tilingCurrent = ""
+    tilingStarted = false
     if (tilingQueue.length === 0 && tilingOverflow && !tilingRetry.running) rescanMissedWindows()
     tilingSettle.restart()                   // the next window, if any
   }
 
-  // A window's helper waits at most 60 s for the shared lock; one still going
-  // after this is stopped and the queue goes on.
+  // A window's helper waits at most 60 s for the shared lock; its supervisor ends its group at
+  // 70 s. Should it still run after this, the supervisor is stopped (ending the group) and the
+  // queue goes on.
   Timer {
     id: tilingDeadline
-    interval: 75000
+    interval: 80000
     repeat: false
     onTriggered: {
       if (tilingWorker.running) tilingWorker.running = false   // its exit settles it
@@ -222,7 +244,8 @@ BarWidget {
   // At most this many windows wait; a window already waiting is not added again. Windows that
   // opened while the queue was full are not lost: once it has drained, the windows open now that
   // were never handed to the helper are queued (again at most this many; more → once more).
-  // Each window is handed over once: one whose helper failed is not retried (no retry loops).
+  // Each window is handed over once: one whose helper ran and failed is not retried (no retry
+  // loops); one whose helper never started is looked for again by a rescan, at most every 30 s.
   readonly property int tilingQueueMax: 32
   readonly property int tilingSeenMax: 4096
   property bool tilingOverflow: false
@@ -309,6 +332,11 @@ BarWidget {
   }
   Process {
     id: tilingWorker
+    // Process.started only means the supervisor runs; the helper itself has started once the
+    // supervisor prints its line (bounded_run.py --report-start; no line = could not start).
+    stdout: SplitParser {
+      onRead: data => { if (data === "bounded_run: started") root.tilingHelperStarted() }
+    }
     onRunningChanged: if (!running) Qt.callLater(root.tilingSettled)
   }
 

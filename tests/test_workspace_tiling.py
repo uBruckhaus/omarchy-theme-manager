@@ -462,6 +462,36 @@ class AppLaunchTests(unittest.TestCase):
                 env=popen.call_args[1]["env"]
             )
 
+    def test_gio_fallback_starts_the_app_in_a_session_of_its_own(self):
+        # Without uwsm-app the app must still not join the bar helper's process group,
+        # which bounded_run ends once the helper is done.
+        app = {"desktop_path": "/usr/share/applications/test.desktop"}
+        installed = [{"desktop_path": "/usr/share/applications/test.desktop", "desktop_id": "test"}]
+        which = lambda name: "/usr/bin/gio" if name == "gio" else None
+        with patch.object(tile.shutil, "which", side_effect=which), \
+                patch.object(tile, "parse_desktop_files", return_value=installed), \
+                patch.object(tile.subprocess, "run",
+                             return_value=tile.subprocess.CompletedProcess([], 0)) as run:
+            self.assertTrue(tile.launch_app(app))
+        run.assert_called_once()
+        self.assertEqual(run.call_args[0][0],
+                         ["/usr/bin/gio", "launch", "/usr/share/applications/test.desktop"])
+        self.assertTrue(run.call_args[1]["start_new_session"])
+        self.assertEqual(run.call_args[1]["timeout"], tile.GIO_LAUNCH_TIMEOUT)
+
+    def test_gio_fallback_reports_a_rejected_launch(self):
+        app = {"desktop_path": "/usr/share/applications/test.desktop"}
+        installed = [{"desktop_path": "/usr/share/applications/test.desktop", "desktop_id": "test"}]
+        which = lambda name: "/usr/bin/gio" if name == "gio" else None
+        for outcome in (tile.subprocess.CompletedProcess([], 1),
+                        tile.subprocess.TimeoutExpired(["gio"], 15)):
+            kwargs = ({"side_effect": outcome} if isinstance(outcome, Exception)
+                      else {"return_value": outcome})
+            with patch.object(tile.shutil, "which", side_effect=which), \
+                    patch.object(tile, "parse_desktop_files", return_value=installed), \
+                    patch.object(tile.subprocess, "run", **kwargs):
+                self.assertFalse(tile.launch_app(app))
+
     def test_launch_app_rejects_raw_exec(self):
         # A raw exec command without desktop_path or argv must never execute
         app = {"exec": "rm -rf /"}
