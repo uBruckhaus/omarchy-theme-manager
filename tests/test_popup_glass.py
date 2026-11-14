@@ -45,20 +45,72 @@ class PopupGlassTests(unittest.TestCase):
         self.assertIn('o.transparent_window("^(org\\\\.omarchy\\\\.aiagentsmap|org\\\\.omarchy\\\\.settingsmanager)$")', lua)
         self.assertNotIn("omarchy-", lua.split("window-glassy.lua")[1].split("end")[0].replace("omarchy-keyboard", ""))
 
-    def test_set_enabled_writes_and_removes(self):
+    def hypr(self, text='require("default.hypr.omarchy")\n'):
         main = popup_glass.lua_file().parent / "hyprland.lua"
         main.parent.mkdir(parents=True, exist_ok=True)
-        main.write_text('require("default.hypr.omarchy")\n')
+        main.write_text(text)
         import theme_shortcuts
-        with mock.patch.object(theme_shortcuts, "HYPR_DIR", main.parent), \
-                mock.patch.object(theme_shortcuts, "config_errors", return_value=""):
+        self.addCleanup(mock.patch.object(theme_shortcuts, "HYPR_DIR", main.parent).stop)
+        mock.patch.object(theme_shortcuts, "HYPR_DIR", main.parent).start()
+        return main
+
+    def test_set_enabled_writes_and_removes(self):
+        main = self.hypr()
+        with mock.patch.object(popup_glass, "_check", return_value=""):
             popup_glass.set_enabled(True)
             self.assertTrue(glass_style.enabled())
             self.assertIn(popup_glass.REQUIRE_LINE, main.read_text())
+            popup_glass.set_enabled(True)                     # twice: still one block
+            self.assertEqual(main.read_text().count(popup_glass.REQUIRE_LINE), 1)
             popup_glass.set_enabled(False)
             self.assertFalse(glass_style.enabled())
             self.assertEqual(main.read_text(), 'require("default.hypr.omarchy")\n')
 
+    def test_foreign_file_and_line_are_left_alone(self):
+        own = 'require("default.hypr.omarchy")\n' + popup_glass.REQUIRE_LINE + "\n"
+        main = self.hypr(own)
+        lua = popup_glass.lua_file()
+        lua.write_text("-- my own rules\n")
+        with mock.patch.object(popup_glass, "_check", return_value=""):
+            for on in (True, False):
+                with self.assertRaises(RuntimeError):
+                    popup_glass.set_enabled(on)
+        self.assertEqual(lua.read_text(), "-- my own rules\n")
+        self.assertEqual(main.read_text(), own)
+
+    def test_failed_write_puts_both_files_back(self):
+        main = self.hypr()
+        before = main.read_text()
+        import theme_shortcuts
+        real = theme_shortcuts._atomic_write
+
+        def flaky(path, text):
+            if path == main:
+                raise OSError("disk full")
+            real(path, text)
+        with mock.patch.object(popup_glass, "_check", return_value=""), \
+                mock.patch.object(theme_shortcuts, "_atomic_write", side_effect=flaky):
+            with self.assertRaises(OSError):
+                popup_glass.set_enabled(True)
+        self.assertFalse(popup_glass.lua_file().exists())
+        self.assertEqual(main.read_text(), before)
+
+    def test_unavailable_check_changes_nothing(self):
+        main = self.hypr()
+        with mock.patch.object(popup_glass, "_check", side_effect=RuntimeError("no hyprctl")):
+            with self.assertRaises(RuntimeError):
+                popup_glass.set_enabled(True)
+        self.assertFalse(popup_glass.lua_file().exists())
+        self.assertNotIn(popup_glass.REQUIRE_LINE, main.read_text())
+
+    def test_new_config_error_rolls_back(self):
+        main = self.hypr()
+        before = main.read_text()
+        with mock.patch.object(popup_glass, "_check", side_effect=["", "line 3: bad", ""]):
+            with self.assertRaises(RuntimeError):
+                popup_glass.set_enabled(True)
+        self.assertFalse(popup_glass.lua_file().exists())
+        self.assertEqual(main.read_text(), before)
 
 if __name__ == "__main__":
     unittest.main()

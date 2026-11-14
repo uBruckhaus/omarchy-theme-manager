@@ -71,59 +71,97 @@ def _shortcuts():
     return theme_shortcuts
 
 
-def _ensure_required() -> None:
-    sc = _shortcuts()
-    main = sc.hypr_main()
-    text = sc._bounded_read(main)
-    if not text:
-        raise RuntimeError(f"cannot read {main}")
-    if REQUIRE_LINE in text:
-        return
-    backup = main.with_name("hyprland.lua.before-theme-manager-glass")
-    if not backup.exists():
-        sc._atomic_write(backup, text)
-    suffix = "" if text.endswith("\n") else "\n"
-    sc._atomic_write(main, text + suffix + "\n" + REQUIRE_MARKER + "\n" + REQUIRE_LINE + "\n")
+HEADER = render_lua().splitlines()[0]
+BLOCK = "\n" + REQUIRE_MARKER + "\n" + REQUIRE_LINE + "\n"
 
 
-def _remove_required() -> None:
-    sc = _shortcuts()
-    main = sc.hypr_main()
-    text = sc._bounded_read(main)
-    if REQUIRE_LINE not in text:
-        return
-    lines = text.splitlines()
-    kept = [line for line in lines if line.strip() not in (REQUIRE_LINE, REQUIRE_MARKER)]
-    while kept and not kept[-1].strip() and len(kept) < len(lines):
-        kept.pop()
-    sc._atomic_write(main, "\n".join(kept) + "\n")
+def _ours(text: str | None) -> bool:
+    """A generated file starts with our header line; anything else is the user's."""
+    return bool(text) and text.splitlines()[0] == HEADER
+
+
+def _with_block(main_text: str) -> str:
+    """hyprland.lua with our marked block at the end (unchanged when it is there)."""
+    if REQUIRE_MARKER + "\n" + REQUIRE_LINE in main_text:
+        return main_text
+    suffix = "" if main_text.endswith("\n") else "\n"
+    return main_text + suffix + BLOCK
+
+
+def _without_block(main_text: str) -> str:
+    """hyprland.lua without our marked block: only the marker line directly
+    followed by the require line goes (with the blank line we put before it).
+    A require line someone wrote without our marker stays."""
+    lines = main_text.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        if lines[i] == REQUIRE_MARKER and i + 1 < len(lines) and lines[i + 1] == REQUIRE_LINE:
+            if out and out[-1] == "":
+                out.pop()
+            i += 2
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def _check() -> str:
+    """Reload Hyprland and return its configuration errors ("" = none).
+    RuntimeError when the check itself cannot run: nothing is changed then."""
+    import theme_core
+    _, ok = theme_core.read_bounded_output(["hyprctl", "reload"], max_bytes=65536, timeout=5.0)
+    out, ok2 = theme_core.read_bounded_output(["hyprctl", "configerrors"], max_bytes=65536, timeout=5.0)
+    if not (ok and ok2):
+        raise RuntimeError("hyprctl could not check the configuration")
+    text = out.decode("utf-8", "replace").strip()
+    return "" if not text or text.lower() in {"no errors", "none"} else text
 
 
 def set_enabled(on: bool) -> None:
-    """Write or remove the file and the require line; reload Hyprland and roll
-    back (RuntimeError) if it reports a new configuration error."""
+    """Write or remove our file and our marked line in hyprland.lua as one
+    change: Hyprland must be checkable before, and any failure or new
+    configuration error afterwards puts both files back exactly as they were
+    (RuntimeError). Files and lines that are not ours are never changed."""
     sc = _shortcuts()
-    lua = lua_file()
+    lua, main = lua_file(), sc.hypr_main()
+    main_text = sc._bounded_read(main)
+    if not main_text:
+        raise RuntimeError(f"cannot read {main}")
     old_lua = sc._bounded_read(lua) if lua.exists() else None
-    had_require = REQUIRE_LINE in sc._bounded_read(sc.hypr_main())
-    before = sc.config_errors()
-    if on:
-        sc._atomic_write(lua, render_lua())
-        _ensure_required()
-    else:
-        _remove_required()
-        lua.unlink(missing_ok=True)
-    errors = sc.config_errors()
-    if errors and errors != before:
+    if old_lua is not None and not _ours(old_lua):
+        raise RuntimeError(f"{lua} exists and was not written by Theme Manager; it is left alone")
+    before = _check()
+    new_main = _with_block(main_text) if on else _without_block(main_text)
+
+    def restore():
+        if sc._bounded_read(main) != main_text:
+            sc._atomic_write(main, main_text)
         if old_lua is None:
-            lua.unlink(missing_ok=True)
-        else:
+            if _ours(sc._bounded_read(lua) if lua.exists() else None):
+                lua.unlink(missing_ok=True)
+        elif (sc._bounded_read(lua) if lua.exists() else None) != old_lua:
             sc._atomic_write(lua, old_lua)
-        if had_require:
-            _ensure_required()
-        else:
-            _remove_required()
-        sc.config_errors()
+
+    try:
+        if on:
+            backup = main.with_name("hyprland.lua.before-theme-manager-glass")
+            if not backup.exists():
+                sc._atomic_write(backup, main_text)
+            sc._atomic_write(lua, render_lua())
+        if new_main != main_text:
+            sc._atomic_write(main, new_main)
+        if not on and old_lua is not None:
+            lua.unlink(missing_ok=True)
+        errors = _check()
+    except BaseException:
+        restore()
+        raise
+    if errors and errors != before:
+        restore()
+        try:
+            _check()
+        except RuntimeError:
+            pass
         raise RuntimeError(errors)
 
 
