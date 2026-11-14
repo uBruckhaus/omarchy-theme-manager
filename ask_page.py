@@ -135,6 +135,12 @@ class AskPageMixin:
         title.add_css_class("tm-section-title")
         header.append(title)
         page.append(header)
+        # Everything under the header scrolls, so the page never forces the window taller than the themes list.
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page_scroller = Gtk.ScrolledWindow(vexpand=True)
+        page_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        page_scroller.set_child(body)
+        page.append(page_scroller)
         # While Ask AI is off: what it does and a button to turn it on.
         off = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         off.add_css_class("tm-group-card")
@@ -146,12 +152,12 @@ class AskPageMixin:
         turn_on.set_halign(Gtk.Align.START)
         turn_on.connect("clicked", lambda *_args: (self.set_ask_ai(True), self.open_ask()))
         off.append(turn_on)
-        page.append(off)
+        body.append(off)
         self.ask_off_box = off
         # Easy AI setup with Maprisma: behind the ? next to the helper while
         # Settings → Maprisma hints is on (the default); off: no ? and no note.
         self.ask_maprisma = self.maprisma_hint()
-        page.append(self.ask_maprisma)
+        body.append(self.ask_maprisma)
         # Helper: [name ▾] … [?], and what it costs on its own small line below
         # (beside the name it squeezed into a narrow column in a small popup).
         helper_row = Gtk.Box(spacing=8)
@@ -166,10 +172,10 @@ class AskPageMixin:
         helper_row.append(Gtk.Box(hexpand=True))
         self.ask_help = self.maprisma_help_button(lambda: self.ask_maprisma)
         helper_row.append(self.ask_help)
-        page.append(helper_row)
+        body.append(helper_row)
         self.ask_cost = Gtk.Label(xalign=0, wrap=True, max_width_chars=1, hexpand=True)
         self.ask_cost.add_css_class("tm-hint")
-        page.append(self.ask_cost)
+        body.append(self.ask_cost)
         prompt_row = Gtk.Box(spacing=6)
         entry = Gtk.Entry(hexpand=True, placeholder_text=_("What do you want? e.g. “blue borders, red text and a dog wallpaper”"))
         entry.set_max_length(theme_ai.MAX_REQUEST)
@@ -198,7 +204,7 @@ class AskPageMixin:
         keep.update_property([Gtk.AccessibleProperty.LABEL], [_("Save as suggestion")])
         keep.connect("clicked", lambda *_args: self.ask_save_prompt())
         prompt_row.append(keep)
-        page.append(prompt_row)
+        body.append(prompt_row)
         # The suggestions: one card, one row each (same layout at every width),
         # two rows tall in a narrow popup and scrolling; ⠿ drags a row to reorder.
         prompts_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -221,7 +227,7 @@ class AskPageMixin:
         self.ask_prompt_drag = None
         self.ask_prompt_refill = False
         self.ask_prompt_rows = []
-        page.append(prompts_card)
+        body.append(prompts_card)
         self.ask_fill_prompts()
         status_row = Gtk.Box(spacing=8)
         self.ask_spinner = Gtk.Spinner()
@@ -241,9 +247,10 @@ class AskPageMixin:
         status_row.append(self.ask_clear)
         # Any status text (a summary, an error, "Nothing visible changed") can be cleared too.
         self.ask_status.connect("notify::label", lambda *_args: self.ask_update_clear())
-        page.append(status_row)
+        body.append(status_row)
         scroller = Gtk.ScrolledWindow(vexpand=True)
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_min_content_height(160)       # inside the page scroller it would collapse to nothing
         results = Gtk.FlowBox()
         results.set_selection_mode(Gtk.SelectionMode.NONE)
         results.set_homogeneous(True)
@@ -251,12 +258,13 @@ class AskPageMixin:
         results.set_row_spacing(12)
         results.set_valign(Gtk.Align.START)
         scroller.set_child(results)
-        page.append(scroller)
+        body.append(scroller)
         self.ask_results = results
         self.ask_candidates = []
         self.ask_rejected = []
         self.ask_busy = False
         self.ask_generation = 0
+        self.ask_page_scroller = page_scroller
         return page
 
     # --- suggestions ----------------------------------------------------------------------
