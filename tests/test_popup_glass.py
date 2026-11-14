@@ -43,7 +43,7 @@ class PopupGlassTests(unittest.TestCase):
         lua = popup_glass.render_lua()
         self.assertIn('namespace = "^(theme-manager|simple-launcher-for-fools|app-manager-dock|bar-organizer)$"', lua)
         self.assertIn('o.transparent_window("^(org\\\\.omarchy\\\\.aiagentsmap|org\\\\.omarchy\\\\.settingsmanager)$")', lua)
-        self.assertNotIn("omarchy-", lua.split("window-glassy.lua")[1].split("end")[0].replace("omarchy-keyboard", ""))
+        self.assertNotIn('"^(omarchy', lua)          # never one of Omarchy's own surfaces
 
     def hypr(self, text='require("default.hypr.omarchy")\n'):
         main = popup_glass.lua_file().parent / "hyprland.lua"
@@ -103,10 +103,32 @@ class PopupGlassTests(unittest.TestCase):
         self.assertFalse(popup_glass.lua_file().exists())
         self.assertNotIn(popup_glass.REQUIRE_LINE, main.read_text())
 
+    def test_lua_opens_no_file(self):
+        self.assertNotIn("io.open", popup_glass.render_lua())
+
+    def test_hyprland_lua_changed_meanwhile_is_left_alone(self):
+        main = self.hypr()
+        import theme_shortcuts
+        real = theme_shortcuts._bounded_read
+        reads = []
+
+        def other_writer(path):
+            if path == main:
+                reads.append(1)
+                if len(reads) == 2:
+                    main.write_text("-- edited by hand\n")
+            return real(path)
+        with mock.patch.object(popup_glass, "_check", return_value=""), \
+                mock.patch.object(theme_shortcuts, "_bounded_read", side_effect=other_writer):
+            with self.assertRaises(RuntimeError):
+                popup_glass.set_enabled(True)
+        self.assertEqual(main.read_text(), "-- edited by hand\n")
+        self.assertFalse(popup_glass.lua_file().exists())
+
     def test_new_config_error_rolls_back(self):
         main = self.hypr()
         before = main.read_text()
-        with mock.patch.object(popup_glass, "_check", side_effect=["", "line 3: bad", ""]):
+        with mock.patch.object(popup_glass, "_check", side_effect=["", "line 3: bad", "", ""]):
             with self.assertRaises(RuntimeError):
                 popup_glass.set_enabled(True)
         self.assertFalse(popup_glass.lua_file().exists())

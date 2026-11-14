@@ -435,9 +435,19 @@ def config_errors() -> str:
     return "" if not text or text.lower() in {"no errors", "none"} else text
 
 
+def hypr_lock():
+    """One lock for Theme Manager's writers of hyprland.lua (shortcuts, popup style)."""
+    return theme_core.file_lock(theme_core.settings_file().parent / "hyprland-lua.lock")
+
+
 def save_and_apply(state: dict) -> None:
     """Write the shortcuts, reload Hyprland, and roll back if it reports a
     new configuration error (raised as RuntimeError)."""
+    with hypr_lock():
+        _save_and_apply_locked(state)
+
+
+def _save_and_apply_locked(state: dict) -> None:
     lua, store = lua_file(), state_file()
     old_lua = _bounded_read(lua) if lua.exists() else None
     old_state = _bounded_read(store) if store.exists() else None

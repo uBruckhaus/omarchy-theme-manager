@@ -47,22 +47,17 @@ def render_lua() -> str:
     return f"""-- Managed by Theme Manager (ubruckhaus.theme-manager): our plugins' popups follow
 -- the window style. Switch it off in Theme Manager → Settings; edits here are overwritten.
 
--- Our app windows take part in Omarchy's window transparency (opaque/transparent/glassy).
+-- Our app windows take part in Omarchy's window transparency (opaque/transparent/glassy):
+-- Omarchy's opaque and glassy toggles act on this tag.
 o.transparent_window("{classes}")
 
-local state = os.getenv("XDG_STATE_HOME") or ((os.getenv("HOME") or "") .. "/.local/state")
-local glassy = io.open(state .. "/omarchy/toggles/hypr/window-glassy.lua", "r")
-if glassy then
-  glassy:close()
-  -- Glassy: blur behind our GTK popups' see-through cards, as Omarchy does for its own surfaces.
-  hl.layer_rule({{
-    match = {{ namespace = "{namespaces}" }},
-    blur = true,
-    ignore_alpha = 0.3,
-  }})
-  -- GTK draws app backgrounds solid, so they fade as a whole (like Omarchy's Nautilus rule).
-  o.window("{classes}", {{ opacity = "0.75 0.75" }})
-end
+-- Blur behind our own layer popups' see-through cards. Hyprland blurs only while its
+-- blur is on (Omarchy's Glassy) and only where a card is see-through (ignore_alpha).
+hl.layer_rule({{
+  match = {{ namespace = "{namespaces}" }},
+  blur = true,
+  ignore_alpha = 0.3,
+}})
 """
 
 
@@ -123,7 +118,13 @@ def set_enabled(on: bool) -> None:
     configuration error afterwards puts both files back exactly as they were
     (RuntimeError). Files and lines that are not ours are never changed."""
     sc = _shortcuts()
-    lua, main = lua_file(), sc.hypr_main()
+    with sc.hypr_lock():
+        _set_enabled_locked(sc, on)
+
+
+def _set_enabled_locked(sc, on: bool) -> None:
+    lua = lua_file()
+    main = lua.parent / "hyprland.lua"          # the same Hyprland config folder as our file
     main_text = sc._bounded_read(main)
     if not main_text:
         raise RuntimeError(f"cannot read {main}")
@@ -134,7 +135,7 @@ def set_enabled(on: bool) -> None:
     new_main = _with_block(main_text) if on else _without_block(main_text)
 
     def restore():
-        if sc._bounded_read(main) != main_text:
+        if sc._bounded_read(main) == new_main != main_text:     # only our own change goes back
             sc._atomic_write(main, main_text)
         if old_lua is None:
             if _ours(sc._bounded_read(lua) if lua.exists() else None):
@@ -149,12 +150,18 @@ def set_enabled(on: bool) -> None:
                 sc._atomic_write(backup, main_text)
             sc._atomic_write(lua, render_lua())
         if new_main != main_text:
+            if sc._bounded_read(main) != main_text:
+                raise RuntimeError(f"{main} changed meanwhile; nothing was changed")
             sc._atomic_write(main, new_main)
         if not on and old_lua is not None:
             lua.unlink(missing_ok=True)
         errors = _check()
     except BaseException:
         restore()
+        try:
+            _check()             # Hyprland loads the restored files again
+        except RuntimeError:
+            pass
         raise
     if errors and errors != before:
         restore()
