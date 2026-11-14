@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.theme-manager",
   "name": "Theme Manager",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Every Omarchy theme in one place: apply, favorite, hide or delete with undo, and give any theme its own key. New: Ask AI for a theme in a few words with your coding agent or a local model, and see each suggestion as it would look. Make themes from any theme or wallpaper, manage and search wallpapers, give each workspace its own theme, wallpaper and window layout. Day and night themes, backups, themes from omarchy.org.",
