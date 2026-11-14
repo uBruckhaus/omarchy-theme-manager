@@ -58,6 +58,7 @@ import theme_catalog
 import theme_core
 import theme_custom
 import theme_looks
+import popup_glass
 import theme_shortcuts as shortcuts
 from layer_watch import LayerWatch
 import wallpaper_search
@@ -2791,6 +2792,11 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                           _("Hidden themes and wallpapers also leave Menu → Style. Adds one marked line to "
                           "omarchy-menu.jsonc and a theme-set hook; off removes them again."),
                           self.switch(theme_core.sync_enabled(), self.set_omarchy_sync))
+        self.setting_line(box, _("Plugin popups follow window style"),
+                          _("Popups of Theme Manager and the other ubruckhaus plugins become see-through "
+                          "with Transparent and blurred with Glassy windows (Font & effects). Writes "
+                          "theme-manager-glass.lua and one marked line in hyprland.lua; off removes them."),
+                          self.switch(popup_glass.enabled(), self.set_popup_glass))
 
         plan = theme_auto.schedule()
         box = self.settings_section("day-night", _("Day and night"))
@@ -3403,6 +3409,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
             text = _("Font & effects saved and applied") if apply else _("Font & effects saved for {0}").format(name)
             theme_core.notify(text, name)
             self.close_look_page()
+            self.follow_glass()
             self.offer_undo(text, [LookUndo(self, slug, previous, apply)])
         self._async(work, done)
 
@@ -3425,7 +3432,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
 
         def done(keys, error):
             self.look_pending = {slug: keys} if error is None and keys else {}
+            self.follow_glass()
         self._async(lambda: theme_looks.pending(slug), done)
+
+    def follow_glass(self):
+        """A new window style: the card's see-through level follows it."""
+        if popup_glass.popup_alpha() != getattr(self, "glass_alpha", None):
+            self.apply_theme_css()
 
     def reapply_look(self, theme: theme_core.ThemeInfo):
         def done(_applied, error):
@@ -4599,9 +4612,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         else:
             sel_fg = fg_hex
 
+        # Settings → "Plugin popups follow window style": see-through card (blurred while glassy).
+        glass = popup_glass.popup_alpha()
+        card_bg = bg_hex if glass >= 1 else f"alpha({bg_hex}, {glass})"
+        self.glass_alpha = glass
         css = f"""
         window#thememanager-window {{ background: transparent; }}
-        .tm-card {{ background: {bg_hex}; color: {fg_hex};
+        .tm-card {{ background: {card_bg}; color: {fg_hex};
             border: 1px solid {accent_hex}; border-radius: {radius}px; padding: 17px; }}
         .tm-title {{ font-size: 15px; font-weight: 600; }}
         .tm-confirm {{ font-size: 18px; font-weight: 600; }}
@@ -5017,6 +5034,13 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
                 theme_core.notify((_("{0} is the day theme") if key == "day" else _("{0} is the night theme")).format(
                     theme_core.plain_text(theme.name)), _("From {0}.").format(plan[key + '_at']))
         self.save_schedule(then=told, **{key: theme.slug})
+
+    def set_popup_glass(self, on: bool):
+        def done(_r, error):
+            if error:
+                theme_core.notify(_("Could not change the popup style"), str(error))
+            self.apply_theme_css()
+        self._async(lambda: popup_glass.set_enabled(on), done)
 
     def set_omarchy_sync(self, on: bool):
         def apply():
@@ -8208,6 +8232,7 @@ class ThemeManager(WorkspacesPageMixin, AskPageMixin, Gtk.Application):
         # Omarchy may have rebuilt its picker cache (e.g. a theme was installed).
         if theme_core.sync_enabled():
             theme_core.prune_switcher_previews(self.hidden)
+        self.follow_glass()             # the window style may have changed while the popup slept
         self.refresh_themes()
         self.refresh_look_pending()
         self.grab_keyboard()

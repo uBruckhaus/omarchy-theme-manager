@@ -443,6 +443,9 @@ BarWidget {
     }
   }
 
+  // See-through with the window style when switched on in Settings.
+  PopupGlass { inside: menuColumn; active: root.menuOpen }
+
   PopupCard {
     id: menu
     anchorItem: root
